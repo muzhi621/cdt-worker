@@ -393,6 +393,13 @@ async function clearLogsHandler(ctx: Context): Promise<Response> {
 // 测试通知：向所有已启用通道发送一条测试消息
 async function notifyTestHandler(ctx: Context): Promise<Response> {
   const config = await store.getConfig(ctx.env);
+  let channel = '';
+  try {
+    const body = await ctx.request.json().catch(() => null);
+    channel = String((body as Record<string, unknown>)?.channel ?? '').trim();
+  } catch { /* 无 body 则测全部 */ }
+  const validChannels = ['telegram', 'webhook', 'serverchan', 'pushplus', 'smtp'];
+  if (channel && validChannels.indexOf(channel) < 0) return error('invalid_channel', '未知的通知通道', 400);
   const event = {
     id: newToken(18),
     type: 'test',
@@ -402,7 +409,8 @@ async function notifyTestHandler(ctx: Context): Promise<Response> {
     fields: { '发送时间': new Date().toLocaleString('zh-CN', { timeZone: config.timezone || 'Asia/Shanghai' }) },
     createdAt: new Date().toISOString(),
   };
-  const results = await deliverEvent(config.notifications as never, event as never);
+  const results = await deliverEvent(config.notifications as never, event as never, channel);
+  if (channel && results.length === 0) return error('channel_not_enabled', '该通道未启用或未完整配置，请先保存', 400);
   if (results.length === 0) return error('no_channel', '尚未启用任何通知通道，请先开启并保存', 400);
   return json({ results });
 }

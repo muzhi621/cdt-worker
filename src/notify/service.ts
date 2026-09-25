@@ -138,11 +138,12 @@ export interface ChannelResult {
   error?: string;
 }
 
-// 把事件发往所有已配置且启用的通道，返回各通道结果（不抛错）
-export async function deliverEvent(config: NotifyConfig, event: NotificationEvent): Promise<ChannelResult[]> {
+// 把事件发往所有已配置且启用的通道（only 指定时只发该通道），返回各通道结果（不抛错）
+export async function deliverEvent(config: NotifyConfig, event: NotificationEvent, only?: string): Promise<ChannelResult[]> {
   const channels = activeChannels(config);
   const results: ChannelResult[] = [];
   for (const channel of channels) {
+    if (only && channel !== only) continue;
     try {
       if (channel === 'telegram') await sendTelegram(config.telegram, event);
       else if (channel === 'webhook') await sendWebhook(config.webhook, event);

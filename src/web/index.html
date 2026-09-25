@@ -1129,7 +1129,10 @@
           <div class="nt-block">
             <div class="nt-head">
               <div class="section-title">Telegram</div>
-              <label class="nt-toggle" for="nt-tg-enabled"><input type="checkbox" id="nt-tg-enabled" /> 启用</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <label class="nt-toggle" for="nt-tg-enabled"><input type="checkbox" id="nt-tg-enabled" /> 启用</label>
+                <button class="btn btn-ghost btn-sm" type="button" data-test="telegram">测试</button>
+              </div>
             </div>
             <div class="form-grid">
               <div class="field">
@@ -1146,7 +1149,10 @@
           <div class="nt-block">
             <div class="nt-head">
               <div class="section-title">通用 Webhook（钉钉 / 飞书 / 企业微信 / 自定义）</div>
-              <label class="nt-toggle" for="nt-wh-enabled"><input type="checkbox" id="nt-wh-enabled" /> 启用</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <label class="nt-toggle" for="nt-wh-enabled"><input type="checkbox" id="nt-wh-enabled" /> 启用</label>
+                <button class="btn btn-ghost btn-sm" type="button" data-test="webhook">测试</button>
+              </div>
             </div>
             <div class="form-grid">
               <div class="field full">
@@ -1160,7 +1166,10 @@
           <div class="nt-block">
             <div class="nt-head">
               <div class="section-title">Server酱（推送到微信）</div>
-              <label class="nt-toggle" for="nt-sc-enabled"><input type="checkbox" id="nt-sc-enabled" /> 启用</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <label class="nt-toggle" for="nt-sc-enabled"><input type="checkbox" id="nt-sc-enabled" /> 启用</label>
+                <button class="btn btn-ghost btn-sm" type="button" data-test="serverchan">测试</button>
+              </div>
             </div>
             <div class="form-grid">
               <div class="field">
@@ -1173,7 +1182,10 @@
           <div class="nt-block">
             <div class="nt-head">
               <div class="section-title">PushPlus（推送到微信）</div>
-              <label class="nt-toggle" for="nt-pp-enabled"><input type="checkbox" id="nt-pp-enabled" /> 启用</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <label class="nt-toggle" for="nt-pp-enabled"><input type="checkbox" id="nt-pp-enabled" /> 启用</label>
+                <button class="btn btn-ghost btn-sm" type="button" data-test="pushplus">测试</button>
+              </div>
             </div>
             <div class="form-grid">
               <div class="field">
@@ -1186,7 +1198,10 @@
           <div class="nt-block">
             <div class="nt-head">
               <div class="section-title">邮件（SMTP，465 端口隐式 TLS）</div>
-              <label class="nt-toggle" for="nt-smtp-enabled"><input type="checkbox" id="nt-smtp-enabled" /> 启用</label>
+              <div style="display:flex;gap:8px;align-items:center">
+                <label class="nt-toggle" for="nt-smtp-enabled"><input type="checkbox" id="nt-smtp-enabled" /> 启用</label>
+                <button class="btn btn-ghost btn-sm" type="button" data-test="smtp">测试</button>
+              </div>
             </div>
             <div class="form-grid">
               <div class="field">
@@ -1223,7 +1238,6 @@
 
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">
             <button class="btn btn-primary" type="button" id="save-notify" style="width:auto">保存通知配置</button>
-            <button class="btn btn-ghost" type="button" id="test-notify" style="width:auto">发送测试通知</button>
           </div>
         </form>
       </div>
@@ -1936,21 +1950,31 @@
         if (r.ok) loadConfig();
       });
 
-      $("test-notify").addEventListener("click", async () => {
-        const btn = $("test-notify");
-        btn.disabled = true; btn.textContent = "发送中…";
-        const r = await apiJson("/api/v1/notify/test", { method: "POST" });
-        btn.disabled = false; btn.textContent = "发送测试通知";
-        if (!r.ok) { toast(errText(r.data), "err"); return; }
-        const results = r.data.results || [];
-        if (!results.length) { toast("尚未启用任何通道", "err"); return; }
-        const okCount = results.filter((x) => x.ok).length;
-        const fails = results.filter((x) => !x.ok).map((x) => x.channel + ": " + (x.error || "失败")).join("；");
-        toast(okCount === results.length
-          ? "测试通知已发送（" + results.map((x) => x.channel).join("、") + "）"
-          : "部分成功 " + okCount + "/" + results.length + "：" + fails.slice(0, 120),
-          okCount === results.length ? "ok" : "err");
-        if (okCount !== results.length) loadLogs();
+      // 各通知通道独立测试（先保存当前配置再单独测某一通道）
+      const NT_CHANNEL_LABEL = {
+        telegram: "Telegram", webhook: "Webhook", serverchan: "Server酱", pushplus: "PushPlus", smtp: "邮件",
+      };
+      document.querySelectorAll("[data-test]").forEach((btn) => {
+        btn.addEventListener("click", async function () {
+          const channel = this.dataset.test;
+          // 先用当前表单内容保存，确保测试的是最新配置
+          const saveRes = await apiJson("/api/v1/config", { method: "PUT", body: JSON.stringify({ notifications: collectNotifyForm() }) });
+          if (!saveRes.ok) { toast("先保存配置：" + errText(saveRes.data), "err"); return; }
+          this.disabled = true;
+          const original = this.textContent;
+          this.textContent = "测试中…";
+          const r = await apiJson("/api/v1/notify/test", { method: "POST", body: JSON.stringify({ channel }) });
+          this.disabled = false;
+          this.textContent = original;
+          if (!r.ok) { toast(errText(r.data), "err"); return; }
+          const res = r.data.results && r.data.results[0];
+          if (res && res.ok) {
+            toast((NT_CHANNEL_LABEL[channel] || channel) + " 测试通知已发送", "ok");
+          } else {
+            toast((NT_CHANNEL_LABEL[channel] || channel) + " 发送失败：" + (res ? res.error : "未知错误").slice(0, 120), "err");
+            loadLogs();
+          }
+        });
       });
 
       // 停机模式说明（依据阿里云官方文档：StopInstance API / 节省停机模式）
