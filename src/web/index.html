@@ -385,7 +385,11 @@
       font-size: 12px; color: var(--muted);
     }
 
-    .empty { text-align: center; padding: 46px 20px; color: var(--muted); }
+    .empty {
+      min-height: 240px; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; text-align: center;
+      padding: 32px 20px; color: var(--muted);
+    }
     .empty svg { color: var(--border-strong); margin-bottom: 12px; }
     .empty h3 { font-size: 16px; color: var(--text); margin-bottom: 6px; }
     .empty p { font-size: 13.5px; max-width: 42ch; margin: 0 auto 16px; }
@@ -724,12 +728,30 @@
             </div>
             <div class="field" data-page-node-id="4NCAMtJmvKoh9xtOTSlBSA">
               <label for="ak-region" data-page-node-id="tGKm9fQHnEytg8ctEJAz8B">地域 ID</label>
-              <input id="ak-region" class="control" placeholder="cn-hongkong" list="region-list" autocomplete="off" data-page-node-id="x08y80fE87fbjMdYOlYwpG" />
+              <input id="ak-region" class="control" placeholder="cn-hongkong（中国香港）" list="region-list" autocomplete="off" data-page-node-id="x08y80fE87fbjMdYOlYwpG" />
               <datalist id="region-list" data-page-node-id="Tyoq7DgnpC4sjLDkS3EVQV">
-                <option value="cn-hangzhou" data-page-node-id="9JNAiEmaJza2JoivEAyQWk"></option><option value="cn-shanghai" data-page-node-id="CZrshsaHMC4FWzhMxDdqTj"></option>
-                <option value="cn-beijing" data-page-node-id="dXIB399R8LWs2O7FHGa4lq"></option><option value="cn-shenzhen" data-page-node-id="0zWDC6w6UStk1C49aGfGc8"></option>
-                <option value="cn-hongkong" data-page-node-id="Th1ADwFfPQmDXByJ39bv6l"></option><option value="ap-southeast-1" data-page-node-id="yMRtoyHsSInTrgje5bf7fO"></option>
-                <option value="us-west-1" data-page-node-id="OAIhfJfjoIu1JFrkoVeffL"></option><option value="eu-central-1" data-page-node-id="SLqAgbsHomyLe0hpmvnNPp"></option>
+                <option value="cn-hangzhou">华东1（杭州）</option>
+                <option value="cn-shanghai">华东2（上海）</option>
+                <option value="cn-beijing">华北2（北京）</option>
+                <option value="cn-shenzhen">华南1（深圳）</option>
+                <option value="cn-qingdao">华北1（青岛）</option>
+                <option value="cn-zhangjiakou">华北3（张家口）</option>
+                <option value="cn-huhehaote">华北5（呼和浩特）</option>
+                <option value="cn-wulanchabu">华北6（乌兰察布）</option>
+                <option value="cn-chengdu">西南1（成都）</option>
+                <option value="cn-hongkong">中国香港</option>
+                <option value="ap-southeast-1">新加坡</option>
+                <option value="ap-southeast-2">澳大利亚（悉尼）</option>
+                <option value="ap-southeast-3">马来西亚（吉隆坡）</option>
+                <option value="ap-southeast-5">印度尼西亚（雅加达）</option>
+                <option value="ap-northeast-1">日本（东京）</option>
+                <option value="ap-northeast-2">韩国（首尔）</option>
+                <option value="ap-south-1">印度（孟买）</option>
+                <option value="us-west-1">美国（硅谷）</option>
+                <option value="us-east-1">美国（弗吉尼亚）</option>
+                <option value="eu-west-1">英国（伦敦）</option>
+                <option value="eu-central-1">德国（法兰克福）</option>
+                <option value="me-east-1">阿联酋（迪拜）</option>
               </datalist>
               <p class="field-error hidden" id="err-ak-region" data-page-node-id="JpDU1O7i4hzOrv6DwsJ0hO"></p>
             </div>
