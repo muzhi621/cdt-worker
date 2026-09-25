@@ -714,28 +714,28 @@
               <label for="ak-region" data-page-node-id="tGKm9fQHnEytg8ctEJAz8B">地域 ID</label>
               <input id="ak-region" class="control" placeholder="cn-hongkong（中国香港）" list="region-list" autocomplete="off" data-page-node-id="x08y80fE87fbjMdYOlYwpG" />
               <datalist id="region-list" data-page-node-id="Tyoq7DgnpC4sjLDkS3EVQV">
-                <option value="cn-hangzhou">华东1（杭州）</option>
-                <option value="cn-shanghai">华东2（上海）</option>
-                <option value="cn-beijing">华北2（北京）</option>
-                <option value="cn-shenzhen">华南1（深圳）</option>
-                <option value="cn-qingdao">华北1（青岛）</option>
-                <option value="cn-zhangjiakou">华北3（张家口）</option>
-                <option value="cn-huhehaote">华北5（呼和浩特）</option>
-                <option value="cn-wulanchabu">华北6（乌兰察布）</option>
-                <option value="cn-chengdu">西南1（成都）</option>
-                <option value="cn-hongkong">中国香港</option>
-                <option value="ap-southeast-1">新加坡</option>
-                <option value="ap-southeast-2">澳大利亚（悉尼）</option>
-                <option value="ap-southeast-3">马来西亚（吉隆坡）</option>
-                <option value="ap-southeast-5">印度尼西亚（雅加达）</option>
-                <option value="ap-northeast-1">日本（东京）</option>
-                <option value="ap-northeast-2">韩国（首尔）</option>
-                <option value="ap-south-1">印度（孟买）</option>
-                <option value="us-west-1">美国（硅谷）</option>
-                <option value="us-east-1">美国（弗吉尼亚）</option>
-                <option value="eu-west-1">英国（伦敦）</option>
-                <option value="eu-central-1">德国（法兰克福）</option>
-                <option value="me-east-1">阿联酋（迪拜）</option>
+                <option value="cn-hangzhou" data-site="china">华东1（杭州）</option>
+                <option value="cn-shanghai" data-site="china">华东2（上海）</option>
+                <option value="cn-beijing" data-site="china">华北2（北京）</option>
+                <option value="cn-shenzhen" data-site="china">华南1（深圳）</option>
+                <option value="cn-qingdao" data-site="china">华北1（青岛）</option>
+                <option value="cn-zhangjiakou" data-site="china">华北3（张家口）</option>
+                <option value="cn-huhehaote" data-site="china">华北5（呼和浩特）</option>
+                <option value="cn-wulanchabu" data-site="china">华北6（乌兰察布）</option>
+                <option value="cn-chengdu" data-site="china">西南1（成都）</option>
+                <option value="cn-hongkong" data-site="both">中国香港（两站通用）</option>
+                <option value="ap-southeast-1" data-site="international">新加坡</option>
+                <option value="ap-southeast-2" data-site="international">澳大利亚（悉尼）</option>
+                <option value="ap-southeast-3" data-site="international">马来西亚（吉隆坡）</option>
+                <option value="ap-southeast-5" data-site="international">印度尼西亚（雅加达）</option>
+                <option value="ap-northeast-1" data-site="international">日本（东京）</option>
+                <option value="ap-northeast-2" data-site="international">韩国（首尔）</option>
+                <option value="ap-south-1" data-site="international">印度（孟买）</option>
+                <option value="us-west-1" data-site="international">美国（硅谷）</option>
+                <option value="us-east-1" data-site="international">美国（弗吉尼亚）</option>
+                <option value="eu-west-1" data-site="international">英国（伦敦）</option>
+                <option value="eu-central-1" data-site="international">德国（法兰克福）</option>
+                <option value="me-east-1" data-site="international">阿联酋（迪拜）</option>
               </datalist>
               <p class="field-error hidden" id="err-ak-region" data-page-node-id="JpDU1O7i4hzOrv6DwsJ0hO"></p>
             </div>
@@ -1480,6 +1480,26 @@
       $("status-refresh").addEventListener("click", loadStatus);
 
       /* ---------- 账号页 ---------- */
+      // 地域列表随站点类型联动：中国站显示中国内地地域，国际站显示海外地域，中国香港两站通用
+      function paintRegionList(site) {
+        document.querySelectorAll("#region-list option").forEach((o) => {
+          const s = o.dataset.site;
+          o.hidden = !(s === "both" || s === site);
+        });
+        // 已填地域不属于当前站点时清空，避免静默保存错误的站点/地域组合
+        const input = $("ak-region");
+        const current = input.value.trim();
+        if (current) {
+          const opt = document.querySelector('#region-list option[value="' + current.replace(/"/g, '\\"') + '"]');
+          if (opt && opt.hidden) input.value = "";
+        }
+      }
+      paintRegionList("china"); // 初始为中国站
+      $("ak-site").addEventListener("change", function () { paintRegionList(this.value); });
+      $("account-form").addEventListener("reset", function () {
+        setTimeout(() => paintRegionList($("ak-site").value), 0);
+      });
+
       $("account-form").addEventListener("submit", async function (e) {
         e.preventDefault();
         const account = {
