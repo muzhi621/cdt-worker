@@ -253,8 +253,12 @@ export async function billingCache<T>(
     'SELECT value, updated_at FROM billing_cache WHERE account_id = ? AND kind = ? AND cycle = ?',
   ).bind(accountId, kind, cycle).first();
   if (!row) return { hit: false };
-  const updatedAt = new Date(String(row.updated_at));
-  if (Date.now() - updatedAt.getTime() > ttlHours * 3600 * 1000) return { hit: false };
+  // D1 的 datetime('now') 返回 UTC 无时区字符串（YYYY-MM-DD HH:MM:SS），需按 UTC 解析，
+  // 否则 JS 会当本地时间解析导致 TTL 偏移（东八区会差 8 小时）
+  const raw = String((row as Record<string, unknown>).updated_at ?? '');
+  const utcMs = Date.parse(raw.replace(' ', 'T') + 'Z');
+  const updatedMs = isNaN(utcMs) ? Date.parse(raw) : utcMs;
+  if (Date.now() - updatedMs > ttlHours * 3600 * 1000) return { hit: false };
   try {
     return { hit: true, value: JSON.parse(String(row.value)) as T };
   } catch {

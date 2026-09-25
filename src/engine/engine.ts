@@ -19,6 +19,42 @@ function masked(accessKeyId: string): string {
   return accessKeyId.length <= 7 ? accessKeyId + '***' : accessKeyId.slice(0, 7) + '***';
 }
 
+// 把 Date 转换到配置时区，返回一个"墙钟数值等于目标时区本地时间"的 Date。
+// Worker 运行时是 UTC，原项目用 time.LoadLocation(config.Timezone) 计算本地时间；
+// 供 dueWithin（定时开关机）使用。整点/保活时段/账单月份用 zoneFields 直接取字段。
+function toZone(date: Date, timezone: string): Date {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone || 'Asia/Shanghai',
+      hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(date);
+    const g: Record<string, number> = {};
+    for (const p of parts) if (p.type !== 'literal') g[p.type] = parseInt(p.value, 10);
+    const asUTC = Date.UTC(g.year, (g.month || 1) - 1, g.day, g.hour, g.minute, g.second);
+    return new Date(asUTC);
+  } catch {
+    return date; // 时区非法时回退到 UTC（与原项目 FixedZone CST 回退语义等价，均保证不崩溃）
+  }
+}
+
+// 以目标时区的“墙钟字符串”形式获取当前时间字段（YYYY-MM-DD HH:mm:ss）
+function zoneFields(date: Date, timezone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone || 'Asia/Shanghai', hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(date);
+    const g: Record<string, number> = {};
+    for (const p of parts) if (p.type !== 'literal') g[p.type] = parseInt(p.value, 10);
+    return { year: g.year, month: g.month || 1, day: g.day, hour: g.hour || 0, minute: g.minute || 0, second: g.second || 0 };
+  } catch {
+    return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate(), hour: date.getUTCHours(), minute: date.getUTCMinutes(), second: date.getUTCSeconds() };
+  }
+}
+
 function usagePercent(traffic: number, maxTraffic: number): number {
   if (maxTraffic <= 0) return 0;
   return Math.round((traffic / maxTraffic) * 10000) / 100;
@@ -66,10 +102,13 @@ export async function processAccount(env: Env, account: Account, force = false):
   const actions: string[] = [];
   let statusChangedBySchedule = false;
   const now = new Date();
+  // 配置时区的“墙钟”时间（对齐原项目 time.Now().In(config.Timezone)）
+  const local = toZone(now, config.timezone);
+  const localFields = zoneFields(now, config.timezone);
 
   // 定时开关机
   if (account.scheduleEnabled) {
-    if (dueWithin(now, account.startTime, 10 * 60 * 1000)) {
+    if (dueWithin(local, account.startTime, 10 * 60 * 1000)) {
       const changed = await executeScheduledAction(env, config, account, 'start', now);
       if (changed) {
         actions.push('scheduled_start');
@@ -77,7 +116,7 @@ export async function processAccount(env: Env, account: Account, force = false):
         statusChangedBySchedule = true;
       }
     }
-    if (dueWithin(now, account.stopTime, 10 * 60 * 1000)) {
+    if (dueWithin(local, account.stopTime, 10 * 60 * 1000)) {
       const changed = await executeScheduledAction(env, config, account, 'stop', now);
       if (changed) {
         actions.push('scheduled_stop');
@@ -91,7 +130,7 @@ export async function processAccount(env: Env, account: Account, force = false):
   let interval = config.apiInterval * 1000;
   if (transient(account.instanceStatus)) interval = 60 * 1000;
   const updatedAt = account.updatedAt ? new Date(account.updatedAt).getTime() : 0;
-  const due = force || updatedAt === 0 || Date.now() - updatedAt >= interval || now.getMinutes() === 0 || statusChangedBySchedule;
+  const due = force || updatedAt === 0 || Date.now() - updatedAt >= interval || localFields.minute === 0 || statusChangedBySchedule;
 
   let traffic = account.trafficUsed;
   let status = account.instanceStatus;
@@ -154,9 +193,10 @@ export async function processAccount(env: Env, account: Account, force = false):
   }
 
   // 保活
+  const hhmm = `${String(localFields.hour).padStart(2, '0')}:${String(localFields.minute).padStart(2, '0')}`;
   if (config.keepAlive && !overThreshold && !statusChangedBySchedule && status === StatusStopped &&
-      (!account.scheduleEnabled || inTimeRange(now.toTimeString().slice(0, 5), account.startTime, account.stopTime))) {
-    const key = `keepalive:${account.id}:${now.toISOString().slice(0, 16)}`;
+      (!account.scheduleEnabled || inTimeRange(hhmm, account.startTime, account.stopTime))) {
+    const key = `keepalive:${account.id}:${localFields.year}${String(localFields.month).padStart(2, '0')}${String(localFields.day).padStart(2, '0')}${String(localFields.hour).padStart(2, '0')}${String(localFields.minute).padStart(2, '0')}`;
     const fresh = await store.recordActionEvent(env, key, account.id, 'keepalive', 'attempting', '');
     if (fresh) {
       try {
@@ -181,7 +221,7 @@ export async function processAccount(env: Env, account: Account, force = false):
   // 账单
   if (config.enableBilling) {
     const balanceCache = await store.billingCache(env, account.id, 'balance', '', 6);
-    if (force || now.getHours() % 6 === 0 || !balanceCache.hit) {
+    if (force || localFields.hour % 6 === 0 || !balanceCache.hit) {
       try {
         const balance = await aliyun.getAccountBalance(account, account.accessKeySecret);
         await store.setBillingCache(env, account.id, 'balance', '', balance);
@@ -204,7 +244,11 @@ async function executeScheduledAction(
   action: 'start' | 'stop',
   now: Date,
 ): Promise<boolean> {
-  const key = `schedule:${account.id}:${now.toISOString().slice(0, 10)}:${action}`;
+  // key 对齐原项目 scheduleActionKey：schedule:{id}:{YYYYMMDD}:{action}:{HH:mm}
+  const f = zoneFields(now, config.timezone);
+  const dateStr = `${f.year}${String(f.month).padStart(2, '0')}${String(f.day).padStart(2, '0')}`;
+  const timeStr = `${String(f.hour).padStart(2, '0')}:${String(f.minute).padStart(2, '0')}`;
+  const key = `schedule:${account.id}:${dateStr}:${action}:${timeStr}`;
   const fresh = await store.recordActionEvent(env, key, account.id, 'schedule_' + action, 'attempting', '');
   if (!fresh) return false;
   try {
