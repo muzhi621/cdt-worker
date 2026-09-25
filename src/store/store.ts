@@ -185,6 +185,27 @@ export async function deleteAccount(env: Env, id: number): Promise<void> {
   await env.DB.prepare('DELETE FROM accounts WHERE id = ?').bind(id).run();
 }
 
+// 更新已有账号的非敏感配置；AK/SK 仅在提供非空值时才覆盖（前端编辑弹窗留空=保持不变）
+export async function updateAccountConfig(env: Env, a: Partial<Account> & { id: number }): Promise<void> {
+  const remark = a.remark ?? '';
+  const name = a.name || remark || 'account';
+  const akEnc = a.accessKeyId ? await encrypt(env, a.accessKeyId) : null;
+  const skEnc = a.accessKeySecret ? await encrypt(env, a.accessKeySecret) : null;
+  const sql =
+    `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, site_type=?, max_traffic=?, schedule_enabled=?, start_time=?, stop_time=?` +
+    (akEnc ? ', access_key_id_enc=?' : '') +
+    (skEnc ? ', access_key_secret_enc=?' : '') +
+    `, updated_at=datetime('now') WHERE id=?`;
+  const vals: unknown[] = [
+    name, remark, a.regionId ?? '', a.instanceId ?? '', a.siteType ?? 'china',
+    a.maxTraffic ?? 0, a.scheduleEnabled ? 1 : 0, a.startTime ?? '', a.stopTime ?? '',
+  ];
+  if (akEnc) vals.push(akEnc);
+  if (skEnc) vals.push(skEnc);
+  vals.push(a.id);
+  await env.DB.prepare(sql).bind(...vals).run();
+}
+
 export async function updateRuntime(
   env: Env,
   id: number,

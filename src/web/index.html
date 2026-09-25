@@ -409,6 +409,17 @@
     .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
     .form-grid .full { grid-column: 1 / -1; }
     /* 通知渠道子块：标题+开关一行，字段网格独立两列 */
+    dialog#edit-dialog {
+      border: 1px solid var(--border-strong); border-radius: var(--r-lg);
+      background: var(--surface-solid); color: var(--text);
+      padding: 22px; width: min(680px, calc(100vw - 32px)); max-height: 86vh;
+      box-shadow: var(--shadow-lg);
+    }
+    dialog#edit-dialog::backdrop { background: rgba(2, 6, 16, 0.55); backdrop-filter: blur(3px); }
+    dialog#edit-dialog .form-grid { margin-top: 14px; }
+    @media (max-width: 720px) {
+      dialog#edit-dialog { padding: 16px; }
+    }
     .nt-block {
       border: 1px solid var(--border); border-radius: var(--r-md);
       background: var(--surface-2); padding: 14px 16px 16px; margin-bottom: 14px;
@@ -781,6 +792,20 @@
                 <option value="international" data-page-node-id="bKVvLmzG6MtcHPiv1aAMt2">国际站（alerts.aliyun.com）</option>
               </select>
             </div>
+            <div class="field full" data-page-node-id="AK-SCHED-BLOCK">
+              <label class="check" for="ak-schedule" data-page-node-id="AK-SCHED-CHK">
+                <input type="checkbox" id="ak-schedule" data-page-node-id="AK-SCHED-INPUT" />
+                启用定时开关机（按配置时区，开机/关机各触发一次）
+              </label>
+            </div>
+            <div class="field" data-page-node-id="AK-START-BLOCK">
+              <label for="ak-start" data-page-node-id="AK-START-LBL">定时开机时间</label>
+              <input id="ak-start" class="control" type="time" value="08:00" data-page-node-id="AK-START-INPUT" />
+            </div>
+            <div class="field" data-page-node-id="AK-STOP-BLOCK">
+              <label for="ak-stop" data-page-node-id="AK-STOP-LBL">定时关机时间</label>
+              <input id="ak-stop" class="control" type="time" value="23:00" data-page-node-id="AK-STOP-INPUT" />
+            </div>
             <div class="field full" data-page-node-id="KIUIP8ddz2c2iuDzwmWgne">
               <label for="ak-remark" data-page-node-id="kP26wuuKdVleBOGNyDv1b8">备注（可选）</label>
               <input id="ak-remark" class="control" placeholder="例如：香港生产机" autocomplete="off" data-page-node-id="rHAfs6aoRkBrhUdBHWY5yC" />
@@ -805,12 +830,76 @@
         <div class="table-wrap" data-page-node-id="7BiFiZzsTGVKDZnr2IxIlM">
           <table data-page-node-id="RcWIECGvBxtHVJOe4c7So4">
             <thead data-page-node-id="iifG7NzCPLDBcvSztfOXqh">
-              <tr data-page-node-id="BpOcUnWLmDx4SfoWba3CYt"><th data-page-node-id="Ug2tRIhH8APXr8vlKpVnzz">备注 / 账号</th><th data-page-node-id="oSyhj78WNNxI4H6prBKOEi">地域</th><th data-page-node-id="v5Tqut1qkBuQugAZyXn1SY">实例</th><th data-page-node-id="lu7IUKkgBCjOTFdlaBAEG9">流量</th><th style="text-align:right" data-page-node-id="d4wbJfRuBVzBnR95BOXL72">操作</th></tr>
+              <tr data-page-node-id="BpOcUnWLmDx4SfoWba3CYt"><th data-page-node-id="Ug2tRIhH8APXr8vlKpVnzz">备注 / 账号</th><th data-page-node-id="oSyhj78WNNxI4H6prBKOEi">地域</th><th data-page-node-id="v5Tqut1qkBuQugAZyXn1SY">实例</th><th data-page-node-id="lu7IUKkgBCjOTFdlaBAEG9">流量</th><th data-page-node-id="ACCT-SCHED-TH">定时</th><th style="text-align:right" data-page-node-id="d4wbJfRuBVzBnR95BOXL72">操作</th></tr>
             </thead>
             <tbody id="accounts-manage" data-page-node-id="1rl9A6PO99UcROIP5qGfrx"></tbody>
           </table>
         </div>
       </div>
+
+      <!-- 账号配置编辑弹窗 -->
+      <dialog id="edit-dialog">
+        <form id="edit-form" novalidate autocomplete="off" method="dialog">
+          <h3 style="margin:0 0 4px;font-size:17px">编辑账号配置</h3>
+          <p class="hint" style="margin:0 0 14px">AccessKey 留空表示保持不变；修改仅影响本地配置，不会触碰云上实例</p>
+          <div class="form-grid">
+            <div class="field">
+              <label for="ed-remark">备注</label>
+              <input id="ed-remark" class="control" placeholder="例如：香港生产机" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="ed-max">流量上限（GB）</label>
+              <input id="ed-max" class="control" type="number" min="1" step="1" inputmode="numeric" />
+            </div>
+            <div class="field">
+              <label for="ed-region">地域 ID</label>
+              <input id="ed-region" class="control" list="region-list" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label for="ed-site">站点类型</label>
+              <select id="ed-site" class="control">
+                <option value="china">中国站</option>
+                <option value="international">国际站</option>
+              </select>
+            </div>
+            <div class="field full">
+              <label for="ed-instance">实例 ID</label>
+              <input id="ed-instance" class="control" placeholder="i-2ze..." autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field full">
+              <label class="check" for="ed-schedule">
+                <input type="checkbox" id="ed-schedule" />
+                启用定时开关机（按配置时区）
+              </label>
+            </div>
+            <div class="field">
+              <label for="ed-start">定时开机时间</label>
+              <input id="ed-start" class="control" type="time" value="08:00" />
+            </div>
+            <div class="field">
+              <label for="ed-stop">定时关机时间</label>
+              <input id="ed-stop" class="control" type="time" value="23:00" />
+            </div>
+            <div class="field full">
+              <label for="ed-akid">AccessKey ID（留空保持不变）</label>
+              <input id="ed-akid" class="control" placeholder="LTAI5t..." autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field full">
+              <label for="ed-aksecret">AccessKey Secret（留空保持不变）</label>
+              <div class="input-wrap">
+                <input id="ed-aksecret" class="control" type="password" autocomplete="new-password" placeholder="加密存储" />
+                <button type="button" class="toggle-eye" data-eye="ed-aksecret" aria-label="显示密码" aria-pressed="false">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+            <button class="btn btn-ghost" type="button" id="edit-cancel" style="width:auto">取消</button>
+            <button class="btn btn-primary" type="button" id="edit-save" style="width:auto">保存修改</button>
+          </div>
+        </form>
+      </dialog>
 
       <div class="card" data-page-node-id="RAM-POLICY-CARD">
         <div class="card-head" data-page-node-id="RAM-POLICY-HEAD">
@@ -1652,6 +1741,9 @@
           instanceId: $("ak-instance").value.trim(),
           maxTraffic: parseInt($("ak-max").value, 10),
           siteType: $("ak-site").value,
+          scheduleEnabled: $("ak-schedule").checked,
+          startTime: $("ak-start").value || "08:00",
+          stopTime: $("ak-stop").value || "23:00",
           remark: $("ak-remark").value.trim(),
         };
         let bad = false;
@@ -1679,21 +1771,26 @@
       async function loadAccountsManage() {
         const r = await apiJson("/api/v1/config");
         const tbody = $("accounts-manage");
-        if (!r.ok) { tbody.innerHTML = '<tr><td colspan="5">' + esc(errText(r.data)) + "</td></tr>"; return; }
+        if (!r.ok) { tbody.innerHTML = '<tr><td colspan="6">' + esc(errText(r.data)) + "</td></tr>"; return; }
         const list = r.data.accounts || [];
         if (!list.length) {
-          tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:24px">暂无账号，先在上方添加</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px">暂无账号，先在上方添加</td></tr>';
           return;
         }
-        tbody.innerHTML = list.map((a) =>
-          "<tr>" +
-          "<td><div style='font-weight:600'>" + esc(a.remark || a.name || "-") + "</div><div class='mono'>" + esc(a.accessKeyId || "") + "</div></td>" +
-          "<td class='mono'>" + esc(a.regionId || "-") + "</td>" +
-          "<td class='mono'>" + esc(a.instanceId || "-") + "</td>" +
-          "<td>" + (Number(a.maxTraffic) || 0) + " GB</td>" +
-          '<td style="text-align:right;white-space:nowrap">' +
-          '<button class="btn btn-danger btn-sm" type="button" data-del="' + esc(a.id) + '">删除</button></td></tr>'
-        ).join("");
+        tbody.innerHTML = list.map((a) => {
+          const sched = a.scheduleEnabled
+            ? '<span style="color:var(--success);font-weight:600">' + esc(a.startTime || "08:00") + " → " + esc(a.stopTime || "23:00") + "</span>"
+            : '<span style="color:var(--muted)">未启用</span>';
+          return "<tr>" +
+            "<td><div style='font-weight:600'>" + esc(a.remark || a.name || "-") + "</div><div class='mono'>" + esc(a.accessKeyId || "") + "</div></td>" +
+            "<td class='mono'>" + esc(a.regionId || "-") + "</td>" +
+            "<td class='mono'>" + esc(a.instanceId || "-") + "</td>" +
+            "<td>" + (Number(a.maxTraffic) || 0) + " GB</td>" +
+            "<td>" + sched + "</td>" +
+            '<td style="text-align:right;white-space:nowrap">' +
+            '<button class="btn btn-ghost btn-sm" type="button" data-edit="' + esc(a.id) + '">配置</button> ' +
+            '<button class="btn btn-danger btn-sm" type="button" data-del="' + esc(a.id) + '">删除</button></td></tr>';
+        }).join("");
         tbody.querySelectorAll("[data-del]").forEach((b) => {
           b.addEventListener("click", function () {
             const id = Number(this.dataset.del);
@@ -1701,7 +1798,67 @@
             delAccount(id);
           });
         });
+        tbody.querySelectorAll("[data-edit]").forEach((b) => {
+          b.addEventListener("click", function () {
+            const id = Number(this.dataset.edit);
+            const acc = list.find((x) => Number(x.id) === id);
+            if (acc) openEditDialog(acc);
+          });
+        });
       }
+
+      /* ---------- 账号配置编辑弹窗 ---------- */
+      function openEditDialog(a) {
+        $("ed-remark").value = a.remark || a.name || "";
+        $("ed-max").value = a.maxTraffic || "";
+        $("ed-region").value = a.regionId || "";
+        $("ed-site").value = a.siteType || "china";
+        $("ed-instance").value = a.instanceId || "";
+        $("ed-schedule").checked = !!a.scheduleEnabled;
+        $("ed-start").value = a.startTime || "08:00";
+        $("ed-stop").value = a.stopTime || "23:00";
+        $("ed-akid").value = "";
+        $("ed-aksecret").value = "";
+        $("edit-dialog").dataset.id = String(a.id);
+        $("edit-dialog").showModal();
+      }
+
+      $("edit-cancel").addEventListener("click", () => $("edit-dialog").close());
+
+      $("edit-save").addEventListener("click", async function () {
+        const dlg = $("edit-dialog");
+        const id = Number(dlg.dataset.id);
+        if (!id) return;
+        const maxTraffic = parseInt($("ed-max").value, 10);
+        if (!(maxTraffic > 0)) { toast("流量上限需为大于 0 的数字", "err"); return; }
+        const acc = {
+          id,
+          remark: $("ed-remark").value.trim(),
+          regionId: $("ed-region").value.trim(),
+          instanceId: $("ed-instance").value.trim(),
+          maxTraffic,
+          siteType: $("ed-site").value,
+          scheduleEnabled: $("ed-schedule").checked,
+          startTime: $("ed-start").value || "08:00",
+          stopTime: $("ed-stop").value || "23:00",
+          // AK/SK 留空 → 后端保留旧值
+          accessKeyId: $("ed-akid").value.trim(),
+          accessKeySecret: $("ed-aksecret").value,
+        };
+        if (acc.accessKeyId && !/^LTAI/i.test(acc.accessKeyId)) { toast("AccessKey ID 通常以 LTAI 开头", "err"); return; }
+        const btn = this;
+        btn.disabled = true; btn.textContent = "保存中…";
+        const r = await apiJson("/api/v1/config", { method: "PUT", body: JSON.stringify({ accounts: [acc] }) });
+        btn.disabled = false; btn.textContent = "保存修改";
+        if (r.ok) {
+          dlg.close();
+          toast("账号配置已更新", "ok");
+          loadAccountsManage();
+          loadStatus();
+        } else {
+          toast(errText(r.data), "err");
+        }
+      });
 
       async function delAccount(id) {
         const r = await apiJson("/api/v1/accounts/" + id, { method: "DELETE" });

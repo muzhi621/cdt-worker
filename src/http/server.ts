@@ -340,10 +340,12 @@ async function saveConfig(ctx: Context): Promise<Response> {
     }
     await ctx.env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind('notifications', JSON.stringify(merged)).run();
   }
-  // 保存账号（带明文 secret 时更新，否则跳过）
+  // 保存账号：带 id 走更新（AK/SK 留空=保持不变），无 id 且提供 AK/SK 才新增
   if (Array.isArray(b.accounts)) {
     for (const a of b.accounts as Partial<Account>[]) {
-      if (a.accessKeySecret) {
+      if (a.id) {
+        await store.updateAccountConfig(ctx.env, a as Partial<Account> & { id: number });
+      } else if (a.accessKeySecret && a.accessKeyId) {
         await store.saveAccount(ctx.env, a as Omit<Account, 'id'> & { id?: number });
       }
     }
