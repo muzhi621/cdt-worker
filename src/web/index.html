@@ -1250,6 +1250,12 @@
       });
 
       async function boot() {
+        // 先探测会话是否有效：已登录（有 cdt_session cookie）则直接进入主界面，避免刷新被踢回登录页
+        try {
+          const probe = await apiJson("/api/v1/status");
+          if (probe.ok) { enterApp(); return; }
+        } catch (e) { /* 网络异常时继续走登录流程 */ }
+
         const r = await apiJson("/api/v1/system/init-status");
         const envSet = !!(r.data && r.data.envPasswordSet);
         markEnvPasswordState(envSet);
