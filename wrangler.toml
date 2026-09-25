@@ -6,6 +6,12 @@ compatibility_flags = ["nodejs_compat"]
 # 阿里云凭据主密钥（AES-GCM 加密 AK/Secret 用），通过 Cloudflare Dashboard 的 Secret 设置
 # 名称固定为 CDT_MASTER_KEY，值为 32 字节 base64（不要硬编码在此文件）
 # 说明：代码只引用 env.CDT_MASTER_KEY，ID 与业务逻辑解耦
+#
+# 可选恢复密码：ADMIN_PASSWORD
+#   - 忘记管理员密码时用它登录（登录成功后自动把 D1 密码同步为该值）
+#   - 在 Dashboard → Worker → Settings → Variables and Secrets 添加
+#   - 类型建议选 Secret；未配置时不会生效，不影响正常登录
+#   - 注意：这里不要写具体值，避免密码进入仓库
 
 # ─────────────────────────────────────────────────────────────
 # D1 数据库绑定（wrangler ≥ 4.45 自动预置，无需写 database_id）

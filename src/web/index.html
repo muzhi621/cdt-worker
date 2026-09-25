@@ -194,6 +194,16 @@
       color: var(--danger); margin-bottom: 16px;
     }
     .alert svg { flex: none; margin-top: 2px; }
+    .alert.ok {
+      background: color-mix(in srgb, var(--success) 13%, transparent);
+      border-color: color-mix(in srgb, var(--success) 40%, transparent);
+      color: var(--success);
+    }
+    .alert.warn {
+      background: color-mix(in srgb, var(--warning) 13%, transparent);
+      border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+      color: var(--warning);
+    }
     .btn {
       display: inline-flex; align-items: center; justify-content: center; gap: 8px;
       min-height: 46px; padding: 0 18px;
@@ -220,6 +230,23 @@
     .caps-lock {
       display: none; margin-top: 8px; font-size: 12.5px; color: var(--warning);
     }
+    /* 忘记密码引导 */
+    .forgot { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+    .forgot > summary {
+      cursor: pointer; font-size: 13px; color: var(--info); list-style: none;
+      display: inline-flex; align-items: center; gap: 6px; min-height: 24px;
+    }
+    .forgot > summary::-webkit-details-marker { display: none; }
+    .forgot > summary::before { content: "?"; width: 16px; height: 16px; border-radius: 50%;
+      background: var(--info); color: #fff; font-size: 11px; font-weight: 800; line-height: 16px; text-align: center; }
+    .forgot > summary:hover { text-decoration: underline; }
+    .forgot-list { margin: 10px 0 0; padding-left: 20px; }
+    .forgot-list li { font-size: 12.5px; line-height: 1.7; color: var(--text-2); margin-bottom: 4px; }
+    .forgot-list code { font-family: var(--font-mono); font-size: 12px; padding: 1px 5px; border-radius: 4px;
+      background: var(--surface-3); border: 1px solid var(--border); }
+    .forgot-note { margin-top: 8px; font-size: 12.5px; line-height: 1.6; color: var(--muted); }
+    .forgot-note.ok { color: var(--success); }
+    .forgot-note.warn { color: var(--warning); }
 
     /* ============ 应用外壳 ============ */
     .app { max-width: 1180px; margin: 0 auto; padding: 26px 20px 108px; }
@@ -536,6 +563,18 @@
           <p id="caps-hint" class="caps-lock" data-page-node-id="hRMW4jEQEVHDEvUW2bZz2x">大写锁定已开启</p>
         </div>
         <button class="btn btn-primary" type="submit" id="login-submit" data-page-node-id="j9AOY34ltzkyzhkW4Hbbz7">登 录</button>
+
+        <details class="forgot" id="forgot-box">
+          <summary>忘记密码？用环境变量密码进门</summary>
+          <ol class="forgot-list">
+            <li>打开 <b>Cloudflare Dashboard → Workers &amp; Pages → cdt-worker → Settings → Variables and Secrets</b></li>
+            <li>新增一个变量：名称 <code>ADMIN_PASSWORD</code>，值填你的恢复密码，类型选 <b>Secret</b>（建议至少 12 位）</li>
+            <li>点 <b>Deploy / Save and deploy</b> 让变量生效（约 30 秒）</li>
+            <li>回到本页，直接输入这个恢复密码登录 —— 登录成功后系统管理员密码会同步为该值，随后可在「设置 → 管理员密码」里改成新密码</li>
+          </ol>
+          <p class="forgot-note">该变量长期保留可当作兜底入口；若不再需要，在 Cloudflare 删除它即可，删除后仅 D1 中的密码有效。</p>
+          <p class="forgot-note" id="env-pwd-state"></p>
+        </details>
       </form>
 
       <!-- 初始化 -->
@@ -820,6 +859,70 @@
 
         <p class="hint" data-page-node-id="5IxobATNl9vngLeLANTfn0">临时验证：也可以直接在浏览器打开触发地址，或点右上角「立即监控一次」。</p>
       </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>管理员密码</h2>
+            <p class="card-desc">修改登录密码后，其他设备上的会话会立即失效，本机保持登录</p>
+          </div>
+          <span class="spacer"></span>
+          <button class="btn btn-primary btn-sm" type="button" id="save-password">更新密码</button>
+        </div>
+
+        <div id="pwd-alert" class="alert hidden" role="alert" tabindex="-1"></div>
+
+        <form id="password-form" novalidate autocomplete="off">
+          <div class="form-grid">
+            <div class="field full">
+              <label for="pwd-current">当前密码</label>
+              <div class="input-wrap">
+                <input id="pwd-current" class="control" type="password" autocomplete="current-password"
+                       placeholder="D1 中现有密码，或环境变量 ADMIN_PASSWORD 的值"
+                       aria-describedby="pwd-current-error" />
+                <button type="button" class="toggle-eye" data-eye="pwd-current" aria-label="显示密码" aria-pressed="false">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
+              <p id="pwd-current-error" class="field-error hidden"></p>
+            </div>
+            <div class="field">
+              <label for="pwd-new">新密码</label>
+              <div class="input-wrap">
+                <input id="pwd-new" class="control" type="password" autocomplete="new-password"
+                       placeholder="至少 10 个字符" aria-describedby="pwd-new-error pwd-strength-text" />
+                <button type="button" class="toggle-eye" data-eye="pwd-new" aria-label="显示密码" aria-pressed="false">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
+              <div class="strength" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+              <p class="strength-text" id="pwd-strength-text">建议使用 12 位以上，混合大小写、数字与符号</p>
+              <p id="pwd-new-error" class="field-error hidden"></p>
+            </div>
+            <div class="field">
+              <label for="pwd-confirm">确认新密码</label>
+              <div class="input-wrap">
+                <input id="pwd-confirm" class="control" type="password" autocomplete="new-password"
+                       placeholder="再次输入新密码" aria-describedby="pwd-confirm-error" />
+                <button type="button" class="toggle-eye" data-eye="pwd-confirm" aria-label="显示密码" aria-pressed="false">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
+              <p id="pwd-confirm-error" class="field-error hidden"></p>
+            </div>
+          </div>
+        </form>
+
+        <div class="steps">
+          <strong>忘记密码的兜底方式</strong>
+          <ol>
+            <li>Cloudflare Dashboard → 你的 Worker → <b>Settings → Variables and Secrets</b></li>
+            <li>新增变量 <code>ADMIN_PASSWORD</code>，值填恢复密码，类型建议 <b>Secret</b></li>
+            <li>Save and deploy 生效后，用该密码登录即可进入系统（密码会自动同步为它）</li>
+          </ol>
+          <p class="forgot-note" id="settings-env-state"></p>
+        </div>
+      </div>
     </section>
 
     <!-- 日志 -->
@@ -970,6 +1073,7 @@
         if (r.ok) {
           csrf = r.data.csrf_token || "";
           enterApp();
+          if (r.data.via_env_password) toast("已用环境变量密码登录，管理员密码已同步", "ok");
         } else {
           showAlert(errText(r.data));
           $("login-password").select();
@@ -977,7 +1081,71 @@
         }
       });
 
-      const strengthBars = document.querySelectorAll(".strength i");
+      /* ---------- 修改管理员密码 ---------- */
+      function showPwdAlert(msg, kind) {
+        const box = $("pwd-alert");
+        box.textContent = msg;
+        box.className = "alert " + (kind || "");
+        box.classList.remove("hidden");
+        box.focus();
+      }
+      function clearPwdAlert() { $("pwd-alert").classList.add("hidden"); }
+
+      $("password-form").addEventListener("submit", (e) => { e.preventDefault(); submitPassword(); });
+      $("save-password").addEventListener("click", submitPassword);
+
+      let pwdBusy = false;
+      async function submitPassword() {
+        if (pwdBusy) return;
+        clearPwdAlert();
+        const cur = $("pwd-current").value;
+        const next = $("pwd-new").value;
+        const confirm = $("pwd-confirm").value;
+        let bad = false;
+        if (!cur) { setFieldError("pwd-current", "pwd-current-error", "请输入当前密码"); bad = true; }
+        else setFieldError("pwd-current", "pwd-current-error", "");
+        if (next.length < 10) { setFieldError("pwd-new", "pwd-new-error", "新密码至少需要 10 个字符"); bad = true; }
+        else if (next === cur) { setFieldError("pwd-new", "pwd-new-error", "新密码不能与当前密码相同"); bad = true; }
+        else setFieldError("pwd-new", "pwd-new-error", "");
+        if (confirm !== next) { setFieldError("pwd-confirm", "pwd-confirm-error", "两次输入的新密码不一致"); bad = true; }
+        else setFieldError("pwd-confirm", "pwd-confirm-error", "");
+        if (bad) {
+          const first = $("pwd-current").getAttribute("aria-invalid") ? $("pwd-current")
+            : ($("pwd-new").getAttribute("aria-invalid") ? $("pwd-new") : $("pwd-confirm"));
+          first.focus();
+          return;
+        }
+
+        const btn = $("save-password");
+        pwdBusy = true;
+        btn.disabled = true;
+        btn.textContent = "更新中…";
+        const r = await apiJson("/api/v1/auth/password", {
+          method: "POST",
+          body: JSON.stringify({ currentPassword: cur, newPassword: next }),
+        });
+        pwdBusy = false;
+        btn.disabled = false;
+        btn.textContent = "更新密码";
+        if (r.ok) {
+          $("pwd-current").value = "";
+          $("pwd-new").value = "";
+          $("pwd-confirm").value = "";
+          paintStrength(pwdBars, $("pwd-strength-text"), "建议使用 12 位以上，混合大小写、数字与符号", "");
+          showPwdAlert(r.data.message || "密码已更新", "ok");
+          toast("登录密码已更新", "ok");
+          loadLogs();
+        } else if (r.status === 401) {
+          setFieldError("pwd-current", "pwd-current-error", errText(r.data));
+          $("pwd-current").select();
+          $("pwd-current").focus();
+        } else {
+          showPwdAlert(errText(r.data), "warn");
+        }
+      }
+
+      const setupBars = $("setup-form").querySelectorAll(".strength i");
+      const pwdBars = $("password-form").querySelectorAll(".strength i");
       function scorePassword(v) {
         let s = 0;
         if (v.length >= 10) s++;
@@ -987,13 +1155,18 @@
         if (/[^A-Za-z0-9]/.test(v)) s++;
         return s;
       }
-      $("setup-password").addEventListener("input", function () {
-        const v = this.value;
+      const STRENGTH_LABEL = ["太短了", "强度偏弱", "强度尚可", "强度不错", "强度很好", "强度很强"];
+      function paintStrength(bars, textEl, demoText, v) {
         const s = scorePassword(v);
         const colors = ["var(--surface-3)", "var(--danger)", "var(--warning)", "var(--info)", "var(--info)", "var(--success)"];
-        strengthBars.forEach((b, i) => { b.style.background = i < s ? colors[s] : "var(--surface-3)"; });
-        const label = ["太短了", "强度偏弱", "强度尚可", "强度不错", "强度很好", "强度很强"];
-        $("strength-text").textContent = v ? "密码强度：" + label[s] : "建议使用 12 位以上，混合大小写、数字与符号";
+        bars.forEach((b, i) => { b.style.background = i < s ? colors[s] : "var(--surface-3)"; });
+        textEl.textContent = v ? "密码强度：" + STRENGTH_LABEL[s] : demoText;
+      }
+      $("setup-password").addEventListener("input", function () {
+        paintStrength(setupBars, $("strength-text"), "建议使用 12 位以上，混合大小写、数字与符号", this.value);
+      });
+      $("pwd-new").addEventListener("input", function () {
+        paintStrength(pwdBars, $("pwd-strength-text"), "建议使用 12 位以上，混合大小写、数字与符号", this.value);
       });
 
       $("setup-form").addEventListener("submit", async function (e) {
@@ -1022,6 +1195,8 @@
 
       async function boot() {
         const r = await apiJson("/api/v1/system/init-status");
+        const envSet = !!(r.data && r.data.envPasswordSet);
+        markEnvPasswordState(envSet);
         if (!r.ok) {
           $("auth-title").textContent = "服务暂时不可用";
           $("auth-sub").textContent = "无法连接到 Worker，请稍后重试";
@@ -1031,9 +1206,11 @@
           showView("auth");
           return;
         }
-        if (r.data && r.data.initialized) {
+        if (r.data && (r.data.initialized || envSet)) {
           $("auth-title").textContent = "管理员登录";
-          $("auth-sub").textContent = "请输入初始化时设置的管理员密码";
+          $("auth-sub").textContent = r.data.initialized
+            ? "请输入初始化时设置的管理员密码"
+            : "使用 Cloudflare 环境变量 ADMIN_PASSWORD 中的密码登录";
           $("login-form").classList.remove("hidden");
           $("setup-form").classList.add("hidden");
           showView("auth");
@@ -1048,9 +1225,29 @@
         }
       }
 
+      // 环境变量恢复密码的状态提示
+      function markEnvPasswordState(on) {
+        const a = $("env-pwd-state");
+        if (a) {
+          a.className = "forgot-note " + (on ? "ok" : "warn");
+          a.textContent = on
+            ? "当前状态：已检测到环境变量 ADMIN_PASSWORD，可直接用它的值登录。"
+            : "当前状态：未配置 ADMIN_PASSWORD。建议现在就去 Cloudflare 加上，作为忘记密码时的唯一入口。";
+        }
+        const b = $("settings-env-state");
+        if (b) {
+          b.className = "forgot-note " + (on ? "ok" : "warn");
+          b.textContent = on
+            ? "当前状态：环境变量 ADMIN_PASSWORD 已配置，忘记密码时可用它登录。"
+            : "当前状态：未配置 ADMIN_PASSWORD。建议在 Cloudflare 添加，避免忘记密码后无法进入系统。";
+        }
+      }
+
       function enterApp() {
         $("login-password").value = "";
         $("setup-password").value = "";
+        ["pwd-current", "pwd-new", "pwd-confirm"].forEach((id) => { $(id).value = ""; });
+        clearPwdAlert();
         showView("app");
         loadStatus();
         loadConfig();

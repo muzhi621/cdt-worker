@@ -54,11 +54,21 @@ function getBool(row: Record<string, unknown> | null, key: string): boolean {
   return row != null && !!row[key];
 }
 
-export async function isInitialized(env: Env): Promise<boolean> {
+export async function getPasswordHash(env: Env): Promise<string> {
   const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?')
     .bind('admin_password_hash')
     .first();
-  return row != null && getString(row, 'value') !== '';
+  return row == null ? '' : getString(row, 'value');
+}
+
+export async function setPasswordHash(env: Env, hash: string): Promise<void> {
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,datetime('now'))")
+    .bind('admin_password_hash', hash)
+    .run();
+}
+
+export async function isInitialized(env: Env): Promise<boolean> {
+  return (await getPasswordHash(env)) !== '';
 }
 
 // 监控防抖：距上次监控是否已超过配置间隔（分钟）

@@ -4,7 +4,7 @@
 
 import * as store from '../store/store';
 import * as engine from '../engine/engine';
-import { hashPassword, verifyPassword, newToken, tokenHash, type Env } from '../security/security';
+import { hashPassword, verifyPassword, constantTimeEqual, envPassword, newToken, tokenHash, type Env } from '../security/security';
 import type { Account } from '../provider/aliyun';
 import indexHtml from '../web/index.html';
 
@@ -83,9 +83,14 @@ const routes: { method: string; pattern: string; scope?: string; handler: (ctx: 
       try { await ctx.env.DB.prepare('SELECT 1').first(); return json({ status: 'ready' }); }
       catch { return error('database_not_ready', 'database not ready', 503); }
     } },
-  { method: 'GET', pattern: '/api/v1/system/init-status', handler: async (ctx) => json({ initialized: await store.isInitialized(ctx.env) }) },
+  { method: 'GET', pattern: '/api/v1/system/init-status', handler: async (ctx) => json({
+      initialized: await store.isInitialized(ctx.env),
+      // 已通过 Cloudflare 环境变量配置恢复密码（未初始化时也可直接用它登录）
+      envPasswordSet: envPassword(ctx.env) !== '',
+    }) },
   { method: 'POST', pattern: '/api/v1/setup', handler: setup },
   { method: 'POST', pattern: '/api/v1/auth/login', handler: login },
+  { method: 'POST', pattern: '/api/v1/auth/password', scope: 'admin', handler: changePassword },
   { method: 'POST', pattern: '/api/v1/auth/logout', scope: 'admin', handler: logout },
   { method: 'GET', pattern: '/api/v1/status', scope: 'widget:read', handler: statusHandler },
   { method: 'GET', pattern: '/api/v1/widget/summary', scope: 'widget:read', handler: widgetSummary },
@@ -110,7 +115,7 @@ async function setup(ctx: Context): Promise<Response> {
   if (password.length < 10) return error('invalid_password', '密码至少需要 10 个字符', 400);
   if (await store.isInitialized(ctx.env)) return error('already_initialized', '系统已初始化', 400);
   const hash = await hashPassword(password);
-  await ctx.env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind('admin_password_hash', hash).run();
+  await store.setPasswordHash(ctx.env, hash);
   await store.addLog(ctx.env, 'audit', '系统初始化完成 [IP: ' + clientIP(ctx.request) + ']');
   const { token, csrf } = await createSession(ctx.env, ctx.request);
   return setAuthCookies(json({ success: true, csrf_token: csrf }, 201), token, csrf, ctx.request);
@@ -123,17 +128,83 @@ async function login(ctx: Context): Promise<Response> {
   }
   const body = await ctx.request.json().catch(() => null);
   const password = String((body as Record<string, unknown>)?.password ?? '');
-  const hashRow = await ctx.env.DB.prepare("SELECT value FROM settings WHERE key = 'admin_password_hash'").first();
-  const storedHash = String((hashRow as Record<string, unknown>)?.value ?? '');
-  const valid = storedHash && await verifyPassword(storedHash, password);
+  if (!password) return error('invalid_credentials', '请输入密码', 400);
+
+  const storedHash = await store.getPasswordHash(ctx.env);
+  let valid = storedHash ? await verifyPassword(storedHash, password) : false;
+  let viaEnvPassword = false;
+
+  // 兜底：Cloudflare 环境变量 ADMIN_PASSWORD（忘记密码时的恢复入口）
+  if (!valid) {
+    const fallback = envPassword(ctx.env);
+    if (fallback && (await constantTimeEqual(fallback, password))) {
+      valid = true;
+      viaEnvPassword = true;
+    }
+  }
+
   if (!valid) {
     await ctx.env.DB.prepare('INSERT INTO login_attempts (ip) VALUES (?)').bind(ip).run();
     await store.addLog(ctx.env, 'warning', '管理员登录失败 [IP: ' + ip + ']');
     return error('invalid_credentials', '密码错误', 401);
   }
+
+  // 用环境变量密码登录成功：回写 D1 哈希，使密码与会话状态一致
+  if (viaEnvPassword) {
+    if (password.length >= 10) {
+      await store.setPasswordHash(ctx.env, await hashPassword(password));
+      await store.addLog(ctx.env, 'audit', '使用环境变量 ADMIN_PASSWORD 登录成功，管理员密码已同步为该值 [IP: ' + ip + ']');
+    } else {
+      await store.addLog(ctx.env, 'audit', '使用环境变量 ADMIN_PASSWORD 登录成功（密码长度不足 10 位，未同步到 D1）[IP: ' + ip + ']');
+    }
+  }
+
   const { token, csrf } = await createSession(ctx.env, ctx.request);
-  await store.addLog(ctx.env, 'audit', '管理员登录成功 [IP: ' + ip + ']');
-  return setAuthCookies(json({ success: true, csrf_token: csrf }, 200), token, csrf, ctx.request);
+  if (!viaEnvPassword) await store.addLog(ctx.env, 'audit', '管理员登录成功 [IP: ' + ip + ']');
+  return setAuthCookies(json({ success: true, csrf_token: csrf, via_env_password: viaEnvPassword }, 200), token, csrf, ctx.request);
+}
+
+// 修改管理员密码：校验当前密码（D1 哈希或环境变量密码均可），成功后吊销其他会话
+async function changePassword(ctx: Context): Promise<Response> {
+  if (!allowRate('passwd:' + clientIP(ctx.request), 6, 15 * 60_000)) {
+    return error('rate_limited', '操作过于频繁，请稍后再试', 429);
+  }
+  const body = await ctx.request.json().catch(() => null);
+  if (!body || typeof body !== 'object') return error('invalid_request', 'invalid JSON', 400);
+  const b = body as Record<string, unknown>;
+  const currentPassword = String(b.currentPassword ?? '');
+  const newPassword = String(b.newPassword ?? '');
+
+  if (newPassword.length < 10) return error('invalid_password', '新密码至少需要 10 个字符', 400);
+  if (newPassword.length > 128) return error('invalid_password', '新密码不能超过 128 个字符', 400);
+  if (!currentPassword) return error('invalid_password', '请输入当前密码', 400);
+  if (newPassword === currentPassword) return error('invalid_password', '新密码不能与当前密码相同', 400);
+
+  const storedHash = await store.getPasswordHash(ctx.env);
+  let valid = storedHash ? await verifyPassword(storedHash, currentPassword) : false;
+  if (!valid) {
+    const fallback = envPassword(ctx.env);
+    if (fallback && (await constantTimeEqual(fallback, currentPassword))) valid = true;
+  }
+  if (!valid) {
+    await store.addLog(ctx.env, 'warning', '修改管理员密码失败：当前密码错误 [IP: ' + clientIP(ctx.request) + ']');
+    return error('invalid_credentials', '当前密码错误', 401);
+  }
+
+  await store.setPasswordHash(ctx.env, await hashPassword(newPassword));
+
+  // 吊销其他设备上的会话，仅保留当前会话
+  const cookieHeader = ctx.request.headers.get('Cookie') || '';
+  const match = /(?:^|;\s*)cdt_session=([^;]+)/.exec(cookieHeader);
+  if (match) {
+    const currentHash = await tokenHash(match[1]);
+    await ctx.env.DB.prepare('DELETE FROM sessions WHERE token_hash != ?').bind(currentHash).run();
+  } else {
+    await ctx.env.DB.prepare('DELETE FROM sessions').run();
+  }
+
+  await store.addLog(ctx.env, 'audit', '管理员修改了登录密码，其他设备会话已失效 [IP: ' + clientIP(ctx.request) + ']');
+  return json({ success: true, message: '密码已更新，其他设备需重新登录' });
 }
 
 async function logout(ctx: Context): Promise<Response> {

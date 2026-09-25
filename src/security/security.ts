@@ -77,8 +77,28 @@ export async function tokenHash(token: string): Promise<string> {
 // 与原 Go 项目的 Argon2id 语义等价（都用于管理员密码的单向哈希）
 const PBKDF2_ITERATIONS = 60000;
 
-export async function hashPassword(password: string): Promise<string> {
-  if (password.length < 10) throw new Error('password must be at least 10 characters');
+// 常量时间字符串比较：先 SHA-256 归一化，避免长度/前缀差异导致时序泄露
+export async function constantTimeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const [da, db] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ]);
+  const x = new Uint8Array(da);
+  const y = new Uint8Array(db);
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
+  return diff === 0;
+}
+
+// 环境变量恢复密码：仅当显式配置且非空时生效（用于忘记密码后重新进入系统）
+export function envPassword(env: Env): string {
+  const raw = env.ADMIN_PASSWORD;
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+export async function hashPassword(password: string, minLength = 10): Promise<string> {
+  if (password.length < minLength) throw new Error('password must be at least ' + minLength + ' characters');
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const enc = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
@@ -98,8 +118,9 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 export async function verifyPassword(encoded: string, password: string): Promise<boolean> {
+  // 格式 $pbkdf2-sha256$i=<iter>$<salt>$<hash>，split('$') 得到 ['', 'pbkdf2-sha256', 'i=...', salt, hash] = 5 段
   const parts = encoded.split('$');
-  if (parts.length !== 4 || parts[1] !== 'pbkdf2-sha256') {
+  if (parts.length !== 5 || parts[1] !== 'pbkdf2-sha256') {
     return false;
   }
   const iterMatch = /^i=(\d+)$/.exec(parts[2]);
@@ -131,4 +152,7 @@ export async function verifyPassword(encoded: string, password: string): Promise
 export interface Env {
   DB: D1Database;
   CDT_MASTER_KEY: string;
+  // 可选：Cloudflare 控制台配置的恢复密码（明文变量或 Secret 均可）
+  // 忘记管理员密码时用它登录，登录成功后会自动写回 D1 密码哈希
+  ADMIN_PASSWORD?: string;
 }
