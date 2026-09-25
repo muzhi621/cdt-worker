@@ -1,4 +1,4 @@
-name = "cdt-monitor"
+name = "cdt-worker"
 main = "src/index.ts"
 compatibility_date = "2024-09-25"
 compatibility_flags = ["nodejs_compat"]
