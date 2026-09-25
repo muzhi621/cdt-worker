@@ -65,6 +65,8 @@
     .url-box input { margin-bottom: 0; font-family: monospace; font-size: 12px; flex: 1; }
     .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
     .btn-sm { padding: 6px 10px; font-size: 12px; }
+    .code-block { background: #1c1c1e; color: #d4d4d4; border-radius: 8px; padding: 12px; font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; margin: 8px 0; overflow-x: auto; }
+    .steps strong { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -180,28 +182,31 @@
             <strong>方式一：cron-job.org（推荐，免费无需信用卡）</strong>
             <ol>
               <li>打开 <a href="https://cron-job.org" target="_blank">cron-job.org</a> 注册并登录</li>
-              <li>新建任务（Create cronjob），URL 填上面的「监控触发地址」</li>
-              <li>调度间隔填 <strong>5 分钟</strong>（与上方「监控间隔」保持一致）</li>
-              <li>保存即可，之后会每 5 分钟自动监控一次</li>
+              <li>点左侧 Cronjobs → 右上角 Create cronjob 新建任务</li>
+              <li>URL 填上面的「监控触发地址」</li>
+              <li>调度（Execution schedule）填 <strong>每 5 分钟</strong>（与上方「监控间隔」一致）</li>
+              <li>点 Create 保存，之后每 5 分钟自动监控一次</li>
             </ol>
           </div>
 
           <div class="steps">
             <strong>方式二：GitHub Actions（已有 GitHub 账号可用）</strong>
             <ol>
-              <li>在代码仓库新建文件 <code>.github/workflows/cron.yml</code></li>
-              <li>内容填入：<code>schedule: - cron: '*/5 * * * *'</code>，执行 <code>curl -s "上面的触发地址"</code></li>
-              <li>提交推送，GitHub 会每 5 分钟自动请求一次</li>
+              <li>在代码仓库新建文件 <code>.github/workflows/cron.yml</code>（下面代码块可直接复制）</li>
+              <li>提交推送后，GitHub 会每 5 分钟自动请求一次触发地址</li>
             </ol>
+            <div class="code-block" id="github-yml"></div>
+            <button class="btn-sm" onclick="copyGithubYml()">复制 YML</button>
           </div>
 
           <div class="steps">
             <strong>方式三：UptimeRobot（免费，还能顺带做可用性监控）</strong>
             <ol>
               <li>打开 <a href="https://uptimerobot.com" target="_blank">uptimerobot.com</a> 注册并登录</li>
-              <li>新建监控（New monitor），类型选 <strong>HTTP(s)</strong></li>
-              <li>URL 填上面的「监控触发地址」，监控间隔选 <strong>5 分钟</strong></li>
-              <li>保存即可，之后会每 5 分钟请求一次</li>
+              <li>点 New monitor 新建监控，类型选 <strong>HTTP(s)</strong></li>
+              <li>URL 填上面的「监控触发地址」</li>
+              <li>监控间隔（Monitoring Interval）选 <strong>5 分钟</strong>（与上方「监控间隔」一致）</li>
+              <li>点 Create monitor 保存，之后每 5 分钟请求一次</li>
             </ol>
           </div>
 
@@ -285,7 +290,22 @@
 
     function fillCronUrl() {
       const el = document.getElementById('cron-url');
-      if (el) el.value = window.location.origin + '/__cron';
+      const url = window.location.origin + '/__cron';
+      if (el) el.value = url;
+      const yml = document.getElementById('github-yml');
+      if (yml) {
+        yml.textContent = `name: cdt-monitor-trigger
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # 每 5 分钟
+  workflow_dispatch: {}      # 允许手动触发
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger monitor
+        run: curl -s "${url}"`;
+      }
     }
 
     function copyCronUrl() {
@@ -297,6 +317,17 @@
           el.select();
           document.execCommand('copy');
           document.getElementById('cron-msg').textContent = '已复制到剪贴板';
+        });
+      }
+    }
+
+    function copyGithubYml() {
+      const el = document.getElementById('github-yml');
+      if (el && el.textContent) {
+        navigator.clipboard.writeText(el.textContent).then(() => {
+          document.getElementById('cron-msg').textContent = 'YML 已复制到剪贴板';
+        }).catch(() => {
+          document.getElementById('cron-msg').textContent = '复制失败，请手动选中代码块复制';
         });
       }
     }
