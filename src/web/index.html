@@ -1483,17 +1483,18 @@
 
       /* ---------- 账号页 ---------- */
       // 地域列表随站点类型联动：中国站显示中国内地地域，国际站显示海外地域，中国香港两站通用
+      // 注意：datalist 候选资格不响应 option 的 hidden 属性，必须用 disabled 过滤
       function paintRegionList(site) {
         document.querySelectorAll("#region-list option").forEach((o) => {
           const s = o.dataset.site;
-          o.hidden = !(s === "both" || s === site);
+          o.disabled = !(s === "both" || s === site);
         });
         // 已填地域不属于当前站点时清空，避免静默保存错误的站点/地域组合
         const input = $("ak-region");
         const current = input.value.trim();
         if (current) {
           const opt = document.querySelector('#region-list option[value="' + current.replace(/"/g, '\\"') + '"]');
-          if (opt && opt.hidden) input.value = "";
+          if (opt && opt.disabled) input.value = "";
         }
       }
       paintRegionList("china"); // 初始为中国站
