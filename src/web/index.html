@@ -150,7 +150,11 @@
           </div>
           <label><input type="checkbox" id="set-keepalive" /> 抢占式实例保活</label>
           <label><input type="checkbox" id="set-billing" /> 启用账单查询</label>
-          <div><label>时区</label><input id="set-timezone" value="Asia/Shanghai" /></div>
+          <div class="row">
+            <div><label>时区</label><input id="set-timezone" value="Asia/Shanghai" /></div>
+            <div><label>监控间隔 (分钟)</label><input id="set-monitor" type="number" min="1" value="5" /></div>
+          </div>
+          <div><label>监控间隔说明：配合外部定时服务（如 cron-job.org 每 N 分钟请求一次 /__cron），Worker 内部按此间隔防抖，避免重复执行。</label></div>
           <button onclick="saveSettings()">保存设置</button>
           <div id="settings-msg" class="msg"></div>
         </div>
@@ -294,6 +298,7 @@
       document.getElementById('set-keepalive').checked = data.keepAlive;
       document.getElementById('set-billing').checked = data.enableBilling;
       document.getElementById('set-timezone').value = data.timezone;
+      document.getElementById('set-monitor').value = data.monitorInterval || 5;
     }
 
     async function saveSettings() {
@@ -305,6 +310,7 @@
         keepAlive: document.getElementById('set-keepalive').checked,
         enableBilling: document.getElementById('set-billing').checked,
         timezone: document.getElementById('set-timezone').value,
+        monitorInterval: parseInt(document.getElementById('set-monitor').value) || 5,
       };
       const res = await api('/api/v1/config', { method: 'PUT', body: JSON.stringify(settings) });
       const data = await res.json();

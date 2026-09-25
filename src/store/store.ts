@@ -10,6 +10,7 @@ export interface Config {
   shutdownMode: string;
   thresholdAction: string; // stop_and_notify / notify_only
   apiInterval: number;
+  monitorInterval: number; // 监控间隔（分钟），外部触发时用于防抖
   timezone: string;
   keepAlive: boolean;
   enableBilling: boolean;
@@ -28,6 +29,7 @@ const DEFAULT_CONFIG: Config = {
   shutdownMode: 'KeepCharging',
   thresholdAction: 'stop_and_notify',
   apiInterval: 600,
+  monitorInterval: 5,
   timezone: 'Asia/Shanghai',
   keepAlive: false,
   enableBilling: false,
@@ -59,6 +61,25 @@ export async function isInitialized(env: Env): Promise<boolean> {
   return row != null && getString(row, 'value') !== '';
 }
 
+// 监控防抖：距上次监控是否已超过配置间隔（分钟）
+export async function shouldRunMonitor(env: Env, intervalMinutes: number): Promise<boolean> {
+  const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?')
+    .bind('last_monitor_run')
+    .first();
+  if (!row) return true; // 首次运行
+  const lastRun = parseInt(getString(row, 'value'), 10) || 0;
+  const elapsed = Math.floor(Date.now() / 1000) - lastRun;
+  return elapsed >= intervalMinutes * 60;
+}
+
+// 记录本次监控完成时间（Unix 秒）
+export async function markMonitorRun(env: Env): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  await env.DB.prepare('INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,datetime(\'now\'))')
+    .bind('last_monitor_run', String(now))
+    .run();
+}
+
 export async function getConfig(env: Env): Promise<Config> {
   const rows = await env.DB.prepare('SELECT key, value FROM settings').all();
   const map = new Map<string, string>();
@@ -71,6 +92,7 @@ export async function getConfig(env: Env): Promise<Config> {
   cfg.shutdownMode = map.get('shutdown_mode') ?? 'KeepCharging';
   cfg.thresholdAction = map.get('threshold_action') ?? 'stop_and_notify';
   cfg.apiInterval = parseInt(map.get('api_interval') ?? '600', 10) || 600;
+  cfg.monitorInterval = parseInt(map.get('monitor_interval') ?? '5', 10) || 5;
   cfg.timezone = map.get('timezone') ?? 'Asia/Shanghai';
   cfg.keepAlive = map.get('keep_alive') === '1';
   cfg.enableBilling = map.get('enable_billing') === '1';

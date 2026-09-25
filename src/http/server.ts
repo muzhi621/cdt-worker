@@ -189,6 +189,7 @@ async function getConfig(ctx: Context): Promise<Response> {
     shutdownMode: config.shutdownMode,
     thresholdAction: config.thresholdAction,
     apiInterval: config.apiInterval,
+    monitorInterval: config.monitorInterval,
     timezone: config.timezone,
     keepAlive: config.keepAlive,
     enableBilling: config.enableBilling,
@@ -209,6 +210,7 @@ async function saveConfig(ctx: Context): Promise<Response> {
     ['shutdown_mode', String(b.shutdownMode ?? 'KeepCharging')],
     ['threshold_action', String(b.thresholdAction ?? 'stop_and_notify')],
     ['api_interval', String(b.apiInterval ?? 600)],
+    ['monitor_interval', String(b.monitorInterval ?? 5)],
     ['timezone', String(b.timezone ?? 'Asia/Shanghai')],
     ['keep_alive', b.keepAlive ? '1' : '0'],
     ['enable_billing', b.enableBilling ? '1' : '0'],
@@ -324,6 +326,10 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
 
 async function runMonitorCycle(env: Env): Promise<Response> {
   const config = await store.getConfig(env);
+  // 防抖：距上次监控不足配置间隔则跳过（避免外部 cron 频繁触发重复执行）
+  if (!(await store.shouldRunMonitor(env, config.monitorInterval))) {
+    return json({ monitored: 0, skipped: true, next_in_seconds: config.monitorInterval * 60 });
+  }
   const results = [];
   for (const account of config.accounts) {
     try {
@@ -332,5 +338,6 @@ async function runMonitorCycle(env: Env): Promise<Response> {
       await store.addLog(env, 'error', `监控账号失败: ${err}`);
     }
   }
-  return json({ monitored: results.length });
+  await store.markMonitorRun(env);
+  return json({ monitored: results.length, interval_minutes: config.monitorInterval });
 }
