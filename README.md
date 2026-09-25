@@ -47,20 +47,30 @@ cdt-worker/
 
 ## 部署
 
-1. 创建 D1 数据库和 KV 命名空间，把 ID 填入 `wrangler.toml`
-2. 初始化表结构：
-   ```bash
-   npx wrangler d1 execute cdt-monitor-db --remote --file=./schema.sql
-   ```
-3. 设置主密钥（32 字节 base64，用于加密阿里云凭据）：
+1. 创建 D1 数据库（`cdt-monitor-db`）。**无需手动建表**——Worker 首次请求时会自动幂等建表。
+2. 设置主密钥（32 字节 base64，用于加密阿里云凭据），通过 Dashboard 的 Secret 设置：
    ```bash
    npx wrangler secret put CDT_MASTER_KEY
    ```
-4. 部署：
+3. 部署：
    ```bash
    npx wrangler deploy
    ```
-5. 首次访问进入安装向导，设置管理员密码，然后在「设置」中添加阿里云账号（AK/Secret 会加密存储）。
+4. 首次访问进入安装向导，设置管理员密码，然后在「设置」中添加阿里云账号（AK/Secret 会加密存储）。
+
+> 更详细的 Dashboard 前台部署教程见 [DEPLOY-DASHBOARD.md](./DEPLOY-DASHBOARD.md)。
+
+## 定时监控（外部 HTTP 触发）
+
+本项目**不使用 Cloudflare 自带 Cron**（免费额度仅 5 个，易超限），改用外部定时服务每 N 分钟请求一次 `/__cron` 接口触发监控：
+
+```
+https://你的worker地址/__cron
+```
+
+监控间隔在管理台「设置」里配置（默认 5 分钟），Worker 内部按此间隔防抖，外部频繁调用不会重复执行。
+
+> 外部定时服务配置教程（cron-job.org / GitHub Actions 等）见 [DEPLOY-CRON.md](./DEPLOY-CRON.md)。
 
 ## 本地开发
 
