@@ -130,6 +130,5 @@ export async function verifyPassword(encoded: string, password: string): Promise
 // 环境变量类型声明
 export interface Env {
   DB: D1Database;
-  CACHE: KVNamespace;
   CDT_MASTER_KEY: string;
 }
