@@ -5,6 +5,7 @@
 import * as store from '../store/store';
 import * as engine from '../engine/engine';
 import { hashPassword, verifyPassword, constantTimeEqual, envPassword, newToken, tokenHash, type Env } from '../security/security';
+import { deliverEvent } from '../notify/service';
 import type { Account } from '../provider/aliyun';
 import indexHtml from '../web/index.html';
 
@@ -102,6 +103,7 @@ const routes: { method: string; pattern: string; scope?: string; handler: (ctx: 
   { method: 'DELETE', pattern: '/api/v1/accounts/:id', scope: 'admin', handler: deleteAccountHandler },
   { method: 'GET', pattern: '/api/v1/logs', scope: 'admin', handler: logsHandler },
   { method: 'DELETE', pattern: '/api/v1/logs', scope: 'admin', handler: clearLogsHandler },
+  { method: 'POST', pattern: '/api/v1/notify/test', scope: 'admin', handler: notifyTestHandler },
 ];
 
 async function setup(ctx: Context): Promise<Response> {
@@ -254,7 +256,8 @@ async function widgetSummary(ctx: Context): Promise<Response> {
 
 async function getConfig(ctx: Context): Promise<Response> {
   const config = await store.getConfig(ctx.env);
-  // 脱敏：不返回密码哈希和已加密的 secret 明文
+  // 脱敏：不返回密码哈希、加密 secret 明文与通知通道密钥（只回 configured 标志）
+  const n = config.notifications;
   const safe = {
     trafficThreshold: config.trafficThreshold,
     shutdownMode: config.shutdownMode,
@@ -266,10 +269,36 @@ async function getConfig(ctx: Context): Promise<Response> {
     enableBilling: config.enableBilling,
     enableScheduleMail: config.enableScheduleMail,
     logRetentionDays: config.logRetentionDays,
-    notifications: config.notifications,
+    notifications: {
+      telegram: { ...n.telegram, token: '', tokenConfigured: !!n.telegram.token },
+      webhook: { ...n.webhook, secret: '', secretConfigured: !!n.webhook.secret },
+      serverchan: { ...n.serverchan, sendKey: '', sendKeyConfigured: !!n.serverchan.sendKey },
+      pushplus: { ...n.pushplus, token: '', tokenConfigured: !!n.pushplus.token },
+      smtp: { ...n.smtp, password: '', passwordConfigured: !!n.smtp.password },
+    },
     accounts: config.accounts.map((a) => ({ ...a, accessKeyId: '', accessKeySecret: '' })),
   };
   return json(safe);
+}
+
+// 通知通道的敏感字段：新值为空串时继承旧值（前端脱敏显示后原样提交的场景）
+function mergeNotifySecrets(prev: Record<string, Record<string, unknown>> | undefined, next: Record<string, Record<string, unknown>>): Record<string, Record<string, unknown>> {
+  const secretPaths: [string, string, string][] = [
+    ['telegram', 'token', 'tokenConfigured'],
+    ['webhook', 'secret', 'secretConfigured'],
+    ['serverchan', 'sendKey', 'sendKeyConfigured'],
+    ['pushplus', 'token', 'tokenConfigured'],
+    ['smtp', 'password', 'passwordConfigured'],
+  ];
+  for (const [chan, field, flag] of secretPaths) {
+    const incoming = next[chan];
+    if (!incoming || typeof incoming !== 'object') continue;
+    if (incoming[field] === '' && prev?.[chan]?.[field]) {
+      incoming[field] = prev[chan][field];
+    }
+    delete incoming[flag]; // configured 标志不落库
+  }
+  return next;
 }
 
 async function saveConfig(ctx: Context): Promise<Response> {
@@ -300,7 +329,16 @@ async function saveConfig(ctx: Context): Promise<Response> {
     await ctx.env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind(k, v).run();
   }
   if (b.notifications) {
-    await ctx.env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind('notifications', JSON.stringify(b.notifications)).run();
+    // 敏感字段空串继承旧值，configured 标志不入库
+    let merged = b.notifications as Record<string, Record<string, unknown>>;
+    try {
+      const oldRaw = await ctx.env.DB.prepare("SELECT value FROM settings WHERE key = 'notifications'").first();
+      const old = oldRaw ? JSON.parse(String((oldRaw as Record<string, unknown>).value ?? '{}')) : undefined;
+      merged = mergeNotifySecrets(old, merged);
+    } catch {
+      merged = mergeNotifySecrets(undefined, merged);
+    }
+    await ctx.env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind('notifications', JSON.stringify(merged)).run();
   }
   // 保存账号（带明文 secret 时更新，否则跳过）
   if (Array.isArray(b.accounts)) {
@@ -348,6 +386,23 @@ async function clearLogsHandler(ctx: Context): Promise<Response> {
   const category = new URL(ctx.request.url).searchParams.get('category') || 'all';
   await store.clearLogs(ctx.env, category);
   return json({ success: true });
+}
+
+// 测试通知：向所有已启用通道发送一条测试消息
+async function notifyTestHandler(ctx: Context): Promise<Response> {
+  const config = await store.getConfig(ctx.env);
+  const event = {
+    id: newToken(18),
+    type: 'test',
+    title: '通知通道测试',
+    summary: '这是一条来自 CDT Monitor 的测试通知，收到即代表该通道配置正确。',
+    accountId: 0,
+    fields: { '发送时间': new Date().toLocaleString('zh-CN', { timeZone: config.timezone || 'Asia/Shanghai' }) },
+    createdAt: new Date().toISOString(),
+  };
+  const results = await deliverEvent(config.notifications as never, event as never);
+  if (results.length === 0) return error('no_channel', '尚未启用任何通知通道，请先开启并保存', 400);
+  return json({ results });
 }
 
 async function deleteAccountHandler(ctx: Context): Promise<Response> {
@@ -422,6 +477,12 @@ async function runMonitorCycle(env: Env): Promise<Response> {
     }
   }
   await store.markMonitorRun(env);
+  // 消费通知队列（失败自动重试，不影响监控主流程）
+  try {
+    await engine.flushOutbox(env, config);
+  } catch (err) {
+    await store.addLog(env, 'error', `通知队列处理异常: ${err}`);
+  }
   // 顺带清理超期日志（幂等、低成本，避免日志无限增长）
   try {
     await store.cleanupExpiredLogs(env, config.logRetentionDays);

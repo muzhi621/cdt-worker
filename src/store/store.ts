@@ -17,9 +17,11 @@ export interface Config {
   enableScheduleMail: boolean;
   logRetentionDays: number; // 日志保留天数，超期自动清理
   notifications: {
-    email: { enabled: boolean; host: string; port: number; username: string; password: string; security: string; to: string };
     telegram: { enabled: boolean; token: string; chatId: string; proxyType: string; proxyUrl: string };
     webhook: { enabled: boolean; url: string; method: string; type: string; provider: string; headers: string; secret: string; body: string };
+    serverchan: { enabled: boolean; sendKey: string };
+    pushplus: { enabled: boolean; token: string };
+    smtp: { enabled: boolean; host: string; port: number; username: string; password: string; from: string; to: string };
   };
   accounts: Account[];
 }
@@ -37,9 +39,11 @@ const DEFAULT_CONFIG: Config = {
   enableScheduleMail: false,
   logRetentionDays: 30,
   notifications: {
-    email: { enabled: false, host: '', port: 465, username: '', password: '', security: 'ssl', to: '' },
     telegram: { enabled: false, token: '', chatId: '', proxyType: 'none', proxyUrl: '' },
-    webhook: { enabled: false, url: '', method: 'GET', type: 'JSON', provider: 'generic', headers: '', secret: '', body: '' },
+    webhook: { enabled: false, url: '', method: 'POST', type: 'JSON', provider: 'generic', headers: '', secret: '', body: '' },
+    serverchan: { enabled: false, sendKey: '' },
+    pushplus: { enabled: false, token: '' },
+    smtp: { enabled: false, host: '', port: 465, username: '', password: '', from: '', to: '' },
   },
   accounts: [],
 };
@@ -348,4 +352,44 @@ export async function addOutbox(env: Env, channel: string, payload: unknown): Pr
   await env.DB.prepare(
     'INSERT INTO notification_outbox (channel, payload, available_at) VALUES (?,?,unixepoch())',
   ).bind(channel, JSON.stringify(payload)).run();
+}
+
+export interface OutboxRow {
+  id: number;
+  channel: string;
+  payload: string;
+  status: string;
+  updated_at: number;
+}
+
+// 取待发送的 outbox 记录（最早优先，限制批量防止单次超时）
+export async function listPendingOutbox(env: Env, limit = 10): Promise<OutboxRow[]> {
+  const rows = await env.DB.prepare(
+    "SELECT id, channel, payload, status, updated_at FROM notification_outbox WHERE status = 'queued' AND available_at <= unixepoch() ORDER BY id LIMIT ?",
+  ).bind(limit).all();
+  return (rows.results ?? []) as unknown as OutboxRow[];
+}
+
+// 标记已发送
+export async function markOutboxSent(env: Env, id: number): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE notification_outbox SET status = 'sent', error = '', updated_at = unixepoch() WHERE id = ?",
+  ).bind(id).run();
+}
+
+// 发送失败：延迟 retrySeconds 后重试；若首条入队已超过 giveUpSeconds 则放弃
+export async function markOutboxRetry(env: Env, id: number, error: string, retrySeconds: number, giveUpSeconds: number): Promise<'retry' | 'failed'> {
+  const row = await env.DB.prepare('SELECT updated_at FROM notification_outbox WHERE id = ?').bind(id).first();
+  const updatedAt = getNumber(row, 'updated_at');
+  const age = Math.floor(Date.now() / 1000) - updatedAt;
+  if (age >= giveUpSeconds) {
+    await env.DB.prepare(
+      "UPDATE notification_outbox SET status = 'failed', error = ?, updated_at = unixepoch() WHERE id = ?",
+    ).bind(error.slice(0, 500), id).run();
+    return 'failed';
+  }
+  await env.DB.prepare(
+    "UPDATE notification_outbox SET error = ?, available_at = unixepoch() + ?, updated_at = unixepoch() WHERE id = ?",
+  ).bind(error.slice(0, 500), retrySeconds, id).run();
+  return 'retry';
 }

@@ -1,6 +1,8 @@
-// 通知层：Telegram / Webhook / 邮件(MailChannels)
-// 对应原 Go 项目 internal/notify/service.go
-// 注：Worker 无任意 TCP，SMTP 直连改由 MailChannels 免费 API 替代；SOCKS5 已放弃
+// 通知层：Telegram / 通用 Webhook / Server酱 / PushPlus / SMTP 邮件
+// 对应原 Go 项目 internal/notify/service.go；MailChannels 已于 2024-06 终止，移除
+// 邮件改为 CF Workers TCP socket 直连 SMTP（465 implicit TLS）
+
+import { sendSmtpMail } from './smtp';
 
 export interface NotificationEvent {
   id: string;
@@ -13,16 +15,21 @@ export interface NotificationEvent {
 }
 
 export interface NotifyConfig {
-  email: { enabled: boolean; host: string; port: number; username: string; password: string; security: string; to: string };
   telegram: { enabled: boolean; token: string; chatId: string; proxyType: string; proxyUrl: string };
   webhook: { enabled: boolean; url: string; method: string; type: string; provider: string; headers: string; secret: string; body: string };
+  serverchan: { enabled: boolean; sendKey: string };
+  pushplus: { enabled: boolean; token: string };
+  smtp: { enabled: boolean; host: string; port: number; username: string; password: string; from: string; to: string };
 }
 
-export function enabledChannels(config: NotifyConfig): string[] {
+// 各通道是否已完整配置（决定 outbox 是否尝试该通道）
+export function activeChannels(config: NotifyConfig): string[] {
   const channels: string[] = [];
-  if (config.email.enabled && config.email.to) channels.push('email');
-  if (config.telegram.enabled && config.telegram.token && config.telegram.chatId) channels.push('telegram');
-  if (config.webhook.enabled && config.webhook.url) channels.push('webhook');
+  if (config.telegram?.enabled && config.telegram.token && config.telegram.chatId) channels.push('telegram');
+  if (config.webhook?.enabled && config.webhook.url) channels.push('webhook');
+  if (config.serverchan?.enabled && config.serverchan.sendKey) channels.push('serverchan');
+  if (config.pushplus?.enabled && config.pushplus.token) channels.push('pushplus');
+  if (config.smtp?.enabled && config.smtp.host && config.smtp.to) channels.push('smtp');
   return channels;
 }
 
@@ -51,7 +58,7 @@ async function sendTelegram(config: NotifyConfig['telegram'], event: Notificatio
 
 async function sendWebhook(config: NotifyConfig['webhook'], event: NotificationEvent): Promise<void> {
   let endpoint = replaceTemplate(config.url, replacements(event), true);
-  const method = config.method.toUpperCase() === 'POST' ? 'POST' : 'GET';
+  const method = (config.method || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
   let body: string | undefined;
   let contentType = 'application/json';
 
@@ -84,27 +91,74 @@ async function sendWebhook(config: NotifyConfig['webhook'], event: NotificationE
   }
 }
 
-// MailChannels 免费邮件 API（需在 Cloudflare DNS 配置 SPF/DKIM）
-async function sendEmail(config: NotifyConfig['email'], event: NotificationEvent): Promise<void> {
-  const payload = {
-    personalizations: [{ to: [{ email: config.to }] }],
-    from: { email: config.username, name: 'CDT Monitor' },
-    subject: `CDT Monitor · ${event.title}`,
-    content: [
-      {
-        type: 'text/html',
-        value: renderEmail(event),
-      },
-    ],
-  };
-  const resp = await fetch('https://api.mailchannels.net/tx/v1/send', {
+// Server酱·Turbo：推送到微信
+async function sendServerChan(config: NotifyConfig['serverchan'], event: NotificationEvent): Promise<void> {
+  const resp = await fetch(`https://sctapi.ftqq.com/${encodeURIComponent(config.sendKey)}.send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      title: `[CDT] ${event.title}`,
+      desp: eventText(event),
+    }),
+  });
+  if (resp.status >= 400) throw new Error(`serverchan HTTP ${resp.status}: ${await resp.text()}`);
+  const data = await resp.json().catch(() => ({}) as Record<string, unknown>) as Record<string, unknown>;
+  if (data && Number(data.code) !== 0) throw new Error(`serverchan: ${JSON.stringify(data)}`);
+}
+
+// PushPlus：推送到微信
+async function sendPushPlus(config: NotifyConfig['pushplus'], event: NotificationEvent): Promise<void> {
+  const resp = await fetch('https://www.pushplus.plus/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      token: config.token,
+      title: `[CDT] ${event.title}`,
+      content: `<pre style="white-space:pre-wrap;font-family:inherit">${escapeHtml(eventText(event))}</pre>`,
+      template: 'html',
+    }),
   });
-  if (resp.status >= 400) {
-    throw new Error(`email HTTP ${resp.status}: ${await resp.text()}`);
+  if (resp.status >= 400) throw new Error(`pushplus HTTP ${resp.status}: ${await resp.text()}`);
+  const data = await resp.json().catch(() => ({}) as Record<string, unknown>) as Record<string, unknown>;
+  if (data && Number(data.code) !== 200) throw new Error(`pushplus: ${JSON.stringify(data)}`);
+}
+
+// SMTP 邮件
+async function sendSmtp(config: NotifyConfig['smtp'], event: NotificationEvent): Promise<void> {
+  await sendSmtpMail(
+    { host: config.host, port: Number(config.port) || 465, username: config.username, password: config.password, from: config.from || config.username, to: config.to },
+    `CDT Monitor · ${event.title}`,
+    renderEmail(event),
+  );
+}
+
+export interface ChannelResult {
+  channel: string;
+  ok: boolean;
+  error?: string;
+}
+
+// 把事件发往所有已配置且启用的通道，返回各通道结果（不抛错）
+export async function deliverEvent(config: NotifyConfig, event: NotificationEvent): Promise<ChannelResult[]> {
+  const channels = activeChannels(config);
+  const results: ChannelResult[] = [];
+  for (const channel of channels) {
+    try {
+      if (channel === 'telegram') await sendTelegram(config.telegram, event);
+      else if (channel === 'webhook') await sendWebhook(config.webhook, event);
+      else if (channel === 'serverchan') await sendServerChan(config.serverchan, event);
+      else if (channel === 'pushplus') await sendPushPlus(config.pushplus, event);
+      else if (channel === 'smtp') await sendSmtp(config.smtp, event);
+      results.push({ channel, ok: true });
+    } catch (err) {
+      results.push({ channel, ok: false, error: String((err as Error).message ?? err) });
+    }
   }
+  return results;
+}
+
+export function hasActiveChannel(config: NotifyConfig): boolean {
+  return activeChannels(config).length > 0;
 }
 
 function renderEmail(event: NotificationEvent): string {
@@ -146,17 +200,4 @@ function replaceTemplate(input: string, reps: Record<string, string>, urlEncode:
     out = out.split(k).join(urlEncode ? encodeURIComponent(v) : JSON.stringify(v).replace(/^"|"$/g, ''));
   }
   return out;
-}
-
-export async function send(channel: string, event: NotificationEvent, config: NotifyConfig): Promise<void> {
-  switch (channel) {
-    case 'email':
-      return sendEmail(config.email, event);
-    case 'telegram':
-      return sendTelegram(config.telegram, event);
-    case 'webhook':
-      return sendWebhook(config.webhook, event);
-    default:
-      throw new Error(`unsupported notification channel ${channel}`);
-  }
 }

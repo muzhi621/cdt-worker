@@ -5,7 +5,7 @@
 import type { Account } from '../provider/aliyun';
 import * as aliyun from '../provider/aliyun';
 import * as store from '../store/store';
-import { enabledChannels, type NotificationEvent, type NotifyConfig } from '../notify/service';
+import { deliverEvent, hasActiveChannel, type NotificationEvent, type NotifyConfig } from '../notify/service';
 import { newToken, type Env } from '../security/security';
 
 // 状态常量（与原 Go 项目一致）
@@ -185,9 +185,7 @@ export async function processAccount(env: Env, account: Account, force = false):
         '设定阈值': `${config.trafficThreshold}%`,
         '实例状态': status,
       });
-      await store.addOutbox(env, 'telegram', event);
-      await store.addOutbox(env, 'webhook', event);
-      await store.addOutbox(env, 'email', event);
+      await store.addOutbox(env, 'notify', event);
       await store.addLog(env, 'warning', event.summary);
     }
   }
@@ -208,9 +206,7 @@ export async function processAccount(env: Env, account: Account, force = false):
           '账号': masked(account.accessKeyId),
           '实例': account.instanceId,
         });
-        await store.addOutbox(env, 'telegram', event);
-        await store.addOutbox(env, 'webhook', event);
-        await store.addOutbox(env, 'email', event);
+        await store.addOutbox(env, 'notify', event);
       } catch (err) {
         await store.deleteActionEvent(env, key);
         await store.addLog(env, 'error', `保活启动失败 [${masked(account.accessKeyId)}]: ${err}`);
@@ -266,9 +262,7 @@ async function executeScheduledAction(
       '账号': masked(account.accessKeyId),
       '实例': account.instanceId,
     });
-    await store.addOutbox(env, 'telegram', event);
-    await store.addOutbox(env, 'webhook', event);
-    await store.addOutbox(env, 'email', event);
+    await store.addOutbox(env, 'notify', event);
   }
   return true;
 }
@@ -313,4 +307,39 @@ export async function summary(env: Env) {
     };
   });
   return result;
+}
+
+// 消费通知队列：把 outbox 中待发事件发往所有已配置通道
+// 全部通道成功 → sent；任一失败 → 5 分钟后重试，入队超 24 小时仍失败则放弃
+// 每次监控周期末尾调用一次（外部触发即消费节奏）
+export async function flushOutbox(env: Env, config: store.Config): Promise<void> {
+  if (!hasActiveChannel(config.notifications as unknown as NotifyConfig)) return;
+  let rows;
+  try {
+    rows = await store.listPendingOutbox(env, 10);
+  } catch {
+    return;
+  }
+  for (const row of rows) {
+    let event: NotificationEvent;
+    try {
+      event = JSON.parse(row.payload) as NotificationEvent;
+    } catch {
+      await store.markOutboxSent(env, row.id); // 无法解析的脏数据直接丢弃
+      continue;
+    }
+    const results = await deliverEvent(config.notifications as unknown as NotifyConfig, event);
+    const failures = results.filter((r) => !r.ok);
+    if (failures.length === 0) {
+      await store.markOutboxSent(env, row.id);
+      continue;
+    }
+    const detail = failures.map((f) => `${f.channel}: ${f.error}`).join('; ');
+    const outcome = await store.markOutboxRetry(env, row.id, detail, 300, 24 * 3600);
+    if (outcome === 'failed') {
+      await store.addLog(env, 'error', `通知发送失败已放弃(#{${row.id}}): ${detail}`);
+    } else {
+      await store.addLog(env, 'warning', `通知部分通道发送失败，5 分钟后重试: ${detail}`);
+    }
+  }
 }
