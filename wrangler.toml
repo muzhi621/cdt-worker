@@ -3,10 +3,14 @@ main = "src/index.ts"
 compatibility_date = "2024-09-25"
 compatibility_flags = ["nodejs_compat"]
 
-# 阿里云凭据的主密钥（AES-GCM 加密 AK/Secret 用），不落库
-# 部署时通过 `wrangler secret put CDT_MASTER_KEY` 设置（32 字节 base64）
-# vars = { }
+# 阿里云凭据主密钥（AES-GCM 加密 AK/Secret 用），通过 Cloudflare Dashboard 的 Secret 设置
+# 名称固定为 CDT_MASTER_KEY，值为 32 字节 base64（不要硬编码在此文件）
+# 说明：代码只引用 env.CDT_MASTER_KEY，ID 与业务逻辑解耦
 
+# ─────────────────────────────────────────────────────────────
+# D1 数据库绑定（代码只认绑定名 "DB"，不感知具体 ID）
+# 换库时只需修改下面 database_id 这一行，业务代码零改动
+# ─────────────────────────────────────────────────────────────
 [[d1_databases]]
 binding = "DB"
 database_name = "cdt-monitor-db"
