@@ -410,5 +410,11 @@ async function runMonitorCycle(env: Env): Promise<Response> {
     }
   }
   await store.markMonitorRun(env);
+  // 记录本次监控周期到日志，让前台「日志页」能确认定时触发确实在运行
+  if (results.length > 0) {
+    await store.addLog(env, 'info', `监控周期完成，本次处理 ${results.length} 个账号`);
+  } else {
+    await store.addLog(env, 'info', '监控周期已触发，但尚未配置任何账号（请到「账号」页添加）');
+  }
   return json({ monitored: results.length, interval_minutes: config.monitorInterval });
 }
