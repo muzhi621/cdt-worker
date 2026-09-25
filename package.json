@@ -1,0 +1,19 @@
+{
+  "name": "cdt-monitor-worker",
+  "version": "1.0.0",
+  "description": "CDT Monitor 的 Cloudflare Worker 移植版：阿里云 CDT 流量监控、ECS 控制与费用观察",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute cdt-monitor-db --local --file=./schema.sql",
+    "db:init:remote": "wrangler d1 execute cdt-monitor-db --remote --file=./schema.sql",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "wrangler": "^3.80.0",
+    "typescript": "^5.6.0",
+    "@cloudflare/workers-types": "^4.20240925.0"
+  }
+}

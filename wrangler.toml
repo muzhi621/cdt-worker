@@ -1,0 +1,24 @@
+name = "cdt-monitor"
+main = "src/index.ts"
+compatibility_date = "2024-09-25"
+compatibility_flags = ["nodejs_compat"]
+
+# 阿里云凭据的主密钥（AES-GCM 加密 AK/Secret 用），不落库
+# 部署时通过 `wrangler secret put CDT_MASTER_KEY` 设置（32 字节 base64）
+# vars = { }
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cdt-monitor-db"
+database_id = "REPLACE_WITH_DATABASE_ID"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "REPLACE_WITH_KV_ID"
+
+# 监控调度：每 5 分钟触发一次（阿里云 API 有频率限制，避免超预算）
+[triggers]
+crons = ["*/5 * * * *"]
+
+[observability]
+enabled = true

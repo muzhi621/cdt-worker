@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CDT Monitor</title>
+  <style>
+    :root {
+      --bg: #f2f2f7;
+      --card: rgba(255,255,255,.92);
+      --text: #1c1c1e;
+      --muted: #6e6e73;
+      --accent: #0071e3;
+      --danger: #ff3b30;
+      --ok: #34c759;
+      --border: #e5e5ea;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.5; padding: 24px;
+    }
+    .container { max-width: 960px; margin: 0 auto; }
+    h1 { font-size: 24px; margin-bottom: 4px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+    .card {
+      background: var(--card); border: 1px solid #fff; border-radius: 16px;
+      box-shadow: 0 8px 24px -8px rgba(0,0,0,.08); padding: 20px; margin-bottom: 16px;
+    }
+    .card h2 { font-size: 16px; margin-bottom: 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); font-size: 14px; }
+    th { color: var(--muted); font-weight: 600; }
+    .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .pill.running { background: #e8f8ed; color: #1a7f37; }
+    .pill.stopped { background: #fdeceb; color: #c0392b; }
+    .pill.transient { background: #fff4e5; color: #b26a00; }
+    .bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; margin-top: 4px; }
+    .bar > div { height: 100%; background: var(--accent); }
+    .bar > div.over { background: var(--danger); }
+    button {
+      background: var(--accent); color: #fff; border: none; border-radius: 8px;
+      padding: 8px 14px; font-size: 13px; cursor: pointer; margin-right: 6px;
+    }
+    button.danger { background: var(--danger); }
+    button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    input, select, textarea {
+      width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+      font-size: 14px; margin-bottom: 8px; font-family: inherit;
+    }
+    label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .hidden { display: none; }
+    .error { color: var(--danger); font-size: 13px; margin-top: 8px; }
+    .msg { color: var(--ok); font-size: 13px; margin-top: 8px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tab { padding: 8px 16px; border-radius: 8px; cursor: pointer; background: var(--card); border: 1px solid var(--border); font-size: 14px; }
+    .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .log { font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>CDT Monitor</h1>
+    <div class="sub">阿里云 CDT 流量监控 · 运行于 Cloudflare Worker</div>
+
+    <!-- 登录 -->
+    <div id="login-view" class="card hidden">
+      <h2>管理员登录</h2>
+      <label>密码</label>
+      <input type="password" id="login-password" />
+      <button onclick="login()">登录</button>
+      <div id="login-error" class="error"></div>
+    </div>
+
+    <!-- 初始化向导 -->
+    <div id="setup-view" class="card hidden">
+      <h2>首次安装向导</h2>
+      <p class="sub">设置管理员密码（至少 10 个字符）</p>
+      <label>管理员密码</label>
+      <input type="password" id="setup-password" />
+      <button onclick="setup()">初始化</button>
+      <div id="setup-error" class="error"></div>
+    </div>
+
+    <!-- 主界面 -->
+    <div id="main-view" class="hidden">
+      <div class="tabs">
+        <div class="tab active" data-tab="status" onclick="switchTab('status')">状态</div>
+        <div class="tab" data-tab="accounts" onclick="switchTab('accounts')">账号</div>
+        <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
+        <div class="tab" data-tab="logs" onclick="switchTab('logs')">日志</div>
+      </div>
+
+      <div id="tab-status">
+        <div class="card">
+          <h2>实例状态</h2>
+          <div id="accounts-list"></div>
+        </div>
+      </div>
+
+      <div id="tab-accounts" class="hidden">
+        <div class="card">
+          <h2>添加阿里云账号</h2>
+          <div class="row">
+            <div><label>AccessKey ID</label><input id="ak-id" placeholder="LTAI..." /></div>
+            <div><label>AccessKey Secret（加密存储）</label><input id="ak-secret" type="password" /></div>
+          </div>
+          <div class="row">
+            <div><label>地域</label><input id="ak-region" placeholder="cn-hongkong" /></div>
+            <div><label>实例 ID（可选）</label><input id="ak-instance" placeholder="i-xxx" /></div>
+          </div>
+          <div class="row">
+            <div><label>流量上限 (GB)</label><input id="ak-max" type="number" placeholder="1000" /></div>
+            <div><label>站点类型</label>
+              <select id="ak-site"><option value="china">中国站</option><option value="international">国际站</option></select>
+            </div>
+          </div>
+          <div><label>备注</label><input id="ak-remark" placeholder="生产机" /></div>
+          <button onclick="addAccount()">添加账号</button>
+          <div id="account-msg" class="msg"></div>
+        </div>
+        <div class="card">
+          <h2>已有账号</h2>
+          <div id="accounts-manage"></div>
+        </div>
+      </div>
+
+      <div id="tab-settings" class="hidden">
+        <div class="card">
+          <h2>监控设置</h2>
+          <div class="row">
+            <div><label>流量阈值 (%)</label><input id="set-threshold" type="number" /></div>
+            <div><label>API 间隔 (秒)</label><input id="set-interval" type="number" /></div>
+          </div>
+          <div class="row">
+            <div><label>阈值动作</label>
+              <select id="set-action">
+                <option value="stop_and_notify">停机并通知</option>
+                <option value="notify_only">仅通知</option>
+              </select>
+            </div>
+            <div><label>停机模式</label>
+              <select id="set-shutdown">
+                <option value="KeepCharging">普通停机 (KeepCharging)</option>
+                <option value="StopCharging">节省停机 (StopCharging)</option>
+              </select>
+            </div>
+          </div>
+          <label><input type="checkbox" id="set-keepalive" /> 抢占式实例保活</label>
+          <label><input type="checkbox" id="set-billing" /> 启用账单查询</label>
+          <div><label>时区</label><input id="set-timezone" value="Asia/Shanghai" /></div>
+          <button onclick="saveSettings()">保存设置</button>
+          <div id="settings-msg" class="msg"></div>
+        </div>
+      </div>
+
+      <div id="tab-logs" class="hidden">
+        <div class="card">
+          <h2>日志</h2>
+          <button class="ghost" onclick="loadLogs()">刷新</button>
+          <button class="danger" onclick="clearLogs()">清空</button>
+          <div id="logs-content" class="log"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let csrf = '';
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CDT-CSRF': csrf, ...(opts.headers || {}) },
+        ...opts,
+      });
+      return res;
+    }
+
+    async function boot() {
+      const initRes = await fetch('/api/v1/system/init-status');
+      const init = await initRes.json();
+      if (init.initialized) {
+        document.getElementById('login-view').classList.remove('hidden');
+      } else {
+        document.getElementById('setup-view').classList.remove('hidden');
+      }
+    }
+
+    async function setup() {
+      const password = document.getElementById('setup-password').value;
+      const res = await fetch('/api/v1/setup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      const data = await res.json();
+      if (res.ok) { csrf = data.csrf_token; showMain(); }
+      else document.getElementById('setup-error').textContent = data.error?.message || '初始化失败';
+    }
+
+    async function login() {
+      const password = document.getElementById('login-password').value;
+      const res = await fetch('/api/v1/auth/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      const data = await res.json();
+      if (res.ok) { csrf = data.csrf_token; showMain(); }
+      else document.getElementById('login-error').textContent = data.error?.message || '登录失败';
+    }
+
+    function showMain() {
+      document.getElementById('login-view').classList.add('hidden');
+      document.getElementById('setup-view').classList.add('hidden');
+      document.getElementById('main-view').classList.remove('hidden');
+      loadStatus(); loadConfig();
+    }
+
+    function switchTab(tab) {
+      document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
+      ['status','accounts','settings','logs'].forEach((t) => {
+        document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
+      });
+      if (tab === 'logs') loadLogs();
+      if (tab === 'accounts') loadAccountsManage();
+    }
+
+    async function loadStatus() {
+      const res = await api('/api/v1/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      const list = document.getElementById('accounts-list');
+      list.innerHTML = '<table><tr><th>账号</th><th>状态</th><th>流量用量</th><th>阈值</th></tr>' +
+        (data.accounts || []).map((a) => {
+          const pct = a.percentage.toFixed(1);
+          const cls = a.status === 'Running' ? 'running' : (a.status === 'Stopped' ? 'stopped' : 'transient');
+          const over = a.overThreshold ? 'over' : '';
+          return `<tr>
+            <td>${a.name}</td>
+            <td><span class="pill ${cls}">${a.status}</span></td>
+            <td>${a.used} / ${a.total} GB (${pct}%)
+              <div class="bar"><div class="${over}" style="width:${Math.min(pct,100)}%"></div></div>
+            </td>
+            <td>${a.threshold}%</td>
+          </tr>`;
+        }).join('') + '</table>';
+    }
+
+    async function loadAccountsManage() {
+      const res = await api('/api/v1/config');
+      if (!res.ok) return;
+      const data = await res.json();
+      const list = document.getElementById('accounts-manage');
+      list.innerHTML = '<table><tr><th>备注</th><th>地域</th><th>实例</th><th>操作</th></tr>' +
+        (data.accounts || []).map((a) => `<tr>
+          <td>${a.remark || a.name}</td><td>${a.regionId}</td><td>${a.instanceId || '-'}</td>
+          <td><button class="danger" onclick="delAccount(${a.id})">删除</button></td>
+        </tr>`).join('') + '</table>';
+    }
+
+    async function addAccount() {
+      const account = {
+        accessKeyId: document.getElementById('ak-id').value,
+        accessKeySecret: document.getElementById('ak-secret').value,
+        regionId: document.getElementById('ak-region').value,
+        instanceId: document.getElementById('ak-instance').value,
+        maxTraffic: parseFloat(document.getElementById('ak-max').value) || 0,
+        siteType: document.getElementById('ak-site').value,
+        remark: document.getElementById('ak-remark').value,
+      };
+      const res = await api('/api/v1/config', {
+        method: 'PUT', body: JSON.stringify({ accounts: [account] }),
+      });
+      const data = await res.json();
+      if (res.ok) { document.getElementById('account-msg').textContent = '账号已添加（凭据已加密）'; loadAccountsManage(); }
+      else document.getElementById('account-msg').textContent = data.error?.message || '添加失败';
+    }
+
+    async function delAccount(id) {
+      // 简化：通过 config 更新不含该账号（此处用单独删除接口更好，但 MVP 用 refresh 触发）
+      alert('删除功能请通过 API 或后续版本使用');
+    }
+
+    async function loadConfig() {
+      const res = await api('/api/v1/config');
+      if (!res.ok) return;
+      const data = await res.json();
+      document.getElementById('set-threshold').value = data.trafficThreshold;
+      document.getElementById('set-interval').value = data.apiInterval;
+      document.getElementById('set-action').value = data.thresholdAction;
+      document.getElementById('set-shutdown').value = data.shutdownMode;
+      document.getElementById('set-keepalive').checked = data.keepAlive;
+      document.getElementById('set-billing').checked = data.enableBilling;
+      document.getElementById('set-timezone').value = data.timezone;
+    }
+
+    async function saveSettings() {
+      const settings = {
+        trafficThreshold: parseInt(document.getElementById('set-threshold').value),
+        apiInterval: parseInt(document.getElementById('set-interval').value),
+        thresholdAction: document.getElementById('set-action').value,
+        shutdownMode: document.getElementById('set-shutdown').value,
+        keepAlive: document.getElementById('set-keepalive').checked,
+        enableBilling: document.getElementById('set-billing').checked,
+        timezone: document.getElementById('set-timezone').value,
+      };
+      const res = await api('/api/v1/config', { method: 'PUT', body: JSON.stringify(settings) });
+      const data = await res.json();
+      document.getElementById('settings-msg').textContent = res.ok ? '设置已保存' : (data.error?.message || '保存失败');
+    }
+
+    async function loadLogs() {
+      const res = await api('/api/v1/logs');
+      if (!res.ok) return;
+      const data = await res.json();
+      document.getElementById('logs-content').textContent = (data.logs || [])
+        .map((l) => `[${l.type}] ${l.created_at} ${l.message}`).join('\n');
+    }
+
+    async function clearLogs() {
+      await api('/api/v1/logs', { method: 'DELETE' });
+      loadLogs();
+    }
+
+    boot();
+  </script>
+</body>
+</html>
