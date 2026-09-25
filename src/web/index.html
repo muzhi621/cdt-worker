@@ -58,6 +58,13 @@
     .tab { padding: 8px 16px; border-radius: 8px; cursor: pointer; background: var(--card); border: 1px solid var(--border); font-size: 14px; }
     .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
     .log { font-family: monospace; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+    .steps { background: #f7f7fa; border-radius: 10px; padding: 14px 16px; margin: 10px 0; font-size: 13px; }
+    .steps ol { margin: 0; padding-left: 20px; }
+    .steps li { margin-bottom: 6px; }
+    .url-box { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
+    .url-box input { margin-bottom: 0; font-family: monospace; font-size: 12px; flex: 1; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+    .btn-sm { padding: 6px 10px; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -158,6 +165,50 @@
           <button onclick="saveSettings()">保存设置</button>
           <div id="settings-msg" class="msg"></div>
         </div>
+
+        <div class="card">
+          <h2>定时监控配置</h2>
+          <p class="hint">本项目不使用 Cloudflare 自带 Cron（免费额度仅 5 个），改用外部定时服务请求下面的触发地址，实现每 N 分钟自动监控。</p>
+
+          <label>监控触发地址（复制到外部定时服务）</label>
+          <div class="url-box">
+            <input id="cron-url" readonly />
+            <button class="btn-sm" onclick="copyCronUrl()">复制</button>
+          </div>
+
+          <div class="steps">
+            <strong>方式一：cron-job.org（推荐，免费无需信用卡）</strong>
+            <ol>
+              <li>打开 <a href="https://cron-job.org" target="_blank">cron-job.org</a> 注册并登录</li>
+              <li>新建任务（Create cronjob），URL 填上面的「监控触发地址」</li>
+              <li>调度间隔填 <strong>5 分钟</strong>（与上方「监控间隔」保持一致）</li>
+              <li>保存即可，之后会每 5 分钟自动监控一次</li>
+            </ol>
+          </div>
+
+          <div class="steps">
+            <strong>方式二：GitHub Actions（已有 GitHub 账号可用）</strong>
+            <ol>
+              <li>在代码仓库新建文件 <code>.github/workflows/cron.yml</code></li>
+              <li>内容填入：<code>schedule: - cron: '*/5 * * * *'</code>，执行 <code>curl -s "上面的触发地址"</code></li>
+              <li>提交推送，GitHub 会每 5 分钟自动请求一次</li>
+            </ol>
+          </div>
+
+          <div class="steps">
+            <strong>方式三：UptimeRobot（免费，还能顺带做可用性监控）</strong>
+            <ol>
+              <li>打开 <a href="https://uptimerobot.com" target="_blank">uptimerobot.com</a> 注册并登录</li>
+              <li>新建监控（New monitor），类型选 <strong>HTTP(s)</strong></li>
+              <li>URL 填上面的「监控触发地址」，监控间隔选 <strong>5 分钟</strong></li>
+              <li>保存即可，之后会每 5 分钟请求一次</li>
+            </ol>
+          </div>
+
+          <p class="hint">也可以手动触发：直接点击上面的地址在浏览器打开，或点下方按钮立即执行一轮监控。</p>
+          <button class="btn-sm ghost" onclick="triggerNow()">立即监控一次</button>
+          <div id="cron-msg" class="msg"></div>
+        </div>
       </div>
 
       <div id="tab-logs" class="hidden">
@@ -229,6 +280,37 @@
       });
       if (tab === 'logs') loadLogs();
       if (tab === 'accounts') loadAccountsManage();
+      if (tab === 'settings') fillCronUrl();
+    }
+
+    function fillCronUrl() {
+      const el = document.getElementById('cron-url');
+      if (el) el.value = window.location.origin + '/__cron';
+    }
+
+    function copyCronUrl() {
+      const el = document.getElementById('cron-url');
+      if (el && el.value) {
+        navigator.clipboard.writeText(el.value).then(() => {
+          document.getElementById('cron-msg').textContent = '已复制到剪贴板';
+        }).catch(() => {
+          el.select();
+          document.execCommand('copy');
+          document.getElementById('cron-msg').textContent = '已复制到剪贴板';
+        });
+      }
+    }
+
+    async function triggerNow() {
+      const res = await fetch('/__cron');
+      const data = await res.json().catch(() => ({}));
+      const msg = document.getElementById('cron-msg');
+      if (res.ok) {
+        msg.textContent = data.skipped ? '刚运行过，已跳过（防抖中）' : `已触发监控：${data.monitored ?? 0} 个账号`;
+      } else {
+        msg.textContent = '触发失败';
+      }
+      loadStatus();
     }
 
     async function loadStatus() {
