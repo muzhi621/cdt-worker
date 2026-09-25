@@ -276,18 +276,22 @@ async function saveConfig(ctx: Context): Promise<Response> {
   const body = await ctx.request.json().catch(() => null);
   if (!body || typeof body !== 'object') return error('invalid_request', 'invalid JSON', 400);
   const b = body as Record<string, unknown>;
-  // 保存设置项
-  const settings: [string, string][] = [
-    ['traffic_threshold', String(b.trafficThreshold ?? 95)],
-    ['shutdown_mode', String(b.shutdownMode ?? 'KeepCharging')],
-    ['threshold_action', String(b.thresholdAction ?? 'stop_and_notify')],
-    ['api_interval', String(b.apiInterval ?? 600)],
-    ['monitor_interval', String(b.monitorInterval ?? 5)],
-    ['timezone', String(b.timezone ?? 'Asia/Shanghai')],
-    ['keep_alive', b.keepAlive ? '1' : '0'],
-    ['enable_billing', b.enableBilling ? '1' : '0'],
-    ['enable_schedule_mail', b.enableScheduleMail ? '1' : '0'],
+  // 仅写入请求中显式传入的设置项：添加账号只传 accounts 时不会重置其他参数
+  const optionalSettings: [string, unknown, string][] = [
+    ['traffic_threshold', b.trafficThreshold, String(b.trafficThreshold ?? 95)],
+    ['shutdown_mode', b.shutdownMode, String(b.shutdownMode ?? 'KeepCharging')],
+    ['threshold_action', b.thresholdAction, String(b.thresholdAction ?? 'stop_and_notify')],
+    ['api_interval', b.apiInterval, String(b.apiInterval ?? 600)],
+    ['monitor_interval', b.monitorInterval, String(b.monitorInterval ?? 5)],
+    ['timezone', b.timezone, String(b.timezone ?? 'Asia/Shanghai')],
+    ['keep_alive', b.keepAlive, b.keepAlive ? '1' : '0'],
+    ['enable_billing', b.enableBilling, b.enableBilling ? '1' : '0'],
+    ['enable_schedule_mail', b.enableScheduleMail, b.enableScheduleMail ? '1' : '0'],
   ];
+  const settings: [string, string][] = [];
+  for (const [key, present, value] of optionalSettings) {
+    if (present !== undefined) settings.push([key, value]);
+  }
   // logRetentionDays 仅在显式传入时才写入，避免设置页保存时误重置
   if (b.logRetentionDays !== undefined) {
     settings.push(['log_retention_days', String(b.logRetentionDays ?? 30)]);

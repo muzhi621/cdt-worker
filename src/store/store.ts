@@ -151,12 +151,18 @@ export async function listAccounts(env: Env): Promise<Account[]> {
 export async function saveAccount(env: Env, account: Omit<Account, 'id'> & { id?: number }): Promise<number> {
   const akEnc = await encrypt(env, account.accessKeyId);
   const skEnc = await encrypt(env, account.accessKeySecret);
+  // name 兜底：前端可不传，取备注或脱敏 AccessKey（D1 不接受 undefined 参数）
+  const name = account.name || account.remark || (account.accessKeyId ? account.accessKeyId.slice(0, 7) + '***' : 'account');
+  const remark = account.remark ?? '';
+  const instanceId = account.instanceId ?? '';
+  const startTime = account.startTime ?? '';
+  const stopTime = account.stopTime ?? '';
   if (account.id) {
     await env.DB.prepare(
       `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, access_key_id_enc=?, access_key_secret_enc=?, site_type=?, max_traffic=?, start_time=?, stop_time=?, schedule_enabled=?, keep_alive=?, updated_at=datetime('now') WHERE id=?`,
     ).bind(
-      account.name, account.remark, account.regionId, account.instanceId,
-      akEnc, skEnc, account.siteType, account.maxTraffic, account.startTime, account.stopTime,
+      name, remark, account.regionId, instanceId,
+      akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
       account.scheduleEnabled ? 1 : 0, account.keepAlive ? 1 : 0, account.id,
     ).run();
     return account.id;
@@ -164,8 +170,8 @@ export async function saveAccount(env: Env, account: Omit<Account, 'id'> & { id?
   const result = await env.DB.prepare(
     `INSERT INTO accounts (name, remark, region_id, instance_id, access_key_id_enc, access_key_secret_enc, site_type, max_traffic, start_time, stop_time, schedule_enabled, keep_alive) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).bind(
-    account.name, account.remark, account.regionId, account.instanceId,
-    akEnc, skEnc, account.siteType, account.maxTraffic, account.startTime, account.stopTime,
+    name, remark, account.regionId, instanceId,
+    akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
     account.scheduleEnabled ? 1 : 0, account.keepAlive ? 1 : 0,
   ).run();
   return Number(result.meta.last_row_id ?? 0);
