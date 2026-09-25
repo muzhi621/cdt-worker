@@ -665,6 +665,39 @@
 
     <!-- 账号 -->
     <section id="tab-accounts" class="hidden" role="tabpanel" aria-label="账号" data-page-node-id="aTGkjrg4DSnUxRNE6PRi3u">
+      <div class="card" data-page-node-id="RAM-POLICY-CARD">
+        <div class="card-head" data-page-node-id="RAM-POLICY-HEAD">
+          <div data-page-node-id="RAM-POLICY-TITLE">
+            <h2>RAM 账号最小权限</h2>
+            <p class="card-desc">建议为本系统创建专用 RAM 用户并只授予下方 6 个权限，避免使用主账号 AccessKey</p>
+          </div>
+          <span class="spacer" data-page-node-id="RAM-POLICY-SPACER"></span>
+          <button class="btn btn-ghost btn-sm" type="button" id="copy-policy">复制策略 JSON</button>
+        </div>
+
+        <div class="steps">
+          <strong>创建专用 RAM 用户（约 2 分钟）</strong>
+          <ol>
+            <li>打开阿里云控制台 → <b>访问控制 RAM</b> → 身份管理 → 用户 → <b>创建用户</b>，勾选「OpenAPI 调用访问」</li>
+            <li>创建完成后复制生成的 <b>AccessKey ID / Secret</b>（Secret 只显示一次），填到下方表单</li>
+            <li>在该用户详情页 → 权限管理 → <b>新增授权</b> → 自定义策略 → 粘贴下方 JSON</li>
+            <li>不启用账单功能时，可从策略中删去两条 <code>bss:</code> 权限，进一步收窄</li>
+          </ol>
+        </div>
+
+        <div class="code-block" id="ram-policy"></div>
+
+        <div class="steps">
+          <strong>每个权限的用途</strong>
+          <ol>
+            <li><code>cdt:ListCdtInternetTraffic</code> — 读取 CDT 互联网流量明细（核心监控数据）</li>
+            <li><code>ecs:DescribeInstanceStatus</code> — 读取实例运行状态</li>
+            <li><code>ecs:StartInstance / ecs:StopInstance</code> — 阈值自动停机与保活开机</li>
+            <li><code>bss:QueryAccountBalance / bss:DescribeInstanceBill</code> — 账户余额与实例账单（可选功能）</li>
+          </ol>
+        </div>
+      </div>
+
       <div class="card" data-page-node-id="nB8Z92cwI7Er1lQjJroorX">
         <div class="card-head" data-page-node-id="RFNTzZxJKhFg4HMSiuUlC8">
           <div data-page-node-id="YQf0HCC5jEgTt5bB30rxF3">
@@ -779,9 +812,10 @@
             <div class="field" data-page-node-id="ne77jchG0MDcAPDvbuMRQH">
               <label for="set-shutdown" data-page-node-id="u8GyyjGMNCE03Yaej6L9Ov">停机模式</label>
               <select id="set-shutdown" class="control" data-page-node-id="t9bCWdxzqltBI9M0DqKNqu">
-                <option value="KeepCharging" data-page-node-id="Lp9PrEfSAHMKwwaUh5052z">普通停机 KeepCharging</option>
-                <option value="StopCharging" data-page-node-id="JaKVm9VMndEs2gGAQ2irAs">节省停机 StopCharging</option>
+                <option value="KeepCharging" data-page-node-id="Lp9PrEfSAHMKwwaUh5052z">普通停机 KeepCharging（继续收费·稳妥）</option>
+                <option value="StopCharging" data-page-node-id="JaKVm9VMndEs2gGAQ2irAs">节省停机 StopCharging（省钱·有重启风险）</option>
               </select>
+              <p class="hint" id="shutdown-hint" data-page-node-id="SHUTDOWN-HINT"></p>
             </div>
             <div class="field" data-page-node-id="ZAtFHCy0TBnLf6WgOZP7Hb">
               <label for="set-monitor" data-page-node-id="XMWSts8E8Tc4mr6GxOk8CL">监控间隔（分钟）</label>
@@ -1467,11 +1501,22 @@
         if (d.apiInterval != null) $("set-interval").value = d.apiInterval;
         if (d.thresholdAction) $("set-action").value = d.thresholdAction;
         if (d.shutdownMode) $("set-shutdown").value = d.shutdownMode;
+        paintShutdownHint($("set-shutdown").value);
         $("set-keepalive").checked = !!d.keepAlive;
         $("set-billing").checked = !!d.enableBilling;
         $("set-timezone").value = d.timezone || "Asia/Shanghai";
         $("set-monitor").value = d.monitorInterval || 5;
       }
+
+      // 停机模式说明（依据阿里云官方文档：StopInstance API / 节省停机模式）
+      const SHUTDOWN_HINT = {
+        KeepCharging: "普通停机：停机后计算资源与公网 IP 保留、继续收费，重启必定成功。适合换系统盘、改实例规格等操作前使用。",
+        StopCharging: "节省停机（仅 VPC 按量付费实例）：停机期间暂停 vCPU/内存/镜像 License/固定公网 IP 固定带宽计费；系统盘、数据盘、EIP 固定带宽照常计费。注意：计算资源会被回收，重启可能因库存不足失败、固定公网 IP 可能变更（私网 IP 不变）；包年包月等不支持的实例不会报错，自动按普通停机处理。需先在 ECS 控制台开通「节省停机模式」。"
+      };
+      function paintShutdownHint(mode) {
+        $("shutdown-hint").textContent = SHUTDOWN_HINT[mode] || "";
+      }
+      $("set-shutdown").addEventListener("change", function () { paintShutdownHint(this.value); });
 
       $("save-settings").addEventListener("click", async () => {
         const threshold = parseInt($("set-threshold").value, 10);
@@ -1531,6 +1576,27 @@
       $("copy-url").addEventListener("click", () => copyText($("cron-url").value, "触发地址已复制"));
       $("copy-yml").addEventListener("click", () => copyText($("github-yml").textContent, "YML 已复制"));
       $("trigger-now").addEventListener("click", triggerNow);
+
+      /* ---------- RAM 最小权限策略 ---------- */
+      const RAM_POLICY = {
+        Version: "1",
+        Statement: [
+          {
+            Effect: "Allow",
+            Action: [
+              "cdt:ListCdtInternetTraffic",
+              "ecs:DescribeInstanceStatus",
+              "ecs:StartInstance",
+              "ecs:StopInstance",
+              "bss:QueryAccountBalance",
+              "bss:DescribeInstanceBill"
+            ],
+            Resource: "*"
+          }
+        ]
+      };
+      $("ram-policy").textContent = JSON.stringify(RAM_POLICY, null, 2);
+      $("copy-policy").addEventListener("click", () => copyText($("ram-policy").textContent, "策略 JSON 已复制"));
 
       async function triggerNow() {
         try {
