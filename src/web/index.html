@@ -408,6 +408,27 @@
 
     .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
     .form-grid .full { grid-column: 1 / -1; }
+    /* 通知渠道子块：标题+开关一行，字段网格独立两列 */
+    .nt-block {
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      background: var(--surface-2); padding: 14px 16px 16px; margin-bottom: 14px;
+    }
+    .nt-block:last-of-type { margin-bottom: 0; }
+    .nt-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
+    }
+    .nt-head .section-title { margin-bottom: 0; }
+    .nt-toggle {
+      display: inline-flex; align-items: center; gap: 8px;
+      min-height: 34px; padding: 4px 12px; border: 1px solid var(--border);
+      border-radius: 999px; background: var(--surface); cursor: pointer;
+      font-size: 13px; font-weight: 600; color: var(--muted);
+      transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+      user-select: none;
+    }
+    .nt-toggle input { width: 16px; height: 16px; accent-color: var(--accent); flex: none; margin: 0; }
+    .nt-toggle:has(input:checked) { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
     .check {
       display: flex; align-items: center; gap: 10px; min-height: 44px;
       padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-md);
@@ -1016,88 +1037,98 @@
         </div>
 
         <form id="notify-form" novalidate autocomplete="off">
-          <div class="section-title">Telegram</div>
-          <div class="form-grid">
-            <div class="field">
-              <label class="check" for="nt-tg-enabled"><input type="checkbox" id="nt-tg-enabled" /> 启用 Telegram 通知</label>
+          <div class="nt-block">
+            <div class="nt-head">
+              <div class="section-title">Telegram</div>
+              <label class="nt-toggle" for="nt-tg-enabled"><input type="checkbox" id="nt-tg-enabled" /> 启用</label>
             </div>
-            <div class="field">
-              <label for="nt-tg-token">Bot Token</label>
-              <input id="nt-tg-token" class="control" placeholder="123456:ABC-DEF..." autocomplete="off" spellcheck="false" />
-            </div>
-            <div class="field">
-              <label for="nt-tg-chat">Chat ID</label>
-              <input id="nt-tg-chat" class="control" placeholder="例如 123456789" autocomplete="off" spellcheck="false" />
-            </div>
-          </div>
-
-          <div class="section-title">通用 Webhook（钉钉 / 飞书 / 企业微信 / 自定义）</div>
-          <div class="form-grid">
-            <div class="field">
-              <label class="check" for="nt-wh-enabled"><input type="checkbox" id="nt-wh-enabled" /> 启用 Webhook 通知</label>
-            </div>
-            <div class="field full">
-              <label for="nt-wh-url">Webhook URL</label>
-              <input id="nt-wh-url" class="control" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." autocomplete="off" spellcheck="false" />
-              <p class="hint">默认 POST JSON（title/summary/fields）；钉钉机器人请在「自定义关键词」中包含 CDT，或用 body 模板适配。</p>
-            </div>
-          </div>
-
-          <div class="section-title">Server酱（推送到微信）</div>
-          <div class="form-grid">
-            <div class="field">
-              <label class="check" for="nt-sc-enabled"><input type="checkbox" id="nt-sc-enabled" /> 启用 Server酱</label>
-            </div>
-            <div class="field">
-              <label for="nt-sc-key">SendKey</label>
-              <input id="nt-sc-key" class="control" placeholder="SCT..." autocomplete="off" spellcheck="false" />
-            </div>
-          </div>
-
-          <div class="section-title">PushPlus（推送到微信）</div>
-          <div class="form-grid">
-            <div class="field">
-              <label class="check" for="nt-pp-enabled"><input type="checkbox" id="nt-pp-enabled" /> 启用 PushPlus</label>
-            </div>
-            <div class="field">
-              <label for="nt-pp-token">Token</label>
-              <input id="nt-pp-token" class="control" placeholder="PushPlus 用户 token" autocomplete="off" spellcheck="false" />
-            </div>
-          </div>
-
-          <div class="section-title">邮件（SMTP，465 端口隐式 TLS）</div>
-          <div class="form-grid">
-            <div class="field">
-              <label class="check" for="nt-smtp-enabled"><input type="checkbox" id="nt-smtp-enabled" /> 启用邮件通知</label>
-            </div>
-            <div class="field">
-              <label for="nt-smtp-host">SMTP 服务器</label>
-              <input id="nt-smtp-host" class="control" placeholder="smtp.qq.com / smtp.163.com / smtp.gmail.com" autocomplete="off" spellcheck="false" />
-            </div>
-            <div class="field">
-              <label for="nt-smtp-port">端口</label>
-              <input id="nt-smtp-port" class="control" type="number" min="1" max="65535" value="465" inputmode="numeric" />
-            </div>
-            <div class="field">
-              <label for="nt-smtp-user">登录用户名（发件邮箱）</label>
-              <input id="nt-smtp-user" class="control" placeholder="you@example.com" autocomplete="off" spellcheck="false" />
-            </div>
-            <div class="field">
-              <label for="nt-smtp-pass">授权码 / 密码</label>
-              <div class="input-wrap">
-                <input id="nt-smtp-pass" class="control" type="password" autocomplete="new-password" placeholder="服务商生成的授权码，不是登录密码" />
-                <button type="button" class="toggle-eye" data-eye="nt-smtp-pass" aria-label="显示密码" aria-pressed="false">
-                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
-                </button>
+            <div class="form-grid">
+              <div class="field">
+                <label for="nt-tg-token">Bot Token</label>
+                <input id="nt-tg-token" class="control" placeholder="123456:ABC-DEF..." autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="field">
+                <label for="nt-tg-chat">Chat ID</label>
+                <input id="nt-tg-chat" class="control" placeholder="例如 123456789" autocomplete="off" spellcheck="false" />
               </div>
             </div>
-            <div class="field">
-              <label for="nt-smtp-from">发件人（可选，默认同用户名）</label>
-              <input id="nt-smtp-from" class="control" placeholder="you@example.com" autocomplete="off" spellcheck="false" />
+          </div>
+
+          <div class="nt-block">
+            <div class="nt-head">
+              <div class="section-title">通用 Webhook（钉钉 / 飞书 / 企业微信 / 自定义）</div>
+              <label class="nt-toggle" for="nt-wh-enabled"><input type="checkbox" id="nt-wh-enabled" /> 启用</label>
             </div>
-            <div class="field">
-              <label for="nt-smtp-to">收件邮箱</label>
-              <input id="nt-smtp-to" class="control" placeholder="target@example.com" autocomplete="off" spellcheck="false" />
+            <div class="form-grid">
+              <div class="field full">
+                <label for="nt-wh-url">Webhook URL</label>
+                <input id="nt-wh-url" class="control" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." autocomplete="off" spellcheck="false" />
+                <p class="hint">默认 POST JSON（title/summary/fields）；钉钉机器人请在「自定义关键词」中包含 CDT，或用 body 模板适配。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="nt-block">
+            <div class="nt-head">
+              <div class="section-title">Server酱（推送到微信）</div>
+              <label class="nt-toggle" for="nt-sc-enabled"><input type="checkbox" id="nt-sc-enabled" /> 启用</label>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="nt-sc-key">SendKey</label>
+                <input id="nt-sc-key" class="control" placeholder="SCT..." autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
+          </div>
+
+          <div class="nt-block">
+            <div class="nt-head">
+              <div class="section-title">PushPlus（推送到微信）</div>
+              <label class="nt-toggle" for="nt-pp-enabled"><input type="checkbox" id="nt-pp-enabled" /> 启用</label>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="nt-pp-token">Token</label>
+                <input id="nt-pp-token" class="control" placeholder="PushPlus 用户 token" autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
+          </div>
+
+          <div class="nt-block">
+            <div class="nt-head">
+              <div class="section-title">邮件（SMTP，465 端口隐式 TLS）</div>
+              <label class="nt-toggle" for="nt-smtp-enabled"><input type="checkbox" id="nt-smtp-enabled" /> 启用</label>
+            </div>
+            <div class="form-grid">
+              <div class="field">
+                <label for="nt-smtp-host">SMTP 服务器</label>
+                <input id="nt-smtp-host" class="control" placeholder="smtp.qq.com / smtp.163.com / smtp.gmail.com" autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="field">
+                <label for="nt-smtp-port">端口</label>
+                <input id="nt-smtp-port" class="control" type="number" min="1" max="65535" value="465" inputmode="numeric" />
+              </div>
+              <div class="field">
+                <label for="nt-smtp-user">登录用户名（发件邮箱）</label>
+                <input id="nt-smtp-user" class="control" placeholder="you@example.com" autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="field">
+                <label for="nt-smtp-pass">授权码 / 密码</label>
+                <div class="input-wrap">
+                  <input id="nt-smtp-pass" class="control" type="password" autocomplete="new-password" placeholder="服务商生成的授权码，不是登录密码" />
+                  <button type="button" class="toggle-eye" data-eye="nt-smtp-pass" aria-label="显示密码" aria-pressed="false">
+                    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                  </button>
+                </div>
+              </div>
+              <div class="field">
+                <label for="nt-smtp-from">发件人（可选，默认同用户名）</label>
+                <input id="nt-smtp-from" class="control" placeholder="you@example.com" autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="field">
+                <label for="nt-smtp-to">收件邮箱</label>
+                <input id="nt-smtp-to" class="control" placeholder="target@example.com" autocomplete="off" spellcheck="false" />
+              </div>
             </div>
           </div>
 
