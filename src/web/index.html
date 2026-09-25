@@ -686,39 +686,6 @@
 
     <!-- 账号 -->
     <section id="tab-accounts" class="hidden" role="tabpanel" aria-label="账号" data-page-node-id="aTGkjrg4DSnUxRNE6PRi3u">
-      <div class="card" data-page-node-id="RAM-POLICY-CARD">
-        <div class="card-head" data-page-node-id="RAM-POLICY-HEAD">
-          <div data-page-node-id="RAM-POLICY-TITLE">
-            <h2>RAM 账号最小权限</h2>
-            <p class="card-desc">建议为本系统创建专用 RAM 用户并只授予下方 6 个权限，避免使用主账号 AccessKey</p>
-          </div>
-          <span class="spacer" data-page-node-id="RAM-POLICY-SPACER"></span>
-          <button class="btn btn-ghost btn-sm" type="button" id="copy-policy">复制策略 JSON</button>
-        </div>
-
-        <div class="steps">
-          <strong>创建专用 RAM 用户（约 2 分钟）</strong>
-          <ol>
-            <li>打开阿里云控制台 → <b>访问控制 RAM</b> → 身份管理 → 用户 → <b>创建用户</b>，勾选「OpenAPI 调用访问」</li>
-            <li>创建完成后复制生成的 <b>AccessKey ID / Secret</b>（Secret 只显示一次），填到下方表单</li>
-            <li>在该用户详情页 → 权限管理 → <b>新增授权</b> → 自定义策略 → 粘贴下方 JSON</li>
-            <li>不启用账单功能时，可从策略中删去两条 <code>bss:</code> 权限，进一步收窄</li>
-          </ol>
-        </div>
-
-        <div class="code-block" id="ram-policy"></div>
-
-        <div class="steps">
-          <strong>每个权限的用途</strong>
-          <ol>
-            <li><code>cdt:ListCdtInternetTraffic</code> — 读取 CDT 互联网流量明细（核心监控数据）</li>
-            <li><code>ecs:DescribeInstanceStatus</code> — 读取实例运行状态</li>
-            <li><code>ecs:StartInstance / ecs:StopInstance</code> — 阈值自动停机与保活开机</li>
-            <li><code>bss:QueryAccountBalance / bss:DescribeInstanceBill</code> — 账户余额与实例账单（可选功能）</li>
-          </ol>
-        </div>
-      </div>
-
       <div class="card" data-page-node-id="nB8Z92cwI7Er1lQjJroorX">
         <div class="card-head" data-page-node-id="RFNTzZxJKhFg4HMSiuUlC8">
           <div data-page-node-id="YQf0HCC5jEgTt5bB30rxF3">
@@ -816,6 +783,39 @@
             </thead>
             <tbody id="accounts-manage" data-page-node-id="1rl9A6PO99UcROIP5qGfrx"></tbody>
           </table>
+        </div>
+      </div>
+
+      <div class="card" data-page-node-id="RAM-POLICY-CARD">
+        <div class="card-head" data-page-node-id="RAM-POLICY-HEAD">
+          <div data-page-node-id="RAM-POLICY-TITLE">
+            <h2>RAM 账号最小权限</h2>
+            <p class="card-desc">建议为本系统创建专用 RAM 用户并只授予下方 6 个权限，避免使用主账号 AccessKey</p>
+          </div>
+          <span class="spacer" data-page-node-id="RAM-POLICY-SPACER"></span>
+          <button class="btn btn-ghost btn-sm" type="button" id="copy-policy">复制策略 JSON</button>
+        </div>
+
+        <div class="steps">
+          <strong>创建专用 RAM 用户（约 2 分钟）</strong>
+          <ol>
+            <li>打开阿里云控制台 → <b>访问控制 RAM</b> → 身份管理 → 用户 → <b>创建用户</b>，勾选「OpenAPI 调用访问」</li>
+            <li>创建完成后复制生成的 <b>AccessKey ID / Secret</b>（Secret 只显示一次），填到下方表单</li>
+            <li>在该用户详情页 → 权限管理 → <b>新增授权</b> → 自定义策略 → 粘贴下方 JSON</li>
+            <li>不启用账单功能时，可从策略中删去两条 <code>bss:</code> 权限，进一步收窄</li>
+          </ol>
+        </div>
+
+        <div class="code-block" id="ram-policy"></div>
+
+        <div class="steps">
+          <strong>每个权限的用途</strong>
+          <ol>
+            <li><code>cdt:ListCdtInternetTraffic</code> — 读取 CDT 互联网流量明细（核心监控数据）</li>
+            <li><code>ecs:DescribeInstanceStatus</code> — 读取实例运行状态</li>
+            <li><code>ecs:StartInstance / ecs:StopInstance</code> — 阈值自动停机与保活开机</li>
+            <li><code>bss:QueryAccountBalance / bss:DescribeInstanceBill</code> — 账户余额与实例账单（可选功能）</li>
+          </ol>
         </div>
       </div>
     </section>
