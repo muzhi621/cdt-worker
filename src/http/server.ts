@@ -275,6 +275,7 @@ async function getConfig(ctx: Context): Promise<Response> {
       serverchan: { ...n.serverchan, sendKey: '', sendKeyConfigured: !!n.serverchan.sendKey },
       pushplus: { ...n.pushplus, token: '', tokenConfigured: !!n.pushplus.token },
       smtp: { ...n.smtp, password: '', passwordConfigured: !!n.smtp.password },
+      template: { body: n.template?.body ?? '' },
     },
     accounts: config.accounts.map((a) => ({ ...a, accessKeyId: '', accessKeySecret: '' })),
   };
@@ -400,13 +401,43 @@ async function notifyTestHandler(ctx: Context): Promise<Response> {
   } catch { /* 无 body 则测全部 */ }
   const validChannels = ['telegram', 'webhook', 'serverchan', 'pushplus', 'smtp'];
   if (channel && validChannels.indexOf(channel) < 0) return error('invalid_channel', '未知的通知通道', 400);
+  // 测试事件带上账号变量示例（取第一个账号），便于预览自定义模板渲染效果
+  const sample = config.accounts[0];
+  const fields: Record<string, string> = {
+    '时间': new Date().toLocaleString('zh-CN', { timeZone: config.timezone || 'Asia/Shanghai' }),
+    '时区': config.timezone || 'Asia/Shanghai',
+    '阈值': `${config.trafficThreshold}%`,
+  };
+  if (sample) {
+    const used = sample.trafficUsed ?? 0;
+    const total = sample.maxTraffic ?? 0;
+    const pct = total > 0 ? (used / total) * 100 : 0;
+    Object.assign(fields, {
+      '账号': sample.accessKeyId ? sample.accessKeyId.slice(0, 7) + '***' : '',
+      '机器名': sample.remark || sample.name || '',
+      '备注': sample.remark || '',
+      '地区': sample.regionId || '',
+      '地域ID': sample.regionId || '',
+      '实例': sample.instanceId || '',
+      '停机模式': config.shutdownMode === 'StopCharging' ? '节省停机' : '普通停机',
+      '开机时间': sample.scheduleEnabled ? (sample.startTime || '08:00') : '未启用',
+      '关机时间': sample.scheduleEnabled ? (sample.stopTime || '23:00') : '未启用',
+      '已用流量': `${used.toFixed(2)} GB`,
+      '流量上限': `${total.toFixed(2)} GB`,
+      '剩余流量': `${Math.max(0, total - used).toFixed(2)} GB`,
+      '使用率': `${pct.toFixed(2)}%`,
+      '实例状态': sample.instanceStatus || 'Unknown',
+      '账户余额': '',
+      '使用金额': '',
+    });
+  }
   const event = {
     id: newToken(18),
     type: 'test',
     title: '通知通道测试',
     summary: '这是一条来自 CDT Monitor 的测试通知，收到即代表该通道配置正确。',
-    accountId: 0,
-    fields: { '发送时间': new Date().toLocaleString('zh-CN', { timeZone: config.timezone || 'Asia/Shanghai' }) },
+    accountId: sample ? sample.id : 0,
+    fields,
     createdAt: new Date().toISOString(),
   };
   const results = await deliverEvent(config.notifications as never, event as never, channel);

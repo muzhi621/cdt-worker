@@ -408,6 +408,17 @@
 
     .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
     .form-grid .full { grid-column: 1 / -1; }
+    /* 通知内容模板 */
+    .var-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .var-chip {
+      display: inline-flex; align-items: center; gap: 4px;
+      min-height: 30px; padding: 0 11px; border: 1px solid var(--border);
+      border-radius: 999px; background: var(--surface-2); color: var(--text-2);
+      font-family: var(--font-mono); font-size: 12px; cursor: pointer;
+      transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+    }
+    .var-chip:hover { background: var(--surface-3); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+    textarea.control { resize: vertical; min-height: 140px; line-height: 1.7; font-family: var(--font-mono); font-size: 12.5px; }
     /* 通知渠道子块：标题+开关一行，字段网格独立两列 */
     dialog#edit-dialog {
       border: 1px solid var(--border-strong); border-radius: var(--r-lg);
@@ -1117,6 +1128,30 @@
 
     <!-- 通知 -->
     <section id="tab-notify" class="hidden" role="tabpanel" aria-label="通知">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>自定义通知内容</h2>
+            <p class="card-desc">点击变量插入到下方输入框（插入到光标处），可自由编辑文字；留空则使用默认通知格式</p>
+          </div>
+          <span class="spacer"></span>
+          <button class="btn btn-ghost btn-sm" type="button" id="reset-template">恢复默认</button>
+        </div>
+
+        <div class="section-title">可用变量（点击插入）</div>
+        <div class="var-chips" id="var-chips"></div>
+
+        <div class="field" style="margin-top:14px">
+          <label for="nt-template">通知内容模板</label>
+          <textarea id="nt-template" class="control" rows="8" spellcheck="false"
+                    placeholder="例如：{{机器名}} 流量告警&#10;已用 {{已用流量}} / {{流量上限}}（{{使用率}}）&#10;剩余 {{剩余流量}}，实例状态 {{实例状态}}&#10;时间 {{时间}}"></textarea>
+          <p class="hint">这个内容会用于下方所有启用的通知渠道（Telegram / Webhook / Server酱 / PushPlus / 邮件）。</p>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <button class="btn btn-primary" type="button" id="save-template" style="width:auto">保存通知内容</button>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-head">
           <div>
@@ -1901,6 +1936,62 @@
         fillNotifyForm(d.notifications || {});
       }
 
+      /* ---------- 自定义通知内容模板 ---------- */
+      const NT_VARS = [
+        ["账号", "脱敏的 AccessKey"], ["机器名", "备注/账号名"], ["备注", "账号备注"],
+        ["地区", "地域中文名"], ["地域ID", "如 cn-hongkong"], ["实例", "ECS 实例 ID"],
+        ["停机模式", "普通停机/节省停机"], ["开机时间", "定时开机（未启用则显示未启用）"],
+        ["关机时间", "定时关机（未启用则显示未启用）"], ["已用流量", "已使用 GB"],
+        ["流量上限", "设置的流量上限 GB"], ["剩余流量", "上限-已用"],
+        ["使用率", "百分比"], ["阈值", "告警阈值百分比"], ["实例状态", "Running/Stopped 等"],
+        ["账户余额", "需开启账单功能"], ["使用金额", "本月账单金额，需开启账单"],
+        ["时间", "事件发生时间"], ["时区", "配置时区"],
+      ];
+      const DEFAULT_TEMPLATE =
+        "【{{机器名}}】{{实例状态}}\n" +
+        "已用流量：{{已用流量}} / {{流量上限}}（{{使用率}}）\n" +
+        "剩余流量：{{剩余流量}}\n" +
+        "地区：{{地区}}（{{地域ID}}）\n" +
+        "实例：{{实例}}\n" +
+        "停机模式：{{停机模式}}\n" +
+        "开关机时间：{{开机时间}} - {{关机时间}}\n" +
+        "时间：{{时间}}";
+
+      function renderVarChips() {
+        $("var-chips").innerHTML = NT_VARS.map((v) =>
+          '<button type="button" class="var-chip" data-var="' + esc(v[0]) + '" title="' + esc(v[1]) + '">{{' + esc(v[0]) + "}}</button>"
+        ).join("");
+        $("var-chips").querySelectorAll("[data-var]").forEach((b) => {
+          b.addEventListener("click", () => insertVar(b.dataset.var));
+        });
+      }
+
+      // 在 textarea 光标处插入变量，并把光标移到插入内容之后
+      function insertVar(name) {
+        const ta = $("nt-template");
+        const token = "{{" + name + "}}";
+        const start = ta.selectionStart ?? ta.value.length;
+        const end = ta.selectionEnd ?? ta.value.length;
+        ta.value = ta.value.slice(0, start) + token + ta.value.slice(end);
+        const pos = start + token.length;
+        ta.focus();
+        try { ta.setSelectionRange(pos, pos); } catch (e) { /* 部分浏览器不支持 */ }
+      }
+
+      renderVarChips();
+
+      $("save-template").addEventListener("click", async () => {
+        const body = $("nt-template").value;
+        const r = await apiJson("/api/v1/config", { method: "PUT", body: JSON.stringify({ notifications: { template: { body } } }) });
+        toast(r.ok ? "通知内容已保存" : errText(r.data), r.ok ? "ok" : "err");
+        if (r.ok) loadConfig();
+      });
+
+      $("reset-template").addEventListener("click", () => {
+        $("nt-template").value = DEFAULT_TEMPLATE;
+        toast("已填入默认模板，记得点「保存通知内容」", "ok");
+      });
+
       // 通知渠道表单：密钥字段脱敏回显，configured 标志显示「已配置」占位
       function fillNotifyForm(n) {
         const t = n.telegram || {}, w = n.webhook || {}, sc = n.serverchan || {}, pp = n.pushplus || {}, sm = n.smtp || {};
@@ -1924,10 +2015,12 @@
         $("nt-smtp-pass").placeholder = sm.passwordConfigured ? "已配置，留空保持不变" : "服务商生成的授权码，不是登录密码";
         $("nt-smtp-from").value = sm.from || "";
         $("nt-smtp-to").value = sm.to || "";
+        $("nt-template").value = (n.template && n.template.body) || "";
       }
 
       function collectNotifyForm() {
         return {
+          template: { body: $("nt-template").value },
           telegram: { enabled: $("nt-tg-enabled").checked, token: $("nt-tg-token").value.trim(), chatId: $("nt-tg-chat").value.trim(), proxyType: "none", proxyUrl: "" },
           webhook: { enabled: $("nt-wh-enabled").checked, url: $("nt-wh-url").value.trim(), method: "POST", type: "JSON", provider: "generic", headers: "", secret: "", body: "" },
           serverchan: { enabled: $("nt-sc-enabled").checked, sendKey: $("nt-sc-key").value.trim() },

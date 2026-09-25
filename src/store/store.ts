@@ -22,6 +22,8 @@ export interface Config {
     serverchan: { enabled: boolean; sendKey: string };
     pushplus: { enabled: boolean; token: string };
     smtp: { enabled: boolean; host: string; port: number; username: string; password: string; from: string; to: string };
+    // 自定义通知内容模板（{{变量}} 占位符），留空用默认格式
+    template: { body: string };
   };
   accounts: Account[];
 }
@@ -44,6 +46,7 @@ const DEFAULT_CONFIG: Config = {
     serverchan: { enabled: false, sendKey: '' },
     pushplus: { enabled: false, token: '' },
     smtp: { enabled: false, host: '', port: 465, username: '', password: '', from: '', to: '' },
+    template: { body: '' },
   },
   accounts: [],
 };

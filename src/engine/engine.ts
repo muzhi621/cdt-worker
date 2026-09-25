@@ -80,6 +80,53 @@ function inTimeRange(current: string, start: string, end: string): boolean {
   return current >= start || current < end;
 }
 
+// 地域 ID → 中文名（用于通知变量「地区」）
+const REGION_NAMES: Record<string, string> = {
+  'cn-hangzhou': '华东1（杭州）', 'cn-shanghai': '华东2（上海）', 'cn-beijing': '华北2（北京）',
+  'cn-shenzhen': '华南1（深圳）', 'cn-qingdao': '华北1（青岛）', 'cn-zhangjiakou': '华北3（张家口）',
+  'cn-huhehaote': '华北5（呼和浩特）', 'cn-wulanchabu': '华北6（乌兰察布）', 'cn-chengdu': '西南1（成都）',
+  'cn-hongkong': '中国香港', 'ap-southeast-1': '新加坡', 'ap-southeast-2': '澳大利亚（悉尼）',
+  'ap-southeast-3': '马来西亚（吉隆坡）', 'ap-southeast-5': '印度尼西亚（雅加达）', 'ap-northeast-1': '日本（东京）',
+  'ap-northeast-2': '韩国（首尔）', 'ap-south-1': '印度（孟买）', 'us-west-1': '美国（硅谷）',
+  'us-east-1': '美国（弗吉尼亚）', 'eu-west-1': '英国（伦敦）', 'eu-central-1': '德国（法兰克福）',
+  'me-east-1': '阿联酋（迪拜）',
+};
+
+// 构造通知变量上下文：账号/地域/实例/时间/流量/金额等，供自定义模板渲染
+function accountVars(
+  account: Account,
+  config: store.Config,
+  ctx: { traffic: number; status: string; percentage: number; now: Date; timezone: string; balance: string; cost: string },
+): Record<string, string> {
+  const remaining = Math.max(0, account.maxTraffic - ctx.traffic);
+  const fmtTime = (d: Date, tz: string) => {
+    try {
+      return d.toLocaleString('zh-CN', { timeZone: tz || 'Asia/Shanghai' });
+    } catch { return d.toISOString(); }
+  };
+  return {
+    '账号': masked(account.accessKeyId),
+    '机器名': account.remark || account.name || '',
+    '备注': account.remark || '',
+    '地区': REGION_NAMES[account.regionId] || account.regionId || '',
+    '地域ID': account.regionId || '',
+    '实例': account.instanceId || '',
+    '停机模式': config.shutdownMode === 'StopCharging' ? '节省停机' : '普通停机',
+    '开机时间': account.scheduleEnabled ? (account.startTime || '08:00') : '未启用',
+    '关机时间': account.scheduleEnabled ? (account.stopTime || '23:00') : '未启用',
+    '已用流量': `${ctx.traffic.toFixed(2)} GB`,
+    '流量上限': `${account.maxTraffic.toFixed(2)} GB`,
+    '剩余流量': `${remaining.toFixed(2)} GB`,
+    '使用率': `${ctx.percentage.toFixed(2)}%`,
+    '阈值': `${config.trafficThreshold}%`,
+    '实例状态': ctx.status,
+    '账户余额': ctx.balance,
+    '使用金额': ctx.cost,
+    '时间': fmtTime(ctx.now, ctx.timezone),
+    '时区': ctx.timezone || 'Asia/Shanghai',
+  };
+}
+
 function newEvent(
   eventType: string,
   title: string,
@@ -163,6 +210,17 @@ export async function processAccount(env: Env, account: Account, force = false):
   const percentage = usagePercent(traffic, account.maxTraffic);
   const overThreshold = percentage >= config.trafficThreshold;
   const thresholdKey = `threshold:${account.id}:active`;
+  // 读取账单缓存（余额/月度金额），供通知变量使用（未开启账单功能时为空）
+  let balanceText = '';
+  let costText = '';
+  if (config.enableBilling) {
+    try {
+      const bal = await store.billingCache<{ amount: number; currency: string }>(env, account.id, 'balance', '', 6);
+      if (bal.hit && bal.value) balanceText = `${bal.value.amount} ${bal.value.currency || ''}`.trim();
+      const bill = await store.billingCache<{ totalCost: number }>(env, account.id, 'instance_bill', now.toISOString().slice(0, 7), 6);
+      if (bill.hit && bill.value) costText = `${bill.value.totalCost}`;
+    } catch { /* 账单读取失败不影响通知 */ }
+  }
   if (!overThreshold) {
     await store.deleteActionEvent(env, thresholdKey);
   }
@@ -180,10 +238,15 @@ export async function processAccount(env: Env, account: Account, force = false):
           await store.addLog(env, 'error', `阈值停机失败 [${masked(account.accessKeyId)}]: ${err}`);
         }
       }
+      const vars = accountVars(account, config, {
+        traffic, status, percentage, now,
+        timezone: config.timezone,
+        balance: balanceText, cost: costText,
+      });
       const event = newEvent('threshold', '流量阈值告警', `账号 ${masked(account.accessKeyId)} 的流量使用率达到 ${percentage.toFixed(2)}%。`, account.id, {
+        ...vars,
         '当前流量': `${traffic.toFixed(2)} GB`,
         '设定阈值': `${config.trafficThreshold}%`,
-        '实例状态': status,
       });
       await store.addOutbox(env, 'notify', event);
       await store.addLog(env, 'warning', event.summary);
@@ -203,8 +266,10 @@ export async function processAccount(env: Env, account: Account, force = false):
         await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
         actions.push('keepalive_start');
         const event = newEvent('keepalive', '实例保活启动', '检测到实例在允许运行时段意外停止，已发送启动指令。', account.id, {
-          '账号': masked(account.accessKeyId),
-          '实例': account.instanceId,
+          ...accountVars(account, config, {
+            traffic, status, percentage, now,
+            timezone: config.timezone, balance: balanceText, cost: costText,
+          }),
         });
         await store.addOutbox(env, 'notify', event);
       } catch (err) {
@@ -259,8 +324,10 @@ async function executeScheduledAction(
   await store.addLog(env, 'info', `执行定时${action === 'start' ? '开机' : '关机'} [${masked(account.accessKeyId)}]`);
   if (config.enableScheduleMail) {
     const event = newEvent('schedule', '定时任务已执行', `实例定时${action === 'start' ? '开机' : '关机'}指令已发送。`, account.id, {
-      '账号': masked(account.accessKeyId),
-      '实例': account.instanceId,
+      ...accountVars(account, config, {
+        traffic: account.trafficUsed, status, percentage: usagePercent(account.trafficUsed, account.maxTraffic), now,
+        timezone: config.timezone, balance: '', cost: '',
+      }),
     });
     await store.addOutbox(env, 'notify', event);
   }
