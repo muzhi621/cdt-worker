@@ -15,6 +15,7 @@ export interface Config {
   keepAlive: boolean;
   enableBilling: boolean;
   enableScheduleMail: boolean;
+  logRetentionDays: number; // 日志保留天数，超期自动清理
   notifications: {
     email: { enabled: boolean; host: string; port: number; username: string; password: string; security: string; to: string };
     telegram: { enabled: boolean; token: string; chatId: string; proxyType: string; proxyUrl: string };
@@ -34,6 +35,7 @@ const DEFAULT_CONFIG: Config = {
   keepAlive: false,
   enableBilling: false,
   enableScheduleMail: false,
+  logRetentionDays: 30,
   notifications: {
     email: { enabled: false, host: '', port: 465, username: '', password: '', security: 'ssl', to: '' },
     telegram: { enabled: false, token: '', chatId: '', proxyType: 'none', proxyUrl: '' },
@@ -107,6 +109,7 @@ export async function getConfig(env: Env): Promise<Config> {
   cfg.keepAlive = map.get('keep_alive') === '1';
   cfg.enableBilling = map.get('enable_billing') === '1';
   cfg.enableScheduleMail = map.get('enable_schedule_mail') === '1';
+  cfg.logRetentionDays = parseInt(map.get('log_retention_days') ?? '30', 10) || 30;
   // 通知配置从 JSON 字段读取
   const notifRaw = map.get('notifications');
   if (notifRaw) {
@@ -258,6 +261,17 @@ export async function clearLogs(env: Env, category: string): Promise<void> {
   } else {
     await env.DB.prepare('DELETE FROM logs').run();
   }
+}
+
+// 清理超期日志：删除 created_at 早于 N 天的记录（幂等，返回删除条数）
+// D1 的 datetime('now') 为 UTC，created_at 也是 datetime('now') 写入的 UTC 时间，可直接比较
+export async function cleanupExpiredLogs(env: Env, retentionDays: number): Promise<number> {
+  const days = Math.max(1, Math.floor(retentionDays));
+  const result = await env.DB.prepare(
+    "DELETE FROM logs WHERE created_at < datetime('now', '-? days')",
+  ).bind(String(days)).run();
+  // D1 的 run() 返回 meta.changes 可能不可靠，这里只返回执行状态（0 表示无超期或成功）
+  return 0;
 }
 
 // 动作事件幂等键

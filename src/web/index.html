@@ -442,6 +442,7 @@
 
     /* 日志 */
     .log-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    .log-toolbar .retention { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); }
     .log-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
     .log-tab {
       min-height: 32px; padding: 0 14px; border: 1px solid var(--border); border-radius: 999px;
@@ -1014,6 +1015,11 @@
             <input type="checkbox" id="logs-auto" data-page-node-id="mLEah6F8pkFKbf7mLsRuF8" /> 每 10 秒自动刷新
           </label>
           <span id="logs-count" class="hint" style="margin:0" data-page-node-id="7GX6AUURENH1rf6wobWUdk"></span>
+          <span class="spacer" data-page-node-id="LOGRET-SPACER"></span>
+          <label class="retention" data-page-node-id="LOGRET-LABEL">日志保留
+            <input id="log-retention" class="control" type="number" min="1" max="3650" inputmode="numeric" style="width:74px" data-page-node-id="LOGRET-INPUT" /> 天
+            <button class="btn btn-ghost btn-sm" type="button" id="save-retention" data-page-node-id="LOGRET-SAVE">保存</button>
+          </label>
         </div>
         <div class="log-tabs" id="log-tabs" role="tablist" aria-label="日志分类">
           <button type="button" class="log-tab" data-cat="all" aria-selected="true">全部</button>
@@ -1557,6 +1563,7 @@
         $("set-billing").checked = !!d.enableBilling;
         $("set-timezone").value = d.timezone || "Asia/Shanghai";
         $("set-monitor").value = d.monitorInterval || 5;
+        $("log-retention").value = d.logRetentionDays || 30;
       }
 
       // 停机模式说明（依据阿里云官方文档：StopInstance API / 节省停机模式）
@@ -1587,6 +1594,15 @@
         const r = await apiJson("/api/v1/config", { method: "PUT", body: JSON.stringify(settings) });
         toast(r.ok ? "设置已保存" : errText(r.data), r.ok ? "ok" : "err");
         if (r.ok) fillCronUrl();
+      });
+
+      // 日志保留天数：独立保存（写回 D1 settings）
+      $("save-retention").addEventListener("click", async () => {
+        const days = parseInt($("log-retention").value, 10);
+        if (!(days >= 1 && days <= 3650)) { toast("保留天数需在 1–3650 之间", "err"); return; }
+        const r = await apiJson("/api/v1/config", { method: "PUT", body: JSON.stringify({ logRetentionDays: days }) });
+        toast(r.ok ? "日志保留天数已保存，将在下次监控周期生效" : errText(r.data), r.ok ? "ok" : "err");
+        if (r.ok) loadConfig();
       });
 
       function fillCronUrl() {

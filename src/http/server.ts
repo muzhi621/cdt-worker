@@ -265,6 +265,7 @@ async function getConfig(ctx: Context): Promise<Response> {
     keepAlive: config.keepAlive,
     enableBilling: config.enableBilling,
     enableScheduleMail: config.enableScheduleMail,
+    logRetentionDays: config.logRetentionDays,
     notifications: config.notifications,
     accounts: config.accounts.map((a) => ({ ...a, accessKeyId: '', accessKeySecret: '' })),
   };
@@ -287,6 +288,10 @@ async function saveConfig(ctx: Context): Promise<Response> {
     ['enable_billing', b.enableBilling ? '1' : '0'],
     ['enable_schedule_mail', b.enableScheduleMail ? '1' : '0'],
   ];
+  // logRetentionDays 仅在显式传入时才写入，避免设置页保存时误重置
+  if (b.logRetentionDays !== undefined) {
+    settings.push(['log_retention_days', String(b.logRetentionDays ?? 30)]);
+  }
   for (const [k, v] of settings) {
     await ctx.env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind(k, v).run();
   }
@@ -413,6 +418,10 @@ async function runMonitorCycle(env: Env): Promise<Response> {
     }
   }
   await store.markMonitorRun(env);
+  // 顺带清理超期日志（幂等、低成本，避免日志无限增长）
+  try {
+    await store.cleanupExpiredLogs(env, config.logRetentionDays);
+  } catch { /* 清理失败不影响监控主流程 */ }
   // 记录本次监控周期到日志，让前台「日志页」能确认定时触发确实在运行
   if (results.length > 0) {
     await store.addLog(env, 'info', `监控周期完成，本次处理 ${results.length} 个账号`);
