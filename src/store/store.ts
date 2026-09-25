@@ -201,16 +201,60 @@ export async function addLog(env: Env, type: string, message: string): Promise<v
   await env.DB.prepare('INSERT INTO logs (type, message) VALUES (?,?)').bind(type, message).run();
 }
 
-export async function listLogs(env: Env, type: string, limit = 100): Promise<{ id: number; type: string; message: string; created_at: string }[]> {
-  const rows = type
-    ? await env.DB.prepare('SELECT * FROM logs WHERE type = ? ORDER BY id DESC LIMIT ?').bind(type, limit).all()
-    : await env.DB.prepare('SELECT * FROM logs ORDER BY id DESC LIMIT ?').bind(limit).all();
-  return (rows.results ?? []) as { id: number; type: string; message: string; created_at: string }[];
+// 业务分类 → 底层日志类型集合（登录/监控/告警，其余归「全部」）
+const LOG_CATEGORY_TYPES: Record<string, string[]> = {
+  auth: ['audit'],
+  monitor: ['heartbeat', 'info'],
+  alert: ['warning', 'error'],
+};
+
+export interface LogPage {
+  logs: { id: number; type: string; message: string; created_at: string }[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
 }
 
-export async function clearLogs(env: Env, type: string): Promise<void> {
-  if (type) {
-    await env.DB.prepare('DELETE FROM logs WHERE type = ?').bind(type).run();
+export async function listLogs(
+  env: Env,
+  category: string,
+  page = 1,
+  pageSize = 50,
+): Promise<LogPage> {
+  const safePage = Math.max(1, page);
+  const safeSize = Math.min(100, Math.max(1, pageSize));
+  const offset = (safePage - 1) * safeSize;
+
+  let where = '';
+  const params: unknown[] = [];
+  if (category && category !== 'all' && LOG_CATEGORY_TYPES[category]) {
+    const types = LOG_CATEGORY_TYPES[category];
+    where = 'WHERE type IN (' + types.map(() => '?').join(',') + ')';
+    params.push(...types);
+  }
+
+  const totalRow = await env.DB.prepare('SELECT COUNT(*) AS c FROM logs ' + where).bind(...params).first();
+  const total = getNumber(totalRow, 'c');
+
+  const rows = await env.DB.prepare(
+    'SELECT * FROM logs ' + where + ' ORDER BY id DESC LIMIT ? OFFSET ?',
+  ).bind(...params, safeSize, offset).all();
+
+  return {
+    logs: (rows.results ?? []) as { id: number; type: string; message: string; created_at: string }[],
+    total,
+    page: safePage,
+    pageSize: safeSize,
+    totalPages: Math.max(1, Math.ceil(total / safeSize)),
+  };
+}
+
+export async function clearLogs(env: Env, category: string): Promise<void> {
+  if (category && category !== 'all' && LOG_CATEGORY_TYPES[category]) {
+    const types = LOG_CATEGORY_TYPES[category];
+    const where = 'WHERE type IN (' + types.map(() => '?').join(',') + ')';
+    await env.DB.prepare('DELETE FROM logs ' + where).bind(...types).run();
   } else {
     await env.DB.prepare('DELETE FROM logs').run();
   }

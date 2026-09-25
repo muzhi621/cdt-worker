@@ -328,13 +328,16 @@ async function controlHandler(ctx: Context): Promise<Response> {
 }
 
 async function logsHandler(ctx: Context): Promise<Response> {
-  const tab = new URL(ctx.request.url).searchParams.get('tab') || '';
-  return json({ logs: await store.listLogs(ctx.env, tab, 100) });
+  const url = new URL(ctx.request.url);
+  const category = url.searchParams.get('category') || 'all';
+  const page = parseInt(url.searchParams.get('page') || '1', 10) || 1;
+  const pageSize = parseInt(url.searchParams.get('pageSize') || '50', 10) || 50;
+  return json(await store.listLogs(ctx.env, category, page, pageSize));
 }
 
 async function clearLogsHandler(ctx: Context): Promise<Response> {
-  const tab = new URL(ctx.request.url).searchParams.get('tab') || '';
-  await store.clearLogs(ctx.env, tab);
+  const category = new URL(ctx.request.url).searchParams.get('category') || 'all';
+  await store.clearLogs(ctx.env, category);
   return json({ success: true });
 }
 

@@ -442,6 +442,14 @@
 
     /* 日志 */
     .log-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    .log-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .log-tab {
+      min-height: 32px; padding: 0 14px; border: 1px solid var(--border); border-radius: 999px;
+      background: var(--surface-2); color: var(--muted); font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+    }
+    .log-tab:hover { color: var(--text); border-color: var(--border-strong); }
+    .log-tab[aria-selected="true"] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
     .log-list {
       max-height: 460px; overflow-y: auto; border: 1px solid var(--border);
       border-radius: var(--r-md); background: var(--surface-2);
@@ -455,6 +463,14 @@
     .log-row.warning .lm { color: var(--warning); }
     .log-row.error .lm { color: var(--danger); }
     .log-row.critical .lm { color: var(--danger); font-weight: 600; }
+    .log-pager { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .log-pager button {
+      min-height: 32px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--r-sm);
+      background: var(--surface-2); color: var(--text-2); font-size: 13px; cursor: pointer;
+    }
+    .log-pager button:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
+    .log-pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .log-pager .pg-info { font-size: 12.5px; color: var(--muted); }
 
     .toast-host {
       position: fixed; z-index: 60; left: 50%; transform: translateX(-50%);
@@ -999,7 +1015,14 @@
           </label>
           <span id="logs-count" class="hint" style="margin:0" data-page-node-id="7GX6AUURENH1rf6wobWUdk"></span>
         </div>
+        <div class="log-tabs" id="log-tabs" role="tablist" aria-label="日志分类">
+          <button type="button" class="log-tab" data-cat="all" aria-selected="true">全部</button>
+          <button type="button" class="log-tab" data-cat="auth" aria-selected="false">登录</button>
+          <button type="button" class="log-tab" data-cat="monitor" aria-selected="false">监控</button>
+          <button type="button" class="log-tab" data-cat="alert" aria-selected="false">告警</button>
+        </div>
         <div class="log-list" id="logs-content" role="log" aria-live="polite" data-page-node-id="pJKXyzlbKj3r0h0Jk9yDIx"></div>
+        <div class="log-pager" id="log-pager"></div>
       </div>
     </section>
   </div>
@@ -1638,25 +1661,62 @@
       }
 
       /* ---------- 日志页 ---------- */
-      async function loadLogs() {
-        const r = await apiJson("/api/v1/logs");
+      let logCat = "all";
+      let logPage = 1;
+      const LOG_PAGE_SIZE = 50;
+
+      function renderLogRows(logs) {
         const box = $("logs-content");
-        if (!r.ok) { box.innerHTML = '<div class="log-row"><span class="lm">' + esc(errText(r.data)) + "</span></div>"; return; }
-        const logs = r.data.logs || [];
-        $("logs-count").textContent = logs.length ? "共 " + logs.length + " 条" : "";
-        box.innerHTML = logs.length
-          ? logs.map((l) =>
-            '<div class="log-row ' + esc(l.type || "") + '">' +
-            '<span class="lt">' + esc(l.created_at || "") + "</span>" +
-            '<span class="lm">' + esc(l.message || "") + "</span></div>"
-          ).join("")
-          : '<div class="log-row"><span class="lm" style="color:var(--muted)">暂无日志记录</span></div>';
+        if (!logs || !logs.length) {
+          box.innerHTML = '<div class="log-row"><span class="lm" style="color:var(--muted)">暂无日志记录</span></div>';
+          return;
+        }
+        box.innerHTML = logs.map((l) =>
+          '<div class="log-row ' + esc(l.type || "") + '">' +
+          '<span class="lt">' + esc(l.created_at || "") + "</span>" +
+          '<span class="lm">' + esc(l.message || "") + "</span></div>"
+        ).join("");
       }
+
+      function renderPager(total, page, totalPages) {
+        const pager = $("log-pager");
+        if (totalPages <= 1) { pager.innerHTML = ""; return; }
+        const prev = '<button type="button" data-pg="' + (page - 1) + '"' + (page <= 1 ? " disabled" : "") + ">上一页</button>";
+        const next = '<button type="button" data-pg="' + (page + 1) + '"' + (page >= totalPages ? " disabled" : "") + ">下一页</button>";
+        pager.innerHTML = prev + '<span class="pg-info">第 ' + page + ' / ' + totalPages + ' 页</span>' + next;
+        pager.querySelectorAll("button[data-pg]").forEach((b) => {
+          b.addEventListener("click", () => { logPage = parseInt(b.dataset.pg, 10); loadLogs(); });
+        });
+      }
+
+      async function loadLogs() {
+        const r = await apiJson("/api/v1/logs?category=" + encodeURIComponent(logCat) + "&page=" + logPage + "&pageSize=" + LOG_PAGE_SIZE);
+        const box = $("logs-content");
+        if (!r.ok) { box.innerHTML = '<div class="log-row"><span class="lm">' + esc(errText(r.data)) + "</span></div>"; $("log-pager").innerHTML = ""; $("logs-count").textContent = ""; return; }
+        const d = r.data || {};
+        const logs = d.logs || [];
+        const total = d.total || 0;
+        $("logs-count").textContent = total ? "共 " + total + " 条" : "";
+        renderLogRows(logs);
+        renderPager(total, d.page || 1, d.totalPages || 1);
+      }
+
+      // 分类标签切换
+      $("log-tabs").addEventListener("click", function (e) {
+        const btn = e.target.closest(".log-tab");
+        if (!btn) return;
+        logCat = btn.dataset.cat;
+        logPage = 1;
+        this.querySelectorAll(".log-tab").forEach((b) => b.setAttribute("aria-selected", String(b === btn)));
+        loadLogs();
+      });
+
       $("logs-refresh").addEventListener("click", loadLogs);
       $("logs-clear").addEventListener("click", async function () {
-        if (!window.confirm("清空全部日志？此操作不可撤销。")) return;
-        const r = await apiJson("/api/v1/logs", { method: "DELETE" });
+        if (!window.confirm("清空当前分类的日志？此操作不可撤销。")) return;
+        const r = await apiJson("/api/v1/logs?category=" + encodeURIComponent(logCat), { method: "DELETE" });
         toast(r.ok ? "日志已清空" : errText(r.data), r.ok ? "ok" : "err");
+        logPage = 1;
         loadLogs();
       });
       $("logs-auto").addEventListener("change", function () {
