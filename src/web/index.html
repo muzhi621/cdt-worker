@@ -995,58 +995,6 @@
         </form>
       </div>
 
-      <div class="card" data-page-node-id="BosaShQODOlkj2UBlDMmZm">
-        <div class="card-head" data-page-node-id="iku3yNXPkHJa5oCJ2LMANe">
-          <div data-page-node-id="ce8qQBiJXibadonnFFVJEg">
-            <h2 data-page-node-id="ErCMBmtxumTXMPGOgfbRWo">定时监控配置</h2>
-            <p class="card-desc" data-page-node-id="gKNBtBzRwpef8nvMM8dnCM">本项目未使用 Cloudflare Cron（免费账号仅 5 个），改用外部定时服务触发</p>
-          </div>
-          <span class="spacer" data-page-node-id="LoBJ6MWUIyMPnzhBaulYl9"></span>
-          <button class="btn btn-primary" type="button" id="trigger-now" style="width:auto" data-page-node-id="YP23eY4UorY6YDzwnKAkio">立即监控一次</button>
-        </div>
-
-        <div class="section-title" data-page-node-id="Q1zqEQoaA1L1UPUMmXLZcl">监控触发地址</div>
-        <div class="url-box" data-page-node-id="2ecvFIkRgTvJnkbSVOwjFT">
-          <input id="cron-url" class="control" readonly aria-label="监控触发地址" data-page-node-id="UHA1D5ZFLeafH79BFxAlbp" />
-          <button class="btn btn-ghost btn-sm" type="button" id="copy-url" data-page-node-id="6vIdG4czcDagji2oWHNty8">复制地址</button>
-        </div>
-        <p class="hint" data-page-node-id="BsLvHwlEGQhMjgDstbs97E">把这个地址填到任意外部定时服务里，按上面的「监控间隔」周期性请求即可。</p>
-
-        <div class="steps" data-page-node-id="vaBHO20Di5crUejMoHK6TO">
-          <strong data-page-node-id="ZhPhX1YzeU77AlGCGXiIDx">方式一 · cron-job.org（推荐，免费无需信用卡）</strong>
-          <ol data-page-node-id="CHspbBft3eofAvi8Bt49zG">
-            <li data-page-node-id="AflGxEJEv8FoeE0AGURoas">打开 <a href="https://cron-job.org" target="_blank" rel="noreferrer noopener" data-page-node-id="7rlvGwH65MyMjJjysSK2ur">cron-job.org</a> 注册并登录</li>
-            <li data-page-node-id="wnBwfYdmUmvKi4DPb2XETb">Cronjobs → 右上角 Create cronjob 新建任务</li>
-            <li data-page-node-id="FAQdG5O7lEEPXWBVBIXPSa">URL 粘贴上面的「监控触发地址」</li>
-            <li data-page-node-id="wVK5ZyXB8Bh5VVYACBP9nz">执行计划选择「每 N 分钟」，N 与上方「监控间隔」保持一致</li>
-            <li data-page-node-id="yg3FwgdW0Wbtb1hfQkaQx8">保存后即开始周期触发</li>
-          </ol>
-        </div>
-
-        <div class="steps" data-page-node-id="YgdqeWxhjtiRsuiLanNXGI">
-          <strong data-page-node-id="f9v2pTFG9ETEFEPZz3EDCR">方式二 · GitHub Actions（已有 GitHub 账号）</strong>
-          <ol data-page-node-id="H4VPGpiZYLgN9uMdJvj7QF">
-            <li data-page-node-id="dVqKdYWl9uYeOFxro0N4Ad">在代码仓库新建 <code data-page-node-id="cCIJoc64fgUEP4MY0vGGH8">.github/workflows/cron.yml</code>（用下方代码块）</li>
-            <li data-page-node-id="gkYgLwBT5saAr3o9o8UYRE">推送后每 5 分钟自动请求一次触发地址</li>
-          </ol>
-          <div class="code-block" id="github-yml" data-page-node-id="mY1L8XYF0feMq38oookq6u"></div>
-          <button class="btn btn-ghost btn-sm" type="button" id="copy-yml" data-page-node-id="uDfM7jJriguQ1VRHfg1OGU">复制 YML</button>
-        </div>
-
-        <div class="steps" data-page-node-id="slFeWV6IUjFjm6pOH4WSEP">
-          <strong data-page-node-id="ihiQ45Go0TZtYO2fNoAkCP">方式三 · UptimeRobot（免费，顺带做可用性监控）</strong>
-          <ol data-page-node-id="B29IyEuRtppJqqm9QLtv77">
-            <li data-page-node-id="RzGCJSweInWWlEWtzVXN4k">打开 <a href="https://uptimerobot.com" target="_blank" rel="noreferrer noopener" data-page-node-id="S6SSk7WEqWH9pWdzymn87h">uptimerobot.com</a> 注册并登录</li>
-            <li data-page-node-id="DQVN57zFair1lHJHezthNu">New monitor → 类型选 <code data-page-node-id="IESnhFbVMPsvXtkeB1Mrmq">HTTP(s)</code></li>
-            <li data-page-node-id="I7L3jE2xWAUdF2AHBGPYr6">URL 粘贴上面的「监控触发地址」</li>
-            <li data-page-node-id="a9zD15lffeHU5oPr0IWRsL">监控间隔选「5 分钟」（与监控间隔一致）</li>
-            <li data-page-node-id="XEEtJJZCD8865MYb1unjPA">Create monitor 保存</li>
-          </ol>
-        </div>
-
-        <p class="hint" data-page-node-id="5IxobATNl9vngLeLANTfn0">临时验证：也可以直接在浏览器打开触发地址，或点右上角「立即监控一次」。</p>
-      </div>
-
       <div class="card">
         <div class="card-head">
           <div>
@@ -1112,14 +1060,25 @@
         </div>
       </div>
 
-      <!-- 监控触发源（各渠道独立开关 + 上次触发时间 + 教程） -->
+      <!-- 定时监控配置（触发地址 + 渠道开关 + 教程，合并卡片） -->
       <div class="card" id="trigger-card">
         <div class="card-head">
           <div>
-            <h3>监控触发源</h3>
-            <p class="card-desc">每个渠道可独立开关；关闭后 Worker 会忽略该渠道的触发请求。建议至少启用两个渠道做冗余——单一渠道断档会错过开关机窗口（日志里会告警）。</p>
+            <h2>定时监控配置</h2>
+            <p class="card-desc">每个触发渠道可独立开关，关闭后 Worker 会忽略该渠道的触发请求；建议至少启用两个渠道做冗余——单一渠道断档会错过开关机窗口（日志里会告警）。</p>
           </div>
+          <span class="spacer"></span>
+          <button class="btn btn-primary" type="button" id="trigger-now" style="width:auto">立即监控一次</button>
         </div>
+
+        <div class="section-title">监控触发地址</div>
+        <div class="url-box">
+          <input id="cron-url" class="control" readonly aria-label="监控触发地址" />
+          <button class="btn btn-ghost btn-sm" type="button" id="copy-url">复制地址</button>
+        </div>
+        <p class="hint">把这个地址填到任意外部定时服务里，按「监控间隔」周期性请求即可；<code>?source=http</code> 用于标识渠道身份（渠道开关与断档统计按来源区分）。</p>
+
+        <div class="section-title">触发渠道</div>
         <div id="trigger-list"></div>
         <p class="hint" id="trigger-state"></p>
         <details id="trigger-tutorial">
@@ -2523,21 +2482,8 @@ exports.handler = async (event, context) => {
       });
 
       function fillCronUrl() {
-        const monitor = parseInt($("set-monitor").value, 10) || 5;
-        const url = window.location.origin + "/__cron";
+        const url = window.location.origin + "/__cron?source=http";
         $("cron-url").value = url;
-        $("github-yml").textContent =
-          "name: cdt-monitor-trigger\n" +
-          "on:\n" +
-          "  schedule:\n" +
-          "    - cron: '" + (monitor < 5 ? "*/" + monitor : "*/5") + " * * * *'   # 每 " + monitor + " 分钟\n" +
-          "  workflow_dispatch: {}\n" +
-          "jobs:\n" +
-          "  trigger:\n" +
-          "    runs-on: ubuntu-latest\n" +
-          "    steps:\n" +
-          "      - name: Trigger monitor\n" +
-          '        run: curl -s "' + url + '"';
       }
 
       function copyText(text, okMsg) {
@@ -2558,7 +2504,6 @@ exports.handler = async (event, context) => {
         }
       }
       $("copy-url").addEventListener("click", () => copyText($("cron-url").value, "触发地址已复制"));
-      $("copy-yml").addEventListener("click", () => copyText($("github-yml").textContent, "YML 已复制"));
       $("trigger-now").addEventListener("click", triggerNow);
 
       /* ---------- RAM 最小权限策略 ---------- */
