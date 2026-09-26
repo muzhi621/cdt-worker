@@ -26,12 +26,12 @@ export default {
     await ensureSchema(env);
     // 原生 Cron 也受「触发源开关」控制：关闭时跳过（每小时留痕一次），
     // 开启时记录本次触发时间（供前端展示与断档判定），再跑监控。
-    const { sources } = await store.getTriggerState(env);
-    if (!sources.native) {
+    const state = await store.getTriggerState(env);
+    if (!state.sources.native) {
       await noteTriggerDisabled(env, 'native');
       return;
     }
-    await store.touchTriggerSource(env, 'native', Math.floor(Date.now() / 1000));
-    await runMonitorCycle(env);
+    await store.touchTriggerSource(env, 'native', Math.floor(Date.now() / 1000), state.seen);
+    await runMonitorCycle(env, false, state);
   },
 };

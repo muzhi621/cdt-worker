@@ -129,12 +129,19 @@ export async function setTriggerSources(env: Env, sources: Record<TriggerSource,
     .run();
 }
 
-// 记录某渠道本次触发时间（供前端展示「上次触发」与断档判定）
-export async function touchTriggerSource(env: Env, source: TriggerSource, nowSec: number): Promise<void> {
-  const { seen } = await getTriggerState(env);
-  seen[source] = nowSec;
+// 记录某渠道本次触发时间（供前端展示「上次触发」与断档判定）。
+// seen 由调用方传入（通常来自本次请求已读到的状态），避免读-改-写二次查询：
+// 之前这里内部再读一次，既多一次 D1 读，也会在并发触发时互相覆盖。
+export async function touchTriggerSource(
+  env: Env,
+  source: TriggerSource,
+  nowSec: number,
+  seen?: Partial<Record<TriggerSource, number>>,
+): Promise<void> {
+  const current = seen ?? (await getTriggerState(env)).seen;
+  current[source] = nowSec;
   await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,datetime('now'))")
-    .bind('trigger_seen', JSON.stringify(seen))
+    .bind('trigger_seen', JSON.stringify(current))
     .run();
 }
 

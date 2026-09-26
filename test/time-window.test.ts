@@ -111,4 +111,16 @@ describe('toZone / zoneFields / localCycle（时区墙钟）', () => {
     const utc = new Date('2026-09-26T16:30:00Z');
     expect(() => zoneFields(utc, 'Not/AZone')).not.toThrow();
   });
+
+  it('格式化器缓存生效：重复调用结果一致，且不同时区互不串扰', () => {
+    const utc = new Date('2026-09-26T16:30:00Z'); // 上海 00:30（次日）
+    const first = zoneFields(utc, 'Asia/Shanghai');
+    const second = zoneFields(utc, 'Asia/Shanghai');
+    expect(second).toEqual(first);
+    // 切换时区后必须重新解析，不能命中错误缓存
+    const ny = zoneFields(utc, 'America/New_York');
+    expect([ny.month, ny.day, ny.hour]).toEqual([9, 26, 12]);
+    // 再切回来仍然正确（缓存 key 隔离）
+    expect(zoneFields(utc, 'Asia/Shanghai')).toEqual(first);
+  });
 });

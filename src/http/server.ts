@@ -16,6 +16,19 @@ import indexHtml from '../web/index.html';
 
 type Context = { env: Env; request: Request; params: Record<string, string> };
 
+// 幂等方法不做 CSRF 校验（无副作用）
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+// index.html 的 ETag（每个 isolate 只算一次，之后复用）
+let cachedETag = '';
+async function htmlETag(): Promise<string> {
+  if (cachedETag) return cachedETag;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(indexHtml));
+  const hex = Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+  cachedETag = `"${hex.slice(0, 32)}"`;
+  return cachedETag;
+}
+
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -100,10 +113,12 @@ const routes: { method: string; pattern: string; scope?: string; handler: (ctx: 
       try { await ctx.env.DB.prepare('SELECT 1').first(); return json({ status: 'ready' }); }
       catch { return error('database_not_ready', 'database not ready', 503); }
     } },
+  // 未鉴权接口：只暴露「是否已初始化」。
+  // 注意：不要在这里返回 ADMIN_PASSWORD 是否存在（envPasswordSet）——
+  // 那等于向匿名访客泄露后门是否启用，属于情报泄露。该信息只对
+  // 「已经尝试过登录的人」披露（见 login 失败响应里的 env_password_available）。
   { method: 'GET', pattern: '/api/v1/system/init-status', handler: async (ctx) => json({
       initialized: await store.isInitialized(ctx.env),
-      // 已通过 Cloudflare 环境变量配置恢复密码（未初始化时也可直接用它登录）
-      envPasswordSet: envPassword(ctx.env) !== '',
     }) },
   { method: 'GET', pattern: '/api/v1/system/triggers', scope: 'admin', handler: getTriggers },
   { method: 'PUT', pattern: '/api/v1/system/triggers', scope: 'admin', handler: saveTriggers },
@@ -146,10 +161,35 @@ async function setup(ctx: Context): Promise<Response> {
   return setAuthCookies(json({ success: true, csrf_token: csrf }, 201), token, csrf, ctx.request);
 }
 
+// 登录失败窗口（15 分钟）内的最大失败次数（D1 计数，跨 isolate 生效）
+const LOGIN_MAX_FAILURES = 8;
+
+async function recentLoginFailures(env: Env, ip: string): Promise<number> {
+  try {
+    const row = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM login_attempts WHERE ip = ? AND created_at >= datetime('now','-15 minutes')",
+    ).bind(ip).first();
+    return row ? Number((row as Record<string, unknown>).c ?? 0) : 0;
+  } catch { return 0; } // 计数失败不应阻断登录主流程（退化为仅内存限流）
+}
+
+async function clearLoginFailures(env: Env, ip: string): Promise<void> {
+  try {
+    await env.DB.prepare('DELETE FROM login_attempts WHERE ip = ?').bind(ip).run();
+  } catch { /* 清理失败不影响登录 */ }
+}
+
 async function login(ctx: Context): Promise<Response> {
   const ip = clientIP(ctx.request);
+  // 第一道：单 isolate 内存限流（快、零成本）
   if (!allowRate('login:' + ip, 8, 15 * 60_000)) {
     return error('rate_limited', '登录尝试过多，请稍后再试', 429);
+  }
+  // 第二道：D1 计数（跨 isolate 生效，Cloudflare 会调度到多个实例，内存计数会失效）
+  const failures = await recentLoginFailures(ctx.env, ip);
+  if (failures >= LOGIN_MAX_FAILURES) {
+    await store.addLog(ctx.env, 'warning', `登录尝试过多已拦截 [IP: ${ip}]（15 分钟内失败 ${failures} 次）`);
+    return error('rate_limited', '登录尝试过多，请 15 分钟后再试', 429);
   }
   const body = await ctx.request.json().catch(() => null);
   const password = String((body as Record<string, unknown>)?.password ?? '');
@@ -192,6 +232,8 @@ async function login(ctx: Context): Promise<Response> {
   }
 
   const { token, csrf } = await createSession(ctx.env, ctx.request);
+  // 登录成功：清空该 IP 的失败记录，避免历史失败累计误伤正常登录
+  await clearLoginFailures(ctx.env, ip);
   if (!viaEnvPassword) await store.addLog(ctx.env, 'audit', '管理员登录成功 [IP: ' + ip + ']');
   return setAuthCookies(json({ success: true, csrf_token: csrf, via_env_password: viaEnvPassword }, 200), token, csrf, ctx.request);
 }
@@ -578,21 +620,32 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
       const source = normalizeSource(
         url.searchParams.get('source') || request.headers.get('X-Trigger-Source'),
       );
-      const { sources } = await store.getTriggerState(env);
-      if (!sources[source]) {
+      const state = await store.getTriggerState(env);
+      if (!state.sources[source]) {
         await noteTriggerDisabled(env, source);
         return json({ monitored: 0, skipped: true, reason: 'source_disabled', source });
       }
-      await store.touchTriggerSource(env, source, Math.floor(Date.now() / 1000));
+      // 复用本次读取结果更新「上次触发时间」，避免 touch 内部二次读库（省 D1 读）
+      await store.touchTriggerSource(env, source, Math.floor(Date.now() / 1000), state.seen);
+      // 把已读到的状态传给监控循环，省掉一次重复查询
+      return runMonitorCycle(env, false, state);
     }
     return runMonitorCycle(env);
   }
 
   const matched = matchRoute(request.method, pathname);
   if (!matched) {
-    // 非 API 路径返回管理台页面（SPA 入口）
+    // 非 API 路径返回管理台页面（SPA 入口）。
+    // 加 ETag + no-cache：命中 304 时省掉整页传输（省出网与 CPU），
+    // no-cache 保证每次都回源校验，不会读到旧版本前端。
     if (!pathname.startsWith('/api/')) {
-      return new Response(indexHtml, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      const etag = await htmlETag();
+      if ((request.headers.get('If-None-Match') || '') === etag) {
+        return new Response(null, { status: 304, headers: { ETag: etag, 'Cache-Control': 'no-cache' } });
+      }
+      return new Response(indexHtml, {
+        headers: { 'Content-Type': 'text/html; charset=utf-8', ETag: etag, 'Cache-Control': 'no-cache' },
+      });
     }
     return error('not_found', '接口不存在', 404);
   }
@@ -604,6 +657,15 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
     if (!principal) return error('unauthorized', '请登录或提供有效 API Key', 401);
     if (!principal.admin && !principal.scopes.has(matched.route.scope)) {
       return error('forbidden', 'API Key 权限不足', 403);
+    }
+    // CSRF 双提交校验：仅针对「管理员会话 + 非安全方法」。
+    // API Key 走 Authorization 头、浏览器不会自动附带，天然免疫 CSRF，故不校验。
+    if (principal.admin && !SAFE_METHODS.has(request.method)) {
+      const headerToken = (request.headers.get('X-CDT-CSRF') || '').trim();
+      const cookieToken = (/(?:^|;\s*)cdt_csrf=([^;]+)/.exec(request.headers.get('Cookie') || '')?.[1] || '').trim();
+      if (!headerToken || !cookieToken || !(await constantTimeEqual(headerToken, cookieToken))) {
+        return error('csrf_failed', 'CSRF 校验失败，请刷新页面后重试', 403);
+      }
     }
   }
   // 统一异常兜底：handler 抛错时返回可读的 JSON 错误（而非 Cloudflare 默认
@@ -708,7 +770,16 @@ async function testTrigger(ctx: Context): Promise<Response> {
     });
   }
   const nowSec = Math.floor(Date.now() / 1000);
-  await store.touchTriggerSource(ctx.env, source, nowSec);
+  // 限流：每个渠道每分钟最多测一次。测试会 force 跑整轮监控（阿里云 API + 通知投递），
+  // 放任连点等于把外部 API 与通知通道打爆。
+  const minuteKey = `trigger_test:${source}:${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`;
+  if (!(await store.recordActionEvent(ctx.env, minuteKey, 0, 'trigger_test', 'attempting', ''))) {
+    return json({
+      ok: false, source, throttled: true,
+      message: `渠道「${TRIGGER_LABELS[source]}」刚测试过，请 1 分钟后再试（测试会真实跑一轮监控，需限流）。`,
+    });
+  }
+  await store.touchTriggerSource(ctx.env, source, nowSec, seen);
   const resp = await runMonitorCycle(ctx.env, true);
   const data = await resp.clone().json().catch(() => ({})) as Record<string, unknown>;
   return json({
@@ -750,7 +821,11 @@ async function checkTriggerGaps(
 }
 
 // 执行一轮监控（供 fetch 的 /__cron 与 scheduled 入口共用，都走同一套防抖与抢占）
-export async function runMonitorCycle(env: Env, force = false): Promise<Response> {
+export async function runMonitorCycle(
+  env: Env,
+  force = false,
+  triggerState?: { sources: Record<TriggerSource, boolean>; seen: Partial<Record<TriggerSource, number>> },
+): Promise<Response> {
   // 防抖前置：先做轻量判断（单条 settings 查询），命中跳过则直接返回，
   // 不再全量 getConfig（读全量 settings + 解密所有账号 AK/SK），省 CPU 与 D1 读。
   // force=true 用于前台「测试渠道」按钮：绕过防抖真实跑一轮，验证链路是否可用。
@@ -762,10 +837,11 @@ export async function runMonitorCycle(env: Env, force = false): Promise<Response
     return json({ monitored: 0, skipped: true, next_in_seconds: debounceSeconds - sinceLastRun });
   }
 
-  // 断档告警：本轮真正执行时才检查（无需在每次防抖跳过的请求上重复查库）
+  // 断档告警：本轮真正执行时才检查（无需在每次防抖跳过的请求上重复查库）。
+  // 优先复用调用方已读到的状态（/__cron 路径），省一次 D1 读。
   {
-    const { sources, seen } = await store.getTriggerState(env);
-    await checkTriggerGaps(env, sources, seen);
+    const state = triggerState ?? await store.getTriggerState(env);
+    await checkTriggerGaps(env, state.sources, state.seen);
   }
   // 原子抢占监控槽位：并发触发（外部服务 + 原生 Cron + 前台按钮同时打过来）时
   // 只有一个能把 last_monitor_run 写成当前时间，其余在此返回 skipped。
@@ -793,11 +869,14 @@ export async function runMonitorCycle(env: Env, force = false): Promise<Response
   } catch (err) {
     await store.addLog(env, 'error', `通知队列处理异常: ${err}`);
   }
-  // 顺带清理超期数据（日志 + traffic_stats/action_events/login_attempts/sessions，
-  // 幂等、低成本，避免数据无限增长逼近 D1 存储上限）
+  // 过期数据清理（日志 + traffic_stats/action_events/login_attempts/sessions）。
+  // 改为「每天一次」：这些是维护性操作，没必要每个监控周期都跑（省 D1 查询与写）。
   try {
-    await store.cleanupExpiredLogs(env, config.logRetentionDays);
-    await store.cleanupExpiredData(env, config.logRetentionDays);
+    const dayKey = `cleanup:${new Date().toISOString().slice(0, 10).replace(/-/g, '')}`;
+    if (await store.recordActionEvent(env, dayKey, 0, 'maintenance', 'cleanup', '')) {
+      await store.cleanupExpiredLogs(env, config.logRetentionDays);
+      await store.cleanupExpiredData(env, config.logRetentionDays);
+    }
   } catch { /* 清理失败不影响监控主流程 */ }
   // 记录本次监控周期到日志，让前台「日志页」能确认定时触发确实在运行
   const elapsed = Date.now() - started;

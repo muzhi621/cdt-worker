@@ -3,17 +3,47 @@
 // 把 Date 转换到配置时区，返回一个"墙钟数值等于目标时区本地时间"的 Date。
 // Worker 运行时是 UTC，原项目用 time.LoadLocation(config.Timezone) 计算本地时间；
 // 供 dueWithin（定时开关机）使用。整点/保活时段/账单月份用 zoneFields 直接取字段。
+// Intl.DateTimeFormat 构造成本很高（毫秒级）。Worker 免费计划 CPU 上限 10ms/请求，
+// 而每轮监控会产生 20–30 次时区格式化调用（toZone / zoneFields / localCycle × 账号数），
+// 因此这里按时区缓存格式化器实例（isolate 内复用）。
+const formatterCache = new Map<string, Intl.DateTimeFormat>();
+const FIELD_OPTS: Intl.DateTimeFormatOptions = {
+  hour12: false,
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit',
+};
+
+function formatter(timezone: string): Intl.DateTimeFormat {
+  const tz = timezone || 'Asia/Shanghai';
+  let f = formatterCache.get(tz);
+  if (!f) {
+    f = new Intl.DateTimeFormat('en-US', { ...FIELD_OPTS, timeZone: tz });
+    formatterCache.set(tz, f);
+  }
+  return f;
+}
+
+// 解析格式化结果到字段（跨 Intl 版本差异兜底：取不到就回退 UTC 字段）
+function partsToFields(parts: Intl.DateTimeFormatPart[], fallback: Date): {
+  year: number; month: number; day: number; hour: number; minute: number; second: number;
+} {
+  const g: Record<string, number> = {};
+  for (const p of parts) if (p.type !== 'literal') g[p.type] = parseInt(p.value, 10);
+  return {
+    year: g.year ?? fallback.getUTCFullYear(),
+    month: g.month ?? fallback.getUTCMonth() + 1,
+    day: g.day ?? fallback.getUTCDate(),
+    hour: g.hour ?? 0,
+    minute: g.minute ?? 0,
+    second: g.second ?? 0,
+  };
+}
+
 export function toZone(date: Date, timezone: string): Date {
   try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone || 'Asia/Shanghai',
-      hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).formatToParts(date);
-    const g: Record<string, number> = {};
-    for (const p of parts) if (p.type !== 'literal') g[p.type] = parseInt(p.value, 10);
-    const asUTC = Date.UTC(g.year, (g.month || 1) - 1, g.day, g.hour, g.minute, g.second);
+    const parts = formatter(timezone).formatToParts(date);
+    const f = partsToFields(parts, date);
+    const asUTC = Date.UTC(f.year, f.month - 1, f.day, f.hour, f.minute, f.second);
     return new Date(asUTC);
   } catch {
     return date; // 时区非法时回退到 UTC（与原项目 FixedZone CST 回退语义等价，均保证不崩溃）
@@ -23,14 +53,7 @@ export function toZone(date: Date, timezone: string): Date {
 // 以目标时区的“墙钟字符串”形式获取当前时间字段（YYYY-MM-DD HH:mm:ss）
 export function zoneFields(date: Date, timezone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
   try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone || 'Asia/Shanghai', hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).formatToParts(date);
-    const g: Record<string, number> = {};
-    for (const p of parts) if (p.type !== 'literal') g[p.type] = parseInt(p.value, 10);
-    return { year: g.year, month: g.month || 1, day: g.day, hour: g.hour || 0, minute: g.minute || 0, second: g.second || 0 };
+    return partsToFields(formatter(timezone).formatToParts(date), date);
   } catch {
     return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate(), hour: date.getUTCHours(), minute: date.getUTCMinutes(), second: date.getUTCSeconds() };
   }

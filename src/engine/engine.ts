@@ -192,7 +192,9 @@ export async function processAccount(
       if (bill.hit && bill.value) costText = `${bill.value.totalCost}`;
     } catch { /* 账单读取失败不影响通知 */ }
   }
-  if (!overThreshold) {
+  // 阈值去抖键：只在「本次确实刷新过数据」的周期清理。
+  // 未刷新数据的周期里阈值状态不可能变化，无条件 DELETE 纯属浪费 D1 操作。
+  if (!overThreshold && due) {
     await store.deleteActionEvent(env, thresholdKey);
   }
   if (overThreshold && due) {
@@ -309,7 +311,13 @@ export async function processAccount(
 
   let message = `[${masked(account.accessKeyId)}] 流量 ${traffic.toFixed(2)}GB / ${account.maxTraffic.toFixed(2)}GB (${percentage.toFixed(2)}%) · 状态 ${status}`;
   if (actions.length > 0) message += ' · 动作 ' + actions.join(',');
-  await store.addLog(env, 'heartbeat', message);
+  // heartbeat 降频：默认每 15 分钟一条（整 15 分倍数时写），
+  // 但「状态发生变化」或「本轮产生了动作」时立即写，保证关键变化不丢。
+  // 原来每账号每周期都写，5 账号 × 288 周期 = 1440 条/天，绝大多数是无变化的重复噪声。
+  const statusChanged = status !== account.instanceStatus;
+  if (actions.length > 0 || statusChanged || localFields.minute % 15 === 0) {
+    await store.addLog(env, 'heartbeat', message);
+  }
   return { accountId: account.id, message, actions };
 }
 
