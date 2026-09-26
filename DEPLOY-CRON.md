@@ -1,5 +1,24 @@
 # 监控定时触发配置（外部触发为主，原生 Cron 可选）
 
+## 触发源渠道与冗余（推荐至少开两个）
+
+每个渠道可**独立开关**（管理台 → 设置 → 监控触发源），并可查看「上次触发时间」；
+已启用的渠道超过 30 分钟没触发，日志页会写入 warning（断档告警）。
+
+| source 参数 | 渠道 | 教程 |
+| --- | --- | --- |
+| `github` | GitHub Actions | 本文件下方 |
+| `http` | cron-job.org 等外部定时服务 | 本文件下方 |
+| `selfhost` | 自建驱动 / 腾讯云 SCF / 阿里云 FC | [docs/SELFHOST.md](./docs/SELFHOST.md) |
+| `native` | Cloudflare 原生 Cron | 本文件下方（需账号 cron 额度） |
+
+触发时带上来源标识（查询参数或请求头二选一），例如：
+
+```
+https://你的域名/__cron?source=github
+curl -H "X-Trigger-Source: selfhost" -H "X-Cron-Secret: <密钥>" https://你的域名/__cron
+```
+
 > CDT-Monitor Worker 版现在使用**双链路**定时触发，默认启用的是外部触发：
 > 1. **主链路（默认）**：外部定时服务（cron-job.org / GitHub Actions 等）请求 `/__cron`，需携带 `CRON_SECRET`；
 > 2. **可选增强**：Cloudflare 原生 Cron Trigger（`wrangler.toml` 的 `[triggers]`），`scheduled()` 直调内部监控函数，**无需密钥**。

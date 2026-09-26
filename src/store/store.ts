@@ -3,6 +3,9 @@
 
 import { encrypt, decrypt, type Env } from '../security/security';
 import type { Account } from '../provider/aliyun';
+import {
+  parseTriggerSeen, parseTriggerSources, type TriggerSource,
+} from '../engine/triggers';
 
 export interface Config {
   adminPasswordHash: string;
@@ -96,6 +99,43 @@ export async function tryAcquireMonitorSlot(env: Env, debounceSeconds: number): 
   // 兜底：个别 D1 版本对 UPSERT 的 meta.changes 不可靠，回读校验值是否为本轮写入
   const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'last_monitor_run'").first();
   return String((row as Record<string, unknown> | null)?.value ?? '') === String(now);
+}
+
+// ─────────────────────────────────────────────────────────────
+// 触发源（调度渠道）开关与「上次触发时间」
+// 存在 settings 表的两个 key：trigger_sources（JSON 开关）、trigger_seen（JSON 时间戳）
+// ─────────────────────────────────────────────────────────────
+export async function getTriggerState(env: Env): Promise<{
+  sources: Record<TriggerSource, boolean>;
+  seen: Partial<Record<TriggerSource, number>>;
+}> {
+  const rows = await env.DB.prepare(
+    "SELECT key, value FROM settings WHERE key IN ('trigger_sources', 'trigger_seen')",
+  ).all();
+  let sourcesRaw = '';
+  let seenRaw = '';
+  for (const r of rows.results ?? []) {
+    const k = String((r as Record<string, unknown>).key);
+    const v = String((r as Record<string, unknown>).value ?? '');
+    if (k === 'trigger_sources') sourcesRaw = v;
+    else if (k === 'trigger_seen') seenRaw = v;
+  }
+  return { sources: parseTriggerSources(sourcesRaw), seen: parseTriggerSeen(seenRaw) };
+}
+
+export async function setTriggerSources(env: Env, sources: Record<TriggerSource, boolean>): Promise<void> {
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,datetime('now'))")
+    .bind('trigger_sources', JSON.stringify(sources))
+    .run();
+}
+
+// 记录某渠道本次触发时间（供前端展示「上次触发」与断档判定）
+export async function touchTriggerSource(env: Env, source: TriggerSource, nowSec: number): Promise<void> {
+  const { seen } = await getTriggerState(env);
+  seen[source] = nowSec;
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,datetime('now'))")
+    .bind('trigger_seen', JSON.stringify(seen))
+    .run();
 }
 
 // 轻量读取监控间隔（分钟）与上次监控时间，用于防抖判断——避免在「应跳过」的触发上

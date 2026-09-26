@@ -6,6 +6,11 @@ import * as store from '../store/store';
 import * as engine from '../engine/engine';
 import { hashPassword, verifyPassword, constantTimeEqual, envPassword, newToken, tokenHash, type Env } from '../security/security';
 import { deliverEvent } from '../notify/service';
+import { driverScript, installScript } from '../engine/selfhost';
+import {
+  isSourceStale, normalizeSource, TRIGGER_GAP_THRESHOLD_SEC, TRIGGER_LABELS, TRIGGER_SOURCES,
+  type TriggerSource,
+} from '../engine/triggers';
 import type { Account } from '../provider/aliyun';
 import indexHtml from '../web/index.html';
 
@@ -100,6 +105,13 @@ const routes: { method: string; pattern: string; scope?: string; handler: (ctx: 
       // 已通过 Cloudflare 环境变量配置恢复密码（未初始化时也可直接用它登录）
       envPasswordSet: envPassword(ctx.env) !== '',
     }) },
+  { method: 'GET', pattern: '/api/v1/system/triggers', scope: 'admin', handler: getTriggers },
+  { method: 'PUT', pattern: '/api/v1/system/triggers', scope: 'admin', handler: saveTriggers },
+  { method: 'POST', pattern: '/api/v1/system/triggers/test', scope: 'admin', handler: testTrigger },
+  // 下载自建驱动脚本（driver.mjs / install.sh），配置通过查询参数注入
+  { method: 'GET', pattern: '/api/v1/system/selfhost/driver', scope: 'admin', handler: selfhostDownload },
+  // 无 scope：供外部触发源（GitHub Actions / 自建驱动）在调用前查开关，内部自行鉴权
+  { method: 'GET', pattern: '/api/v1/system/trigger-status', handler: triggerStatus },
   { method: 'POST', pattern: '/api/v1/setup', handler: setup },
   { method: 'POST', pattern: '/api/v1/auth/login', handler: login },
   { method: 'POST', pattern: '/api/v1/auth/password', scope: 'admin', handler: changePassword },
@@ -543,11 +555,13 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
   if (request.headers.get('X-Cron-Trigger') === 'true' || url.pathname === '/__cron') {
     const expected = (env as unknown as { CRON_SECRET?: string }).CRON_SECRET;
     let authorized = false;
+    let viaSecret = false;
     if (expected) {
       const provided = request.headers.get('X-Cron-Secret')
         || url.searchParams.get('key')
         || '';
       authorized = !!provided && (await constantTimeEqual(expected, provided));
+      viaSecret = authorized;
     }
     if (!authorized) {
       // 密钥通道未通过 → 退回管理员会话鉴权
@@ -555,6 +569,21 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
       if (!principal?.admin) {
         return error('unauthorized', 'cron 触发需要有效密钥或管理员登录', 401);
       }
+      authorized = true;
+    }
+    // 触发源开关：外部定时服务用 ?source=github|http|selfhost 或 X-Trigger-Source 声明身份，
+    // 未声明归为 http（兼容 cron-job.org / 自架 curl cron 等既有配置）。
+    // 管理台「立即监控」走管理员会话，属手动触发，不受渠道开关限制。
+    if (viaSecret) {
+      const source = normalizeSource(
+        url.searchParams.get('source') || request.headers.get('X-Trigger-Source'),
+      );
+      const { sources } = await store.getTriggerState(env);
+      if (!sources[source]) {
+        await noteTriggerDisabled(env, source);
+        return json({ monitored: 0, skipped: true, reason: 'source_disabled', source });
+      }
+      await store.touchTriggerSource(env, source, Math.floor(Date.now() / 1000));
     }
     return runMonitorCycle(env);
   }
@@ -587,20 +616,160 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
   }
 }
 
+// 下载自建驱动脚本（driver.mjs / install.sh），已按用户填写的配置注入
+async function selfhostDownload(ctx: Context): Promise<Response> {
+  const sp = new URL(ctx.request.url).searchParams;
+  const kind = sp.get('type') === 'install' ? 'install' : 'driver';
+  const url = (sp.get('url') || 'https://你的域名/__cron?source=selfhost').trim();
+  const secret = (sp.get('secret') || '').trim();
+  const interval = parseInt(sp.get('interval') || '300', 10) || 300;
+  const isInstall = kind === 'install';
+  const body = isInstall ? installScript(url, secret, interval) : driverScript(url, secret, interval);
+  const filename = isInstall ? 'cdt-trigger-install.sh' : 'cdt-trigger-driver.mjs';
+  return new Response(body, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+// 触发源开关：读取（管理员）
+async function getTriggers(ctx: Context): Promise<Response> {
+  const { sources, seen } = await store.getTriggerState(ctx.env);
+  return json({
+    sources,
+    seen,
+    labels: TRIGGER_LABELS,
+    gapThresholdSeconds: TRIGGER_GAP_THRESHOLD_SEC,
+    secretConfigured: ((ctx.env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '') !== '',
+  });
+}
+
+// 触发源开关：保存（管理员）
+async function saveTriggers(ctx: Context): Promise<Response> {
+  const body = await ctx.request.json().catch(() => null) as Record<string, unknown> | null;
+  const { sources } = await store.getTriggerState(ctx.env);
+  let changed = 0;
+  for (const source of TRIGGER_SOURCES) {
+    if (body && typeof body[source] === 'boolean') {
+      sources[source] = body[source] as boolean;
+      changed++;
+    }
+  }
+  if (changed === 0) return error('invalid_input', '未提供任何渠道开关（github / http / selfhost / native）', 400);
+  await store.setTriggerSources(ctx.env, sources);
+  const detail = TRIGGER_SOURCES.map((s) => `${TRIGGER_LABELS[s]}=${sources[s] ? '开' : '关'}`).join('、');
+  await store.addLog(ctx.env, 'audit', `更新监控触发源开关：${detail}`);
+  return json({ ok: true, sources });
+}
+
+// 触发源状态查询（密钥或管理员会话）：供外部触发源调用前先查开关，省掉无用触发
+async function triggerStatus(ctx: Context): Promise<Response> {
+  const env = ctx.env;
+  const expected = (env as unknown as { CRON_SECRET?: string }).CRON_SECRET;
+  let ok = false;
+  if (expected) {
+    const provided = ctx.request.headers.get('X-Cron-Secret')
+      || new URL(ctx.request.url).searchParams.get('key') || '';
+    ok = !!provided && (await constantTimeEqual(expected, provided));
+  }
+  if (!ok) {
+    const principal = await authenticate(env, ctx.request);
+    ok = !!principal?.admin;
+  }
+  if (!ok) return error('unauthorized', '需要有效密钥或管理员登录', 401);
+  const { sources, seen } = await store.getTriggerState(env);
+  return json({ sources, seen });
+}
+
+// 测试某个渠道：以该渠道身份真实跑一轮监控（绕过防抖），验证链路是否可用。
+// 外部渠道（github / selfhost / http）无法由 Worker 主动验证"对方服务是否在跑"，
+// 只能验证「Worker 侧能否接受该渠道 + 密钥 + 跑一轮」，外部侧看「上次触发时间」。
+async function testTrigger(ctx: Context): Promise<Response> {
+  const body = await ctx.request.json().catch(() => null) as Record<string, unknown> | null;
+  const source = normalizeSource(String(body?.source ?? ''));
+  const { sources, seen } = await store.getTriggerState(ctx.env);
+  const secretConfigured = ((ctx.env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '') !== '';
+  if (!sources[source]) {
+    return json({
+      ok: false, source, enabled: false, secretConfigured,
+      lastSeen: seen[source] ?? 0,
+      message: `渠道「${TRIGGER_LABELS[source]}」当前是关闭状态，Worker 会忽略它的触发；如需启用请先打开开关。`,
+    });
+  }
+  if (source === 'native') {
+    // 原生 Cron 由 Cloudflare 调度，无法从前台模拟触发
+    return json({
+      ok: true, source, enabled: true, secretConfigured,
+      lastSeen: seen[source] ?? 0, simulated: false,
+      message: '原生 Cron 由 Cloudflare 调度，请等待下一个周期（或到 Dashboard 查看 scheduled 事件）。',
+    });
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  await store.touchTriggerSource(ctx.env, source, nowSec);
+  const resp = await runMonitorCycle(ctx.env, true);
+  const data = await resp.clone().json().catch(() => ({})) as Record<string, unknown>;
+  return json({
+    ok: true, source, enabled: true, secretConfigured,
+    lastSeen: nowSec, simulated: true,
+    monitored: data.monitored ?? 0,
+    message: `已以「${TRIGGER_LABELS[source]}」身份真实触发一轮监控（已跳过防抖）。`
+      + (secretConfigured ? '' : ' ⚠️ 未配置 CRON_SECRET，外部匿名触发会被 401 拒绝。')
+      + ' 若该渠道由外部服务驱动，请确认其「上次触发时间」会随之更新。',
+  });
+}
+
+// 渠道被关闭时的留痕（每个渠道每小时至多一条，避免刷屏）
+export async function noteTriggerDisabled(env: Env, source: TriggerSource): Promise<void> {
+  const hour = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH
+  const key = `trigger_disabled:${source}:${hour}`;
+  if (await store.recordActionEvent(env, key, 0, 'trigger', 'skipped', '')) {
+    await store.addLog(env, 'info', `触发源「${TRIGGER_LABELS[source]}」已关闭，本次触发已跳过`);
+  }
+}
+
+// 断档告警：已启用的渠道超过阈值（默认 30 分钟）没触发 → 每渠道每小时至多一条 warning。
+// 场景：GitHub Actions 的 schedule 被自动禁用/延迟、自建驱动挂了、cron-job.org 停摆等。
+async function checkTriggerGaps(
+  env: Env,
+  sources: Record<TriggerSource, boolean>,
+  seen: Partial<Record<TriggerSource, number>>,
+): Promise<void> {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const hour = new Date().toISOString().slice(0, 13);
+  for (const source of TRIGGER_SOURCES) {
+    if (!isSourceStale(sources[source], seen[source], nowSec)) continue;
+    const key = `trigger_gap:${source}:${hour}`;
+    if (!(await store.recordActionEvent(env, key, 0, 'trigger', 'stale', ''))) continue;
+    const minutes = Math.floor((nowSec - (seen[source] ?? nowSec)) / 60);
+    await store.addLog(env, 'warning',
+      `触发源「${TRIGGER_LABELS[source]}」已断档 ${minutes} 分钟没有触发，请检查该渠道是否正常（否则会错过开关机窗口）`);
+  }
+}
+
 // 执行一轮监控（供 fetch 的 /__cron 与 scheduled 入口共用，都走同一套防抖与抢占）
-export async function runMonitorCycle(env: Env): Promise<Response> {
+export async function runMonitorCycle(env: Env, force = false): Promise<Response> {
   // 防抖前置：先做轻量判断（单条 settings 查询），命中跳过则直接返回，
   // 不再全量 getConfig（读全量 settings + 解密所有账号 AK/SK），省 CPU 与 D1 读。
+  // force=true 用于前台「测试渠道」按钮：绕过防抖真实跑一轮，验证链路是否可用。
   const state = await store.getMonitorState(env);
   const debounceSeconds = Math.max(0, state.intervalMinutes * 60 - 45);
   const nowSec = Math.floor(Date.now() / 1000);
   const sinceLastRun = state.lastRun > 0 ? nowSec - state.lastRun : Infinity;
-  if (sinceLastRun < debounceSeconds) {
+  if (!force && sinceLastRun < debounceSeconds) {
     return json({ monitored: 0, skipped: true, next_in_seconds: debounceSeconds - sinceLastRun });
+  }
+
+  // 断档告警：本轮真正执行时才检查（无需在每次防抖跳过的请求上重复查库）
+  {
+    const { sources, seen } = await store.getTriggerState(env);
+    await checkTriggerGaps(env, sources, seen);
   }
   // 原子抢占监控槽位：并发触发（外部服务 + 原生 Cron + 前台按钮同时打过来）时
   // 只有一个能把 last_monitor_run 写成当前时间，其余在此返回 skipped。
-  if (!(await store.tryAcquireMonitorSlot(env, debounceSeconds))) {
+  if (!(await store.tryAcquireMonitorSlot(env, force ? 0 : debounceSeconds))) {
     return json({ monitored: 0, skipped: true, next_in_seconds: 0 });
   }
   const config = await store.getConfig(env);

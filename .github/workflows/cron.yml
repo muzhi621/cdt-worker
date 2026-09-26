@@ -25,6 +25,22 @@ jobs:
   trigger:
     runs-on: ubuntu-latest
     steps:
+      - name: 查询渠道开关（已关闭则跳过，节省 Actions 时长）
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::warning::未配置 CRON_SECRET secret，无法查询开关，将直接触发（匿名请求会被 401 拒绝）"
+            exit 0
+          fi
+          status=$(curl -sS -m 20 -H "X-Cron-Secret: $CRON_SECRET" \
+            "https://cdt.dddde.de/api/v1/system/trigger-status" || echo "")
+          enabled=$(printf '%s' "$status" | tr -d ' ' | grep -o '"github":true' | head -1)
+          if [ -z "$enabled" ]; then
+            echo "渠道 GitHub Actions 在 Worker 侧为关闭状态，本次跳过（管理台 → 设置 → 监控触发源 可开启）"
+            exit 0
+          fi
+          echo "渠道已开启，继续触发"
       - name: Trigger monitor
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
@@ -43,7 +59,7 @@ jobs:
             --retry 2 --retry-delay 5 --retry-connrefused \
             -m 90 \
             -w "\n---\nHTTP_CODE:%{http_code} TIME:%{time_total}s" \
-            "https://cdt.dddde.de/__cron" 2>&1)
+            "https://cdt.dddde.de/__cron?source=github" 2>&1)
           status=$?
           set -e
           echo "$resp"

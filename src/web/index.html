@@ -574,6 +574,22 @@
       .bottom-nav button span.ic { display: grid; place-items: center; }
       .bottom-nav button[aria-selected="true"] { color: var(--accent); background: var(--surface-3); }
       .toast-host { bottom: calc(70px + env(safe-area-inset-bottom)); }
+      /* 监控触发源 */
+      .trigger-row {
+        display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+        padding: 10px 0; border-bottom: 1px dashed var(--line);
+      }
+      .trigger-row:last-child { border-bottom: 0; }
+      .trigger-main { flex: 1 1 220px; min-width: 0; }
+      .trigger-name { font-size: 14px; font-weight: 600; }
+      .trigger-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+      .trigger-meta.danger, .hint.danger { color: #d92d20; }
+      .hint.ok { color: #067647; }
+      .trigger-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+      .row-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+      #trigger-tutorial { margin-top: 10px; }
+      #trigger-tutorial summary { cursor: pointer; font-size: 13px; padding: 6px 0; }
+      #trigger-tutorial pre { white-space: pre-wrap; word-break: break-all; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
@@ -1094,6 +1110,87 @@
           </ol>
           <p class="forgot-note" id="settings-env-state"></p>
         </div>
+      </div>
+
+      <!-- 监控触发源（各渠道独立开关 + 上次触发时间 + 教程） -->
+      <div class="card" id="trigger-card">
+        <div class="card-head">
+          <div>
+            <h3>监控触发源</h3>
+            <p class="card-desc">每个渠道可独立开关；关闭后 Worker 会忽略该渠道的触发请求。建议至少启用两个渠道做冗余——单一渠道断档会错过开关机窗口（日志里会告警）。</p>
+          </div>
+        </div>
+        <div id="trigger-list"></div>
+        <p class="hint" id="trigger-state"></p>
+        <details id="trigger-tutorial">
+          <summary><b>各渠道配置教程（GitHub Actions / cron-job.org / 自建驱动 / 腾讯云 SCF / 阿里云 FC）</b></summary>
+
+          <div class="steps">
+            <strong>① GitHub Actions（已内置，零运维）</strong>
+            <ol>
+              <li>仓库 → Settings → Secrets and variables → Actions → 新增 <code>CRON_SECRET</code>（值与 Worker 侧一致）</li>
+              <li>确认 <code>.github/workflows/cron.yml</code> 已启用（长时间无提交时 GitHub 会自动禁用 schedule，推一次提交即可恢复）</li>
+              <li>Actions 页面手动 Run workflow 验证，日志应出现 <code>HTTP_CODE:200</code></li>
+            </ol>
+            <p class="hint">缺点：高峰期会延迟甚至丢跑，建议搭配下面任一渠道做冗余。</p>
+          </div>
+
+          <div class="steps">
+            <strong>② cron-job.org（免费、稳定，推荐做第二渠道）</strong>
+            <ol>
+              <li>注册后新建 Cronjob，URL 填 <code>https://你的域名/__cron?source=http</code></li>
+              <li>Advanced → Headers 增加 <code>X-Cron-Secret: &lt;你的 CRON_SECRET&gt;</code></li>
+              <li>周期选 Every 5 minutes，保存后在管理台确认「外部定时服务」的上次触发时间会更新</li>
+            </ol>
+          </div>
+
+          <div class="steps">
+            <strong>③ 自建驱动（本机 / 服务器 / NAS / 软路由常驻，一键脚本）</strong>
+            <p class="hint">零依赖 Node 脚本，systemd 或 crontab 常驻；也可以 Docker 跑。先在下面填好地址与密钥，复制脚本粘贴到服务器执行。</p>
+            <div class="form-grid">
+              <div class="field">
+                <label for="sh-url">触发地址</label>
+                <input id="sh-url" class="control" type="text" value="https://cdt.dddde.de/__cron?source=selfhost" />
+              </div>
+              <div class="field">
+                <label for="sh-secret">CRON_SECRET</label>
+                <input id="sh-secret" class="control" type="text" placeholder="与 Worker 侧一致的密钥" />
+              </div>
+              <div class="field">
+                <label for="sh-interval">间隔（秒）</label>
+                <input id="sh-interval" class="control" type="number" min="30" value="300" />
+              </div>
+            </div>
+            <div id="sh-links"></div>
+            <p class="hint">链接内含你的密钥，复制后请勿外传；在服务器执行复制到的命令即可完成部署（需 Node 18+，无则自动降级 crontab + curl）。</p>
+          </div>
+
+          <div class="steps">
+            <strong>④ 腾讯云云函数 SCF（长期免费额度，含定时触发器）</strong>
+            <ol>
+              <li>云函数 SCF → 新建 → 运行环境 Node.js 18/20 → 粘贴下方代码（<code>main_handler</code>）</li>
+              <li>函数配置 → 环境变量：<code>CDT_URL</code>=<code>https://你的域名/__cron?source=selfhost</code>、<code>CDT_SECRET</code>=你的密钥</li>
+              <li>触发方式 → 定时触发器（Timer），Cron 表达式填 <code>0 */5 * * * *</code>（腾讯云为 6 位，含秒）</li>
+              <li>保存并启用，免费额度远大于每 5 分钟一次的调用量</li>
+            </ol>
+            <pre><code id="scf-code"></code></pre>
+            <button class="btn ghost" type="button" id="copy-scf-code">复制腾讯云 SCF 代码</button>
+          </div>
+
+          <div class="steps">
+            <strong>⑤ 阿里云函数计算 FC 3.0（长期免费额度，含定时触发器）</strong>
+            <ol>
+              <li>函数计算 FC → 创建函数 → 运行环境 Node.js 18/20 → 粘贴下方代码（<code>handler</code>）</li>
+              <li>配置 → 环境变量：<code>CDT_URL</code>、<code>CDT_SECRET</code>（同上）</li>
+              <li>触发器 → 时间触发器，Cron 表达式 <code>0 */5 * * *</code>（5 位），启用「允许访问公网」</li>
+              <li>地域建议选香港或国内地域（需能出网访问你的 Worker 域名）</li>
+            </ol>
+            <pre><code id="fc-code"></code></pre>
+            <button class="btn ghost" type="button" id="copy-fc-code">复制阿里云 FC 代码</button>
+          </div>
+
+          <p class="hint">提示：大厂 Serverless 的定时触发器同样可能偶发延迟，因此「多源冗余 + 断档告警」才是可靠组合——任一渠道超过 30 分钟没触发，日志页会写入 warning。</p>
+        </details>
       </div>
     </section>
 
@@ -2059,6 +2156,171 @@
         $("log-retention").value = d.logRetentionDays || 30;
         fillNotifyForm(d.notifications || {});
         fillTestAccountOptions(d.accounts || []);
+        loadTriggers();
+      }
+
+      /* ---------- 监控触发源（渠道开关 + 上次触发 + 测试） ---------- */
+      let triggerState = { sources: {}, seen: {}, secretConfigured: false };
+
+      function relTime(ts) {
+        if (!ts) return "从未触发";
+        const diff = Math.floor(Date.now() / 1000) - ts;
+        if (diff < 60) return `${diff} 秒前`;
+        if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+        if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+        return `${Math.floor(diff / 86400)} 天前`;
+      }
+
+      async function loadTriggers() {
+        const host = $("trigger-list");
+        if (!host) return;
+        try {
+          const r = await apiJson("/api/v1/system/triggers");
+          if (!r.ok || !r.data) { host.innerHTML = '<p class="hint">读取触发源配置失败</p>'; return; }
+          triggerState = r.data;
+        } catch (e) { host.innerHTML = '<p class="hint">读取触发源配置失败</p>'; return; }
+        const labels = triggerState.labels || {};
+        const gap = triggerState.gapThresholdSeconds || 1800;
+        host.innerHTML = "";
+        for (const key of Object.keys(labels)) {
+          const row = document.createElement("div");
+          row.className = "trigger-row";
+          const now = Math.floor(Date.now() / 1000);
+          const seen = triggerState.seen?.[key] || 0;
+          const stale = !!seen && triggerState.sources?.[key] && (now - seen) >= gap;
+          row.innerHTML = `
+            <div class="trigger-main">
+              <div class="trigger-name">${labels[key]}</div>
+              <div class="trigger-meta ${stale ? "danger" : ""}">上次触发：${relTime(seen)}${stale ? " · 已断档，请检查该渠道" : ""}</div>
+            </div>
+            <label class="trigger-switch">
+              <input type="checkbox" data-source="${key}" ${triggerState.sources?.[key] ? "checked" : ""} />
+              <span>${triggerState.sources?.[key] ? "已开启" : "已关闭"}</span>
+            </label>
+            <button class="btn ghost" type="button" data-test="${key}">测试</button>`;
+          host.appendChild(row);
+        }
+        host.querySelectorAll("input[data-source]").forEach((el) => {
+          el.addEventListener("change", async () => {
+            const source = el.getAttribute("data-source");
+            const payload = { ...(triggerState.sources || {}) };
+            payload[source] = el.checked;
+            const r = await apiJson("/api/v1/system/triggers", { method: "PUT", body: JSON.stringify(payload) });
+            if (r.ok) { await loadTriggers(); }
+            else { el.checked = !el.checked; triggerMsg(errText(r.data), "error"); }
+          });
+        });
+        host.querySelectorAll("button[data-test]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const source = btn.getAttribute("data-test");
+            const old = btn.textContent;
+            btn.textContent = "测试中…";
+            btn.disabled = true;
+            const r = await apiJson("/api/v1/system/triggers/test", { method: "POST", body: JSON.stringify({ source }) });
+            btn.textContent = old;
+            btn.disabled = false;
+            if (r.ok && r.data) {
+              triggerMsg(r.data.message || "测试完成", r.data.ok ? "ok" : "error");
+            } else {
+              triggerMsg(errText(r.data), "error");
+            }
+            await loadTriggers();
+          });
+        });
+        const st = $("trigger-state");
+        if (st) {
+          st.textContent = triggerState.secretConfigured
+            ? "CRON_SECRET 已配置：外部渠道触发时需携带 X-Cron-Secret 头（或 ?key= 参数）。"
+            : "未配置 CRON_SECRET：外部渠道的匿名触发会被 401 拒绝，请先到 Worker 环境变量配置。";
+          st.className = "hint";
+        }
+        renderSelfhostLinks();
+        fillTriggerTutorial();
+      }
+
+      // 触发源操作的就地提示（结果展示在设置页该模块内，不复用登录页的 showAlert）
+      function triggerMsg(text, kind) {
+        const st = $("trigger-state");
+        if (!st) return;
+        st.textContent = text;
+        st.className = "hint" + (kind === "error" ? " danger" : kind === "ok" ? " ok" : "");
+      }
+
+      /* ---------- 自建驱动：复制下载链接（含配置） ---------- */
+      function selfhostLink(type) {
+        const url = ($("sh-url")?.value || "").trim();
+        const secret = ($("sh-secret")?.value || "").trim();
+        const interval = ($("sh-interval")?.value || "300").trim();
+        const p = new URLSearchParams({ type, url, secret, interval });
+        return `${location.origin}/api/v1/system/selfhost/driver?${p.toString()}`;
+      }
+
+      function renderSelfhostLinks() {
+        const box = $("sh-links");
+        if (!box) return;
+        const d = selfhostLink("driver");
+        const i = selfhostLink("install");
+        const cmd = `curl -o cdt-driver.mjs "${d}" && curl -o install.sh "${i}" && sudo bash install.sh`;
+        box.innerHTML = `
+          <pre><code>${cmd.replace(/</g, "&lt;")}</code></pre>
+          <div class="row-actions">
+            <button class="btn ghost" type="button" id="copy-sh-cmd">复制一键命令</button>
+            <button class="btn ghost" type="button" id="copy-sh-driver">复制 driver 下载链接</button>
+            <button class="btn ghost" type="button" id="copy-sh-install">复制 install 下载链接</button>
+          </div>
+          <p class="hint">链接内含你的密钥，复制后请勿外传；在服务器执行上面这条命令即可完成部署（需 Node 18+，无则自动降级 crontab + curl）。</p>`;
+        $("copy-sh-cmd").onclick = () => copyText(cmd, "一键命令已复制");
+        $("copy-sh-driver").onclick = () => copyText(d, "driver 下载链接已复制");
+        $("copy-sh-install").onclick = () => copyText(i, "install 下载链接已复制");
+      }
+
+      ["sh-url", "sh-secret", "sh-interval"].forEach((id) => {
+        const el = $(id);
+        if (el) el.addEventListener("input", renderSelfhostLinks);
+      });
+
+      /* ---------- 教程代码块（SCF / FC） ---------- */
+      function fillTriggerTutorial() {
+        const scf = $("scf-code");
+        if (scf) {
+          scf.textContent = `// 腾讯云 SCF：入口 main_handler，环境变量 CDT_URL / CDT_SECRET
+const https = require('https');
+
+exports.main_handler = async () => {
+  const url = process.env.CDT_URL || 'https://你的域名/__cron?source=selfhost';
+  const secret = process.env.CDT_SECRET || '';
+  return new Promise((resolve) => {
+    const req = https.get(url, { headers: { 'X-Cron-Secret': secret }, timeout: 60000 }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve({ statusCode: res.statusCode, body: body.slice(0, 200) }));
+    });
+    req.on('error', (e) => resolve({ error: String(e) }));
+    req.on('timeout', () => { req.destroy(); resolve({ error: 'timeout' }); });
+  });
+};`;
+        }
+        const fc = $("fc-code");
+        if (fc) {
+          fc.textContent = `// 阿里云 FC 3.0：入口 handler，环境变量 CDT_URL / CDT_SECRET
+exports.handler = async (event, context) => {
+  const url = process.env.CDT_URL || 'https://你的域名/__cron?source=selfhost';
+  const secret = process.env.CDT_SECRET || '';
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'X-Cron-Secret': secret },
+      signal: AbortSignal.timeout(60000),
+    });
+    const text = await resp.text();
+    return { statusCode: resp.status, body: text.slice(0, 200) };
+  } catch (err) {
+    return { statusCode: 500, body: String(err) };
+  }
+};`;
+        }
+        if ($("copy-scf-code")) $("copy-scf-code").onclick = () => copyText($("scf-code").textContent, "腾讯云 SCF 代码已复制");
+        if ($("copy-fc-code")) $("copy-fc-code").onclick = () => copyText($("fc-code").textContent, "阿里云 FC 代码已复制");
       }
 
       /* ---------- 测试通知账号选择 ---------- */

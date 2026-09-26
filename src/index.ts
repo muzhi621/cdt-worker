@@ -1,6 +1,7 @@
 // Worker 入口
-import { handleRequest, runMonitorCycle } from './http/server';
+import { handleRequest, runMonitorCycle, noteTriggerDisabled } from './http/server';
 import { ensureSchema } from './store/schema';
+import * as store from './store/store';
 import type { Env } from './security/security';
 
 export default {
@@ -23,6 +24,14 @@ export default {
   // 与外部触发共用同一套防抖与原子抢占（并发时只有一轮真正执行）。
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
     await ensureSchema(env);
+    // 原生 Cron 也受「触发源开关」控制：关闭时跳过（每小时留痕一次），
+    // 开启时记录本次触发时间（供前端展示与断档判定），再跑监控。
+    const { sources } = await store.getTriggerState(env);
+    if (!sources.native) {
+      await noteTriggerDisabled(env, 'native');
+      return;
+    }
+    await store.touchTriggerSource(env, 'native', Math.floor(Date.now() / 1000));
     await runMonitorCycle(env);
   },
 };
