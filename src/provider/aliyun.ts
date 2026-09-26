@@ -16,6 +16,8 @@ export interface Account {
   stopTime: string; // "HH:mm"
   scheduleEnabled: boolean;
   keepAlive: boolean;
+  // 账号级停机模式：'' 跟随系统全局设置；'KeepCharging'|'StopCharging' 覆盖全局
+  shutdownMode: string;
   instanceStatus: string;
   trafficUsed: number;
   updatedAt: string;

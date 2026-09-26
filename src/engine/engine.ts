@@ -22,6 +22,14 @@ function masked(accessKeyId: string): string {
   return accessKeyId.length <= 7 ? accessKeyId + '***' : accessKeyId.slice(0, 7) + '***';
 }
 
+// 停机模式解析：账号级设置优先于系统全局设置（等价原项目 resolveShutdownMode）
+export function resolveShutdownMode(account: Account, config: store.Config): string {
+  if (account.shutdownMode === 'KeepCharging' || account.shutdownMode === 'StopCharging') {
+    return account.shutdownMode;
+  }
+  return config.shutdownMode === 'StopCharging' ? 'StopCharging' : 'KeepCharging';
+}
+
 // 把 Date 转换到配置时区，返回一个"墙钟数值等于目标时区本地时间"的 Date。
 // Worker 运行时是 UTC，原项目用 time.LoadLocation(config.Timezone) 计算本地时间；
 // 供 dueWithin（定时开关机）使用。整点/保活时段/账单月份用 zoneFields 直接取字段。
@@ -114,7 +122,7 @@ function accountVars(
     '地区': REGION_NAMES[account.regionId] || account.regionId || '',
     '地域ID': account.regionId || '',
     '实例': account.instanceId || '',
-    '停机模式': config.shutdownMode === 'StopCharging' ? '节省停机' : '普通停机',
+    '停机模式': resolveShutdownMode(account, config) === 'StopCharging' ? '节省停机' : '普通停机',
     '开机时间': account.scheduleEnabled ? (account.startTime || '08:00') : '未启用',
     '关机时间': account.scheduleEnabled ? (account.stopTime || '23:00') : '未启用',
     '已用流量': `${ctx.traffic.toFixed(2)} GB`,
@@ -240,7 +248,7 @@ export async function processAccount(
     if (recorded) {
       if (config.thresholdAction === 'stop_and_notify' && status !== StatusStopped && status !== StatusStopping) {
         try {
-          await aliyun.controlInstance(account, account.accessKeySecret, 'stop', config.shutdownMode);
+          await aliyun.controlInstance(account, account.accessKeySecret, 'stop', resolveShutdownMode(account, config));
           status = StatusStopping;
           await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
           actions.push('threshold_stop');
@@ -272,7 +280,7 @@ export async function processAccount(
     const fresh = await store.recordActionEvent(env, key, account.id, 'keepalive', 'attempting', '');
     if (fresh) {
       try {
-        await aliyun.controlInstance(account, account.accessKeySecret, 'start', config.shutdownMode);
+        await aliyun.controlInstance(account, account.accessKeySecret, 'start', resolveShutdownMode(account, config));
         status = StatusStarting;
         await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
         actions.push('keepalive_start');
@@ -324,7 +332,7 @@ async function executeScheduledAction(
   const fresh = await store.recordActionEvent(env, key, account.id, 'schedule_' + action, 'attempting', '');
   if (!fresh) return false;
   try {
-    await aliyun.controlInstance(account, account.accessKeySecret, action, config.shutdownMode);
+    await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
   } catch (err) {
     await store.deleteActionEvent(env, key);
     await store.addLog(env, 'error', `定时${action === 'start' ? '开机' : '关机'}失败 [${masked(account.accessKeyId)}]: ${err}`);
@@ -358,7 +366,7 @@ export async function control(
   if (action !== 'start' && action !== 'stop') throw new Error('action must be start or stop');
   if (transient(account.instanceStatus)) throw new Error(`instance is currently ${account.instanceStatus}`);
   if (config.keepAlive && action === 'stop') throw new Error('manual shutdown is disabled while keep-alive is enabled');
-  await aliyun.controlInstance(account, account.accessKeySecret, action, config.shutdownMode);
+  await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
   const status = action === 'start' ? StatusStarting : StatusStopping;
   await store.updateRuntime(env, account.id, account.trafficUsed, status, new Date().toISOString());
   const message = `${source}控制实例 [${masked(account.accessKeyId)}]：${action}`;
@@ -369,12 +377,29 @@ export async function control(
 // 汇总状态，等价 Summary()
 export async function summary(env: Env) {
   const config = await store.getConfig(env);
-  const result = config.accounts.map((account) => {
+  const cycle = new Date().toISOString().slice(0, 7); // UTC 月份，与账单缓存键一致
+  const result = [];
+  for (const account of config.accounts) {
     const percentage = usagePercent(account.trafficUsed, account.maxTraffic);
-    return {
+    // 账户余额 / 本月消费：读账单缓存（TTL 传大值表示"取缓存即可"，未开启账单则为 null）
+    let balance: number | null = null;
+    let cost: number | null = null;
+    let currency = 'CNY';
+    if (config.enableBilling) {
+      try {
+        const bal = await store.billingCache<{ amount: number; currency: string }>(env, account.id, 'balance', '', 8760);
+        if (bal.hit && bal.value) {
+          balance = bal.value.amount;
+          currency = bal.value.currency || 'CNY';
+        }
+        const bill = await store.billingCache<{ totalCost: number }>(env, account.id, 'instance_bill', cycle, 8760);
+        if (bill.hit && bill.value) cost = bill.value.totalCost;
+      } catch { /* 账单读取失败忽略 */ }
+    }
+    result.push({
       id: account.id,
       name: account.remark || masked(account.accessKeyId),
-      account: masked(account.accessKeyId),
+      account: account.accessKeyId || masked(account.accessKeyId),
       status: account.instanceStatus,
       used: Math.round(account.trafficUsed * 100) / 100,
       total: account.maxTraffic,
@@ -382,8 +407,15 @@ export async function summary(env: Env) {
       threshold: config.trafficThreshold,
       overThreshold: percentage >= config.trafficThreshold,
       updatedAt: account.updatedAt,
-    };
-  });
+      regionId: account.regionId,
+      instanceId: account.instanceId,
+      shutdownMode: resolveShutdownMode(account, config),
+      scheduleEnabled: account.scheduleEnabled,
+      balance,
+      cost,
+      currency,
+    });
+  }
   return result;
 }
 

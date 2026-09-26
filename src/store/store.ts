@@ -149,6 +149,7 @@ export async function listAccounts(env: Env): Promise<Account[]> {
       stopTime: getString(r, 'stop_time'),
       scheduleEnabled: getBool(r, 'schedule_enabled'),
       keepAlive: getBool(r, 'keep_alive'),
+      shutdownMode: getString(r, 'shutdown_mode'),
       instanceStatus: getString(r, 'instance_status'),
       trafficUsed: getNumber(r, 'traffic_used'),
       updatedAt: getString(r, 'updated_at'),
@@ -168,20 +169,20 @@ export async function saveAccount(env: Env, account: Omit<Account, 'id'> & { id?
   const stopTime = account.stopTime ?? '';
   if (account.id) {
     await env.DB.prepare(
-      `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, access_key_id_enc=?, access_key_secret_enc=?, site_type=?, max_traffic=?, start_time=?, stop_time=?, schedule_enabled=?, keep_alive=?, updated_at=datetime('now') WHERE id=?`,
+      `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, access_key_id_enc=?, access_key_secret_enc=?, site_type=?, max_traffic=?, start_time=?, stop_time=?, schedule_enabled=?, keep_alive=?, shutdown_mode=?, updated_at=datetime('now') WHERE id=?`,
     ).bind(
       name, remark, account.regionId, instanceId,
       akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
-      account.scheduleEnabled ? 1 : 0, account.keepAlive ? 1 : 0, account.id,
+      account.scheduleEnabled ? 1 : 0, account.keepAlive ? 1 : 0, account.shutdownMode ?? '', account.id,
     ).run();
     return account.id;
   }
   const result = await env.DB.prepare(
-    `INSERT INTO accounts (name, remark, region_id, instance_id, access_key_id_enc, access_key_secret_enc, site_type, max_traffic, start_time, stop_time, schedule_enabled, keep_alive) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO accounts (name, remark, region_id, instance_id, access_key_id_enc, access_key_secret_enc, site_type, max_traffic, start_time, stop_time, schedule_enabled, keep_alive, shutdown_mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).bind(
     name, remark, account.regionId, instanceId,
     akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
-    account.scheduleEnabled ? 1 : 0, account.keepAlive ? 1 : 0,
+    account.scheduleEnabled ? 1 : 0, account.keepAlive ? 1 : 0, account.shutdownMode ?? '',
   ).run();
   return Number(result.meta.last_row_id ?? 0);
 }
@@ -197,13 +198,13 @@ export async function updateAccountConfig(env: Env, a: Partial<Account> & { id: 
   const akEnc = a.accessKeyId ? await encrypt(env, a.accessKeyId) : null;
   const skEnc = a.accessKeySecret ? await encrypt(env, a.accessKeySecret) : null;
   const sql =
-    `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, site_type=?, max_traffic=?, schedule_enabled=?, start_time=?, stop_time=?` +
+    `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, site_type=?, max_traffic=?, schedule_enabled=?, start_time=?, stop_time=?, shutdown_mode=?` +
     (akEnc ? ', access_key_id_enc=?' : '') +
     (skEnc ? ', access_key_secret_enc=?' : '') +
     `, updated_at=datetime('now') WHERE id=?`;
   const vals: unknown[] = [
     name, remark, a.regionId ?? '', a.instanceId ?? '', a.siteType ?? 'china',
-    a.maxTraffic ?? 0, a.scheduleEnabled ? 1 : 0, a.startTime ?? '', a.stopTime ?? '',
+    a.maxTraffic ?? 0, a.scheduleEnabled ? 1 : 0, a.startTime ?? '', a.stopTime ?? '', a.shutdownMode ?? '',
   ];
   if (akEnc) vals.push(akEnc);
   if (skEnc) vals.push(skEnc);

@@ -384,6 +384,13 @@
       margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
       font-size: 12px; color: var(--muted);
     }
+    .acct-bill {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      margin-top: 10px; font-size: 12.5px; color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .acct-bill b { color: var(--text-2); font-weight: 650; }
+    .acct-bill .sep { color: var(--border-strong); }
 
     .empty {
       min-height: 240px; display: flex; flex-direction: column;
@@ -803,6 +810,15 @@
                 <option value="international" data-page-node-id="bKVvLmzG6MtcHPiv1aAMt2">国际站（alerts.aliyun.com）</option>
               </select>
             </div>
+            <div class="field" data-page-node-id="AK-SHUTDOWN-BLOCK">
+              <label for="ak-shutdown">停机模式</label>
+              <select id="ak-shutdown" class="control">
+                <option value="">跟随系统设置</option>
+                <option value="KeepCharging">普通停机 KeepCharging（继续收费·稳妥）</option>
+                <option value="StopCharging">节省停机 StopCharging（省钱·有重启风险）</option>
+              </select>
+              <p class="hint">账号级设置优先于「设置 → 监控参数」里的全局停机模式。</p>
+            </div>
             <div class="field full" data-page-node-id="AK-SCHED-BLOCK">
               <label class="check" for="ak-schedule" data-page-node-id="AK-SCHED-CHK">
                 <input type="checkbox" id="ak-schedule" data-page-node-id="AK-SCHED-INPUT" />
@@ -876,6 +892,14 @@
             <div class="field full">
               <label for="ed-instance">实例 ID</label>
               <input id="ed-instance" class="control" placeholder="i-2ze..." autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field full">
+              <label for="ed-shutdown">停机模式（优先于系统全局设置）</label>
+              <select id="ed-shutdown" class="control">
+                <option value="">跟随系统设置</option>
+                <option value="KeepCharging">普通停机 KeepCharging（继续收费·稳妥）</option>
+                <option value="StopCharging">节省停机 StopCharging（省钱·有重启风险）</option>
+              </select>
             </div>
             <div class="field full">
               <label class="check" for="ed-schedule">
@@ -1696,6 +1720,14 @@
           const cls = a.status === "Running" ? "running" : (a.status === "Stopped" ? "stopped" : "transient");
           const pillCls = a.overThreshold ? "pill danger" : "pill " + cls;
           const width = Math.max(2, Math.min(100, pct));
+          const busy = ["Starting", "Stopping", "Pending", "Unknown"].indexOf(a.status) >= 0;
+          const running = a.status === "Running";
+          // 余额 / 本月消费（带货币单位；未开启账单查询时不显示）
+          const hasBill = a.balance != null || a.cost != null;
+          const billLine = hasBill
+            ? '<div class="acct-bill">余额 <b>' + esc(fmtMoney(a.balance, a.currency)) + '</b>' +
+              '<span class="sep">·</span>本月 <b>' + esc(fmtMoney(a.cost, a.currency)) + '</b></div>'
+            : '<div class="acct-bill" style="color:var(--muted)">未开启账单查询（可在设置中启用）</div>';
           return '<article class="acct" style="animation-delay:' + (i * 40) + 'ms">' +
             '<div class="acct-top"><div style="flex:1;min-width:0">' +
             '<div class="acct-name">' + esc(a.name) + "</div>" +
@@ -1703,21 +1735,27 @@
             '<span class="' + pillCls + '"><span class="led"></span>' + esc(a.status || "-") + "</span></div>" +
             '<div class="meter"><i class="' + lvl + '" style="width:' + width + '%"></i></div>' +
             '<div class="acct-stats"><span><b>' + esc(a.used) + "</b> / " + esc(a.total) + ' GB</span><span style="font-weight:600">' + pct.toFixed(1) + "%</span></div>" +
+            billLine +
             '<div class="acct-foot"><span>阈值 ' + esc(a.threshold) + "% · 更新 " + fmtTime(a.updatedAt) + "</span>" +
-            '<span style="display:flex;gap:6px">' +
+            '<span style="display:flex;gap:6px;flex-wrap:wrap">' +
             '<button class="btn btn-ghost btn-sm" type="button" data-refresh="' + esc(a.id) + '">刷新</button>' +
-            '<button class="btn btn-danger btn-sm" type="button" data-edit="' + esc(a.id) + '">配置</button>' +
+            '<button class="btn btn-ghost btn-sm" type="button" data-start="' + esc(a.id) + '"' + (busy || running ? " disabled" : "") + ">开机</button>" +
+            '<button class="btn btn-ghost btn-sm" type="button" data-stop="' + esc(a.id) + '"' + (busy || !running ? " disabled" : "") + ">关机</button>" +
+            '<button class="btn btn-ghost btn-sm" type="button" data-config="' + esc(a.id) + '">配置</button>' +
             "</span></div></article>";
         }).join("");
 
         box.querySelectorAll("[data-refresh]").forEach((b) => {
           b.addEventListener("click", () => refreshAccount(Number(b.dataset.refresh)));
         });
-        box.querySelectorAll("[data-edit]").forEach((b) => {
-          b.addEventListener("click", () => {
-            switchTab("accounts");
-            toast("请在「账号」页确认配置");
-          });
+        box.querySelectorAll("[data-start]").forEach((b) => {
+          b.addEventListener("click", () => controlAccount(Number(b.dataset.start), "start"));
+        });
+        box.querySelectorAll("[data-stop]").forEach((b) => {
+          b.addEventListener("click", () => controlAccount(Number(b.dataset.stop), "stop"));
+        });
+        box.querySelectorAll("[data-config]").forEach((b) => {
+          b.addEventListener("click", () => openEditById(Number(b.dataset.config)));
         });
 
         const lastUpdate = list.reduce((m, a) => (a.updatedAt > m ? a.updatedAt : m), "");
@@ -1757,6 +1795,30 @@
         loadStatus();
       }
 
+      // 金额格式化（按币种显示符号）
+      function fmtMoney(v, currency) {
+        if (v == null || v === "") return "—";
+        const cur = String(currency || "CNY").toUpperCase();
+        const sym = cur === "CNY" ? "¥" : (cur === "USD" ? "$" : cur + " ");
+        return sym + (Number(v) || 0).toFixed(2);
+      }
+
+      // 账号开机 / 关机
+      async function controlAccount(id, action) {
+        const r = await apiJson("/api/v1/accounts/" + id + "/actions/" + action, { method: "POST", body: "{}" });
+        toast(r.ok ? (action === "start" ? "已发送开机指令" : "已发送关机指令") : errText(r.data), r.ok ? "ok" : "err");
+        if (r.ok) setTimeout(loadStatus, 1500);
+      }
+
+      // 从配置接口取账号详情后打开编辑弹窗（与「已配置账号」共用同一个弹窗）
+      async function openEditById(id) {
+        const r = await apiJson("/api/v1/config");
+        if (!r.ok) { toast(errText(r.data), "err"); return; }
+        const acc = (r.data.accounts || []).find((x) => Number(x.id) === Number(id));
+        if (!acc) { toast("未找到该账号配置", "err"); return; }
+        openEditDialog(acc);
+      }
+
       $("status-refresh").addEventListener("click", loadStatus);
 
       /* ---------- 账号页 ---------- */
@@ -1790,6 +1852,7 @@
           instanceId: $("ak-instance").value.trim(),
           maxTraffic: parseInt($("ak-max").value, 10),
           siteType: $("ak-site").value,
+          shutdownMode: $("ak-shutdown").value,
           scheduleEnabled: $("ak-schedule").checked,
           startTime: $("ak-start").value || "08:00",
           stopTime: $("ak-stop").value || "23:00",
@@ -1862,11 +1925,12 @@
         $("ed-max").value = a.maxTraffic || "";
         $("ed-region").value = a.regionId || "";
         $("ed-site").value = a.siteType || "china";
+        $("ed-shutdown").value = a.shutdownMode || "";
         $("ed-instance").value = a.instanceId || "";
         $("ed-schedule").checked = !!a.scheduleEnabled;
         $("ed-start").value = a.startTime || "08:00";
         $("ed-stop").value = a.stopTime || "23:00";
-        $("ed-akid").value = "";
+        $("ed-akid").value = a.accessKeyId || "";
         $("ed-aksecret").value = "";
         $("edit-dialog").dataset.id = String(a.id);
         $("edit-dialog").showModal();
@@ -1887,6 +1951,7 @@
           instanceId: $("ed-instance").value.trim(),
           maxTraffic,
           siteType: $("ed-site").value,
+          shutdownMode: $("ed-shutdown").value,
           scheduleEnabled: $("ed-schedule").checked,
           startTime: $("ed-start").value || "08:00",
           stopTime: $("ed-stop").value || "23:00",

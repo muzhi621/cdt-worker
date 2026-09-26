@@ -106,12 +106,24 @@ const SCHEMA_STATEMENTS: string[] = [
   `CREATE INDEX IF NOT EXISTS idx_login_ip ON login_attempts(ip, created_at)`,
 ];
 
+// 已部署库的增量迁移（ALTER 在列已存在时会报错，需逐条容错执行）
+const MIGRATIONS: string[] = [
+  // 账号级停机模式：'' 表示跟随系统全局设置，StopCharging/KeepCharging 覆盖全局
+  `ALTER TABLE accounts ADD COLUMN shutdown_mode TEXT NOT NULL DEFAULT ''`,
+];
+
 let schemaReady = false;
 
-// 幂等建表，多次调用只真正执行一次（进程内标记）
+// 幂等建表 + 增量迁移，多次调用只真正执行一次（进程内标记）
 export async function ensureSchema(env: Env): Promise<void> {
   if (schemaReady) return;
   const statements = SCHEMA_STATEMENTS.map((sql) => env.DB.prepare(sql));
   await env.DB.batch(statements);
+  // 迁移逐条容错：列已存在（duplicate column）时忽略，不影响其他迁移
+  for (const sql of MIGRATIONS) {
+    try {
+      await env.DB.prepare(sql).run();
+    } catch { /* 已应用过，忽略 */ }
+  }
   schemaReady = true;
 }

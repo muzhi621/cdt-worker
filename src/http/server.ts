@@ -277,7 +277,9 @@ async function getConfig(ctx: Context): Promise<Response> {
       smtp: { ...n.smtp, password: '', passwordConfigured: !!n.smtp.password },
       template: { body: n.template?.body ?? '' },
     },
-    accounts: config.accounts.map((a) => ({ ...a, accessKeyId: '', accessKeySecret: '' })),
+    // AccessKey ID 非敏感信息（Secret 才是），明文返回供界面展示与编辑；
+    // AccessKey Secret 仍不回传，仅通过 configured 方式提示
+    accounts: config.accounts.map((a) => ({ ...a, accessKeySecret: '' })),
   };
   return json(safe);
 }
