@@ -1132,6 +1132,11 @@
         </div>
 
         <form id="notify-form" novalidate autocomplete="off">
+          <div class="field" style="max-width:420px;margin-bottom:6px">
+            <label for="notify-test-account">测试通知使用的账号</label>
+            <select id="notify-test-account" class="control"></select>
+            <p class="hint">下方「发送测试」将用所选账号的数据渲染通知内容（不选则用第一个账号）；真实告警始终按触发事件的账号各自发送、互不混用。</p>
+          </div>
           <div class="nt-block">
             <div class="nt-head">
               <div class="section-title">Telegram</div>
@@ -1367,6 +1372,13 @@
       const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
       let csrf = "";
+      // CSRF token 双提交：cookie 里存了一份（cdt_csrf，非 HttpOnly），页面刷新后
+      // csrf 变量会被清空，这里从 cookie 恢复，保证刷新后写操作仍能通过后端校验
+      function readCsrfCookie() {
+        const m = /(?:^|;\s*)cdt_csrf=([^;]+)/.exec(document.cookie || "");
+        if (m) csrf = decodeURIComponent(m[1]);
+      }
+      readCsrfCookie();
       let logTimer = null;
       const TABS = ["status", "accounts", "settings", "notify", "logs"];
 
@@ -1485,6 +1497,8 @@
           if (r.data.via_env_password) toast("已用环境变量密码登录，管理员密码已同步", "ok");
         } else {
           showAlert(errText(r.data));
+          // 后端把「环境变量恢复密码是否可用」放在登录失败响应里（不再经 init-status 暴露）
+          markEnvPasswordState(!!(r.data && r.data.env_password_available));
           $("login-password").select();
           $("login-password").focus();
         }
@@ -1610,8 +1624,8 @@
         } catch (e) { /* 网络异常时继续走登录流程 */ }
 
         const r = await apiJson("/api/v1/system/init-status");
-        const envSet = !!(r.data && r.data.envPasswordSet);
-        markEnvPasswordState(envSet);
+        // 注：envPasswordSet 已从该接口移除（防未登录信息泄露），
+        // 环境变量密码提示改由登录失败响应的 env_password_available 驱动
         if (!r.ok) {
           $("auth-title").textContent = "服务暂时不可用";
           $("auth-sub").textContent = "无法连接到 Worker，请稍后重试";
@@ -1621,7 +1635,7 @@
           showView("auth");
           return;
         }
-        if (r.data && (r.data.initialized || envSet)) {
+        if (r.data && r.data.initialized) {
           $("auth-title").textContent = "管理员登录";
           $("auth-sub").textContent = r.data.initialized
             ? "请输入初始化时设置的管理员密码"
@@ -2044,6 +2058,31 @@
         $("set-monitor").value = d.monitorInterval || 5;
         $("log-retention").value = d.logRetentionDays || 30;
         fillNotifyForm(d.notifications || {});
+        fillTestAccountOptions(d.accounts || []);
+      }
+
+      /* ---------- 测试通知账号选择 ---------- */
+      function fillTestAccountOptions(accounts) {
+        const sel = $("notify-test-account");
+        if (!sel) return;
+        const prev = sel.value;
+        sel.innerHTML = "";
+        if (!accounts || !accounts.length) {
+          const opt = document.createElement("option");
+          opt.value = "";
+          opt.textContent = "（尚未添加账号，测试通知将无账号数据）";
+          sel.appendChild(opt);
+          sel.disabled = true;
+          return;
+        }
+        sel.disabled = false;
+        for (const a of accounts) {
+          const opt = document.createElement("option");
+          opt.value = String(a.id);
+          opt.textContent = a.remark || a.name || ("账号 #" + a.id);
+          sel.appendChild(opt);
+        }
+        if (prev && accounts.some((a) => String(a.id) === prev)) sel.value = prev;
       }
 
       /* ---------- 自定义通知内容模板 ---------- */
@@ -2166,7 +2205,9 @@
           this.disabled = true;
           const original = this.textContent;
           this.textContent = "测试中…";
-          const r = await apiJson("/api/v1/notify/test", { method: "POST", body: JSON.stringify({ channel }) });
+          const acctSel = $("notify-test-account");
+          const accountId = acctSel && !acctSel.disabled ? (parseInt(acctSel.value, 10) || 0) : 0;
+          const r = await apiJson("/api/v1/notify/test", { method: "POST", body: JSON.stringify({ channel, accountId }) });
           this.disabled = false;
           this.textContent = original;
           if (!r.ok) { toast(errText(r.data), "err"); return; }

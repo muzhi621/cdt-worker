@@ -1,5 +1,11 @@
-# CDT Monitor 外部定时触发（方式二 · GitHub Actions）
-# 每 5 分钟请求一次监控触发地址，Worker 内部按「监控间隔」防抖
+# CDT Monitor 外部定时触发（备份链路 · GitHub Actions）
+# 主链路为 Worker 原生 Cron Trigger（wrangler.toml [triggers]，无需密钥）；
+# 本 workflow 作为外部备份触发，每 5 分钟请求一次 /__cron。
+# Worker 内部按「监控间隔」防抖 + 原子槽位抢占，两条链路并发也不会重复执行。
+#
+# 密钥：在仓库 Settings → Secrets and variables → Actions 添加 CRON_SECRET，
+# 值与 Worker 的 CRON_SECRET 环境变量一致。未配置时 workflow 仍会运行，
+# 但请求不带密钥，Worker 端会以管理员会话/密钥校验，匿名请求将得到 401。
 # 注意：GitHub 的 schedule 使用 UTC 时间且可能延迟数分钟（高峰期更明显），
 # Worker 侧已放宽定时开关机的命中窗口以容忍延迟。
 name: cdt-monitor-trigger
@@ -19,11 +25,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger monitor
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
           echo "触发时间(UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
           echo "目标地址: https://cdt.dddde.de/__cron"
           set +e
+          args=( )
+          if [ -n "$CRON_SECRET" ]; then
+            args+=( -H "X-Cron-Secret: $CRON_SECRET" )
+          else
+            echo "::warning::未配置 CRON_SECRET secret，请求将不带密钥（未登录的匿名请求会被 401 拒绝）"
+          fi
           resp=$(curl -sS \
+            "${args[@]}" \
             --retry 2 --retry-delay 5 --retry-connrefused \
             -m 90 \
             -w "\n---\nHTTP_CODE:%{http_code} TIME:%{time_total}s" \
@@ -37,5 +52,5 @@ jobs:
           fi
           code=$(printf '%s' "$resp" | sed -n 's/.*HTTP_CODE:\([0-9]\{3\}\).*/\1/p' | tail -1)
           if [ "$code" != "200" ]; then
-            echo "::warning::触发地址返回 HTTP $code，请检查 Worker 是否正常"
+            echo "::warning::触发地址返回 HTTP $code，请检查 CRON_SECRET 配置或 Worker 是否正常"
           fi

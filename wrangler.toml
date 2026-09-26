@@ -22,10 +22,14 @@ compatibility_flags = ["nodejs_compat"]
 binding = "DB"
 database_name = "cdt-monitor-db"
 
-# 监控调度：不使用 Cloudflare Cron（免费额度仅 5 个，易超限）
-# 改为「外部 HTTP 触发」：用任意免费 cron 服务定时 GET /__cron
-# 间隔在前台「设置」里配置（monitorInterval，分钟），Worker 内部做防抖
-# 示例（cron-job.org / GitHub Actions 等）：每 5 分钟请求 https://你的地址/__cron
+# ─────────────────────────────────────────────────────────────
+# 监控调度（双保险）：
+# 1. 原生 Cron Trigger：scheduled() 直调内部监控函数，无需密钥、不怕外部服务停摆
+# 2. 外部 HTTP 触发（可选备份）：定时 GET /__cron，带 X-Cron-Secret 头（见 DEPLOY-CRON.md）
+# 两条链路共用 Worker 内部防抖（monitorInterval，分钟）+ 原子槽位抢占，不会重复跑
+# ─────────────────────────────────────────────────────────────
+[triggers]
+crons = ["*/5 * * * *"]
 
 [observability]
 enabled = true

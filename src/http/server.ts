@@ -36,6 +36,13 @@ function clientIP(request: Request): string {
 const rateMap = new Map<string, { start: number; count: number }>();
 function allowRate(key: string, max: number, windowMs: number): boolean {
   const now = Date.now();
+  // 定期清理过期条目，防止 key 随 IP 数量无限增长（内存泄漏），
+  // 同时避免 isolate 长活时旧 key 复用带来的计数残留
+  if (rateMap.size > 500) {
+    for (const [k, v] of rateMap) {
+      if (now - v.start >= windowMs) rateMap.delete(k);
+    }
+  }
   const entry = rateMap.get(key);
   if (!entry || now - entry.start >= windowMs) {
     rateMap.set(key, { start: now, count: 1 });
@@ -152,14 +159,21 @@ async function login(ctx: Context): Promise<Response> {
   if (!valid) {
     await ctx.env.DB.prepare('INSERT INTO login_attempts (ip) VALUES (?)').bind(ip).run();
     await store.addLog(ctx.env, 'warning', '管理员登录失败 [IP: ' + ip + ']');
-    return error('invalid_credentials', '密码错误', 401);
+    // 环境变量恢复密码的可用性只对"尝试过登录的人"披露，不再通过 init-status 暴露
+    return json({
+      error: { code: 'invalid_credentials', message: '密码错误' },
+      env_password_available: envPassword(ctx.env) !== '',
+    }, 401);
   }
 
   // 用环境变量密码登录成功：回写 D1 哈希，使密码与会话状态一致
   if (viaEnvPassword) {
     if (password.length >= 10) {
       await store.setPasswordHash(ctx.env, await hashPassword(password));
-      await store.addLog(ctx.env, 'audit', '使用环境变量 ADMIN_PASSWORD 登录成功，管理员密码已同步为该值 [IP: ' + ip + ']');
+      await store.addLog(ctx.env, 'audit',
+        '使用环境变量 ADMIN_PASSWORD 登录成功，管理员密码已同步为该值 [IP: ' + ip + ']。'
+        + '建议尽快到 Cloudflare Dashboard 删除 ADMIN_PASSWORD 环境变量——'
+        + '留着它等于永久保留一个明文后门，任何人拿到该值即可进入系统');
     } else {
       await store.addLog(ctx.env, 'audit', '使用环境变量 ADMIN_PASSWORD 登录成功（密码长度不足 10 位，未同步到 D1）[IP: ' + ip + ']');
     }
@@ -424,14 +438,22 @@ async function clearLogsHandler(ctx: Context): Promise<Response> {
 async function notifyTestHandler(ctx: Context): Promise<Response> {
   const config = await store.getConfig(ctx.env);
   let channel = '';
+  let accountId = 0;
   try {
     const body = await ctx.request.json().catch(() => null);
     channel = String((body as Record<string, unknown>)?.channel ?? '').trim();
+    accountId = Math.floor(Number((body as Record<string, unknown>)?.accountId ?? 0)) || 0;
   } catch { /* 无 body 则测全部 */ }
   const validChannels = ['telegram', 'webhook', 'serverchan', 'pushplus', 'smtp'];
   if (channel && validChannels.indexOf(channel) < 0) return error('invalid_channel', '未知的通知通道', 400);
-  // 测试事件带上账号变量示例（取第一个账号），便于预览自定义模板渲染效果
-  const sample = config.accounts[0];
+  // 示例账号：指定 accountId 用该账号渲染；未指定用第一个（此前写死第一个账号，
+  // 多账号时无法验证其他账号的通知内容）
+  let sample = config.accounts[0];
+  if (accountId) {
+    const found = config.accounts.find((a) => a.id === accountId);
+    if (!found) return error('account_not_found', '所选账号不存在，请刷新页面后重试', 404);
+    sample = found;
+  }
   const fields: Record<string, string> = {
     '时间': new Date().toLocaleString('zh-CN', { timeZone: config.timezone || 'Asia/Shanghai' }),
     '时区': config.timezone || 'Asia/Shanghai',
@@ -515,17 +537,23 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
   const pathname = url.pathname;
 
   // Cron 触发器（监控循环）
-  // 加共享密钥校验：/__cron 是公开 URL，任何人可访问，若不校验会被人恶意高频触发，
-  // 放大阿里云 API 调用与 D1 写入。密钥通过环境变量 CRON_SECRET 配置（未配置则放行，
-  // 保持向后兼容；建议生产配置）。
+  // 双通道鉴权：外部定时服务用 CRON_SECRET（X-Cron-Secret 头或 ?key= 参数）；
+  // 管理台「立即监控」按钮走管理员会话 cookie。未配置 CRON_SECRET 时仅放行管理员会话，
+  // 避免 /__cron 回归公开可刷（放大阿里云 API 调用与 D1 写入）。
   if (request.headers.get('X-Cron-Trigger') === 'true' || url.pathname === '/__cron') {
     const expected = (env as unknown as { CRON_SECRET?: string }).CRON_SECRET;
+    let authorized = false;
     if (expected) {
       const provided = request.headers.get('X-Cron-Secret')
         || url.searchParams.get('key')
         || '';
-      if (!provided || !(await constantTimeEqual(expected, provided))) {
-        return error('unauthorized', 'cron 触发密钥无效', 401);
+      authorized = !!provided && (await constantTimeEqual(expected, provided));
+    }
+    if (!authorized) {
+      // 密钥通道未通过 → 退回管理员会话鉴权
+      const principal = await authenticate(env, request);
+      if (!principal?.admin) {
+        return error('unauthorized', 'cron 触发需要有效密钥或管理员登录', 401);
       }
     }
     return runMonitorCycle(env);
@@ -559,13 +587,21 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
   }
 }
 
-async function runMonitorCycle(env: Env): Promise<Response> {
+// 执行一轮监控（供 fetch 的 /__cron 与 scheduled 入口共用，都走同一套防抖与抢占）
+export async function runMonitorCycle(env: Env): Promise<Response> {
   // 防抖前置：先做轻量判断（单条 settings 查询），命中跳过则直接返回，
   // 不再全量 getConfig（读全量 settings + 解密所有账号 AK/SK），省 CPU 与 D1 读。
   const state = await store.getMonitorState(env);
-  const sinceLastRun = state.lastRun > 0 ? Math.floor(Date.now() / 1000) - state.lastRun : Infinity;
-  if (state.lastRun > 0 && sinceLastRun < state.intervalMinutes * 60 - 45) {
-    return json({ monitored: 0, skipped: true, next_in_seconds: Math.max(0, state.intervalMinutes * 60 - 45 - sinceLastRun) });
+  const debounceSeconds = Math.max(0, state.intervalMinutes * 60 - 45);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const sinceLastRun = state.lastRun > 0 ? nowSec - state.lastRun : Infinity;
+  if (sinceLastRun < debounceSeconds) {
+    return json({ monitored: 0, skipped: true, next_in_seconds: debounceSeconds - sinceLastRun });
+  }
+  // 原子抢占监控槽位：并发触发（外部服务 + 原生 Cron + 前台按钮同时打过来）时
+  // 只有一个能把 last_monitor_run 写成当前时间，其余在此返回 skipped。
+  if (!(await store.tryAcquireMonitorSlot(env, debounceSeconds))) {
+    return json({ monitored: 0, skipped: true, next_in_seconds: 0 });
   }
   const config = await store.getConfig(env);
   const started = Date.now();
@@ -581,7 +617,7 @@ async function runMonitorCycle(env: Env): Promise<Response> {
       else await store.addLog(env, 'error', `监控账号失败 [${batch[j].remark || batch[j].accessKeyId}]: ${s.reason}`);
     }
   }
-  await store.markMonitorRun(env);
+  // 槽位已在进入时原子抢占（tryAcquireMonitorSlot），无需再写 last_monitor_run
   // 消费通知队列（失败自动重试，不影响监控主流程）
   try {
     await engine.flushOutbox(env, config);

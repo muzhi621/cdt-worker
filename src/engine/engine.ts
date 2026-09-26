@@ -7,6 +7,7 @@ import * as aliyun from '../provider/aliyun';
 import * as store from '../store/store';
 import { deliverEvent, hasActiveChannel, type NotificationEvent, type NotifyConfig } from '../notify/service';
 import { newToken, type Env } from '../security/security';
+import { dueWithin, inTimeRange, localCycle, toZone, zoneFields } from './time';
 
 // 状态常量（与原 Go 项目一致）
 const StatusStarting = 'Starting';
@@ -30,49 +31,6 @@ export function resolveShutdownMode(account: Account, config: store.Config): str
   return config.shutdownMode === 'StopCharging' ? 'StopCharging' : 'KeepCharging';
 }
 
-// 把 Date 转换到配置时区，返回一个"墙钟数值等于目标时区本地时间"的 Date。
-// Worker 运行时是 UTC，原项目用 time.LoadLocation(config.Timezone) 计算本地时间；
-// 供 dueWithin（定时开关机）使用。整点/保活时段/账单月份用 zoneFields 直接取字段。
-function toZone(date: Date, timezone: string): Date {
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone || 'Asia/Shanghai',
-      hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).formatToParts(date);
-    const g: Record<string, number> = {};
-    for (const p of parts) if (p.type !== 'literal') g[p.type] = parseInt(p.value, 10);
-    const asUTC = Date.UTC(g.year, (g.month || 1) - 1, g.day, g.hour, g.minute, g.second);
-    return new Date(asUTC);
-  } catch {
-    return date; // 时区非法时回退到 UTC（与原项目 FixedZone CST 回退语义等价，均保证不崩溃）
-  }
-}
-
-// 以目标时区的“墙钟字符串”形式获取当前时间字段（YYYY-MM-DD HH:mm:ss）
-function zoneFields(date: Date, timezone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone || 'Asia/Shanghai', hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).formatToParts(date);
-    const g: Record<string, number> = {};
-    for (const p of parts) if (p.type !== 'literal') g[p.type] = parseInt(p.value, 10);
-    return { year: g.year, month: g.month || 1, day: g.day, hour: g.hour || 0, minute: g.minute || 0, second: g.second || 0 };
-  } catch {
-    return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate(), hour: date.getUTCHours(), minute: date.getUTCMinutes(), second: date.getUTCSeconds() };
-  }
-}
-
-// 以配置时区的年月作为账单账期（YYYY-MM），与日志/通知/定时一致。
-// 不能用 UTC 月份（toISOString().slice(0,7)），否则每月月初/月末 8 小时账单月份错位。
-function localCycle(now: Date, timezone: string): string {
-  const f = zoneFields(now, timezone);
-  return `${f.year}-${String(f.month).padStart(2, '0')}`;
-}
-
 function usagePercent(traffic: number, maxTraffic: number): number {
   if (maxTraffic <= 0) return 0;
   return Math.round((traffic / maxTraffic) * 10000) / 100;
@@ -80,30 +38,6 @@ function usagePercent(traffic: number, maxTraffic: number): number {
 
 function transient(status: string): boolean {
   return status === StatusStarting || status === StatusStopping || status === 'Pending' || status === StatusUnknown;
-}
-
-function dueWithin(now: Date, hhmm: string, windowMs: number): boolean {
-  if (!hhmm) return false;
-  const [h, m] = hhmm.split(':').map(Number);
-  if (isNaN(h) || isNaN(m)) return false;
-  const target = new Date(now);
-  target.setHours(h, m, 0, 0);
-  let delta = now.getTime() - target.getTime();
-  // 跨午夜窗口：若 target 在今天（墙钟），而 now 已过午夜（delta < 0），
-  // 则可能是「昨天同一时刻」的窗口仍在延续（如 stopTime=23:00 窗口覆盖到次日 01:00）。
-  // 此时把 target 回拨 24h 再判断，使 2 小时窗口能正确跨越午夜。
-  if (delta < 0) {
-    delta += 24 * 3600 * 1000;
-    if (delta <= windowMs) return true;
-    return false;
-  }
-  return delta <= windowMs;
-}
-
-function inTimeRange(current: string, start: string, end: string): boolean {
-  if (!start || !end) return false;
-  if (start < end) return current >= start && current < end;
-  return current >= start || current < end;
 }
 
 // 地域 ID → 中文名（用于通知变量「地区」）
@@ -419,7 +353,13 @@ export async function control(
   const account = config.accounts.find((a) => a.id === accountId);
   if (!account) throw new Error('account not found');
   if (action !== 'start' && action !== 'stop') throw new Error('action must be start or stop');
-  if (transient(account.instanceStatus)) throw new Error(`instance is currently ${account.instanceStatus}`);
+  // 仅阻断真正的过渡态（Starting/Stopping/Pending）。
+  // Unknown（查询失败/超时等导致的状态缺失）不再阻断手动启停：
+  // 否则新添加的账号（初始状态即 Unknown）会永远无法手动控制。
+  if (account.instanceStatus === StatusStarting || account.instanceStatus === StatusStopping
+      || account.instanceStatus === 'Pending') {
+    throw new Error(`instance is currently ${account.instanceStatus}`);
+  }
   if (config.keepAlive && action === 'stop') throw new Error('manual shutdown is disabled while keep-alive is enabled');
   await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
   const status = action === 'start' ? StatusStarting : StatusStopping;
@@ -497,6 +437,8 @@ export async function flushOutbox(env: Env, config: store.Config): Promise<void>
     const failures = results.filter((r) => !r.ok);
     if (failures.length === 0) {
       await store.markOutboxSent(env, row.id);
+      // 投递留痕：日志页可核对"哪条通知发给了哪个账号"，排查漏发/串号
+      await store.addLog(env, 'info', `通知已投递 [${event.title} · 账号#${event.accountId}]`);
       continue;
     }
     const detail = failures.map((f) => `${f.channel}: ${f.error}`).join('; ');

@@ -126,8 +126,16 @@ export async function verifyPassword(encoded: string, password: string): Promise
   const iterMatch = /^i=(\d+)$/.exec(parts[2]);
   if (!iterMatch) return false;
   const iterations = parseInt(iterMatch[1], 10);
-  const salt = base64UrlDecode(parts[3]);
-  const expected = base64UrlDecode(parts[4]);
+  // base64 段损坏（如手工改库/迁移出错）时 atob 会抛 InvalidCharacterError，
+  // 这里降级为"验证失败"，让登录接口返回 401 而不是 500
+  let salt: Uint8Array;
+  let expected: Uint8Array;
+  try {
+    salt = base64UrlDecode(parts[3]);
+    expected = base64UrlDecode(parts[4]);
+  } catch {
+    return false;
+  }
   const enc = new TextEncoder();
   const keyMaterial = await crypto.subtle.importKey(
     'raw',

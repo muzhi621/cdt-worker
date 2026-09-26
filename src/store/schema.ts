@@ -49,6 +49,11 @@ const SCHEMA_STATEMENTS: string[] = [
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (account_id, kind, cycle)
   )`,
+  // ── jobs 表（已废弃，仅保留建表语句防旧库报错）──
+  // 历史遗留：早期设计曾把通知/账单查询做成 jobs 队列，现已被
+  // notification_outbox（通知）+ billing_cache（账单）+ 监控内联执行取代。
+  // 全代码库无任何读写（已核对），不要在此表上新增功能；
+  // 留着的原因：删除表需要写迁移且无收益，空表几乎不占存储。
   `CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     type TEXT NOT NULL,

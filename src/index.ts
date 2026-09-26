@@ -1,5 +1,5 @@
 // Worker 入口
-import { handleRequest } from './http/server';
+import { handleRequest, runMonitorCycle } from './http/server';
 import { ensureSchema } from './store/schema';
 import type { Env } from './security/security';
 
@@ -17,10 +17,11 @@ export default {
     return handleRequest(env, request);
   },
 
-  // 保留 scheduled 入口（可选，用于未来启用 Cron 触发时）
+  // 原生 Cron Trigger 入口（wrangler.toml [triggers] 配置调度）。
+  // 直调内部监控函数，不经过 HTTP 层 —— 天然可信，无需 CRON_SECRET，
+  // 与外部触发共用同一套防抖与原子抢占（并发时只有一轮真正执行）。
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
     await ensureSchema(env);
-    const url = new URL('https://cdt-monitor.internal/__cron');
-    await handleRequest(env, new Request(url.toString(), { headers: { 'X-Cron-Trigger': 'true' } }));
+    await runMonitorCycle(env);
   },
 };

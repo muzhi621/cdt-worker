@@ -80,12 +80,22 @@ export async function isInitialized(env: Env): Promise<boolean> {
   return (await getPasswordHash(env)) !== '';
 }
 
-// 记录本次监控完成时间（Unix 秒）
-export async function markMonitorRun(env: Env): Promise<void> {
+// 原子抢占监控槽位：仅当距上次运行超过 debounceSeconds 时，才把 last_monitor_run 更新为 now。
+// 用条件 UPSERT 实现"检查 + 占位"的单语句原子操作（SQLite 写串行化，冲突分支的 WHERE
+// 在更新时重新求值），并发触发只有一个能把 meta.changes 写成 1，其余全部返回 false。
+// 替代旧的「读 → 判断 → 末尾写回」三步防抖：那套写法在并发触发时会重复跑整轮监控。
+export async function tryAcquireMonitorSlot(env: Env, debounceSeconds: number): Promise<boolean> {
   const now = Math.floor(Date.now() / 1000);
-  await env.DB.prepare('INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,datetime(\'now\'))')
-    .bind('last_monitor_run', String(now))
-    .run();
+  const threshold = now - Math.max(0, debounceSeconds);
+  const result = await env.DB.prepare(
+    `INSERT INTO settings (key, value, updated_at) VALUES ('last_monitor_run', ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+     WHERE CAST(settings.value AS INTEGER) <= ?`,
+  ).bind(String(now), String(threshold)).run();
+  if ((result.meta?.changes ?? 0) === 1) return true;
+  // 兜底：个别 D1 版本对 UPSERT 的 meta.changes 不可靠，回读校验值是否为本轮写入
+  const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'last_monitor_run'").first();
+  return String((row as Record<string, unknown> | null)?.value ?? '') === String(now);
 }
 
 // 轻量读取监控间隔（分钟）与上次监控时间，用于防抖判断——避免在「应跳过」的触发上

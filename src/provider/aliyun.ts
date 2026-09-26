@@ -34,15 +34,17 @@ export interface BillingBill {
 }
 
 // RFC 3986 百分号编码，等价原 percentEncode()
-function percentEncode(value: string): string {
+// 注意：encodeURIComponent 已把空格编为 %20、字面 + 编为 %2B，与阿里云 RPC 签名规范一致；
+// 不能再执行 %2B → %20 的替换（那是 Go 版对 url.QueryEscape「空格编为 +」的补救，
+// 照搬到 JS 会把参数里真正的 + 改成空格，导致 SignatureDoesNotMatch）。
+export function percentEncode(value: string): string {
   return encodeURIComponent(value)
     .replace(/%7E/gi, '~')
-    .replace(/%2A/gi, '*')
-    .replace(/%2B/gi, '%20');
+    .replace(/%2A/gi, '*');
 }
 
-// 阿里云 RPC 签名：HMAC-SHA1，等价原 sign()
-async function sign(params: Record<string, string>, secret: string): Promise<string> {
+// 阿里云 RPC 签名：HMAC-SHA1，等价原 sign()（导出供单测与 Node crypto 交叉验证）
+export async function sign(params: Record<string, string>, secret: string): Promise<string> {
   const keys = Object.keys(params)
     .filter((k) => k !== 'Signature')
     .sort();

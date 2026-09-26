@@ -28,7 +28,7 @@ CDT Monitor 的 Cloudflare Worker 移植版：阿里云 CDT 流量监控、ECS �
 | Telegram SOCKS5 | 支持 | 已放弃（无任意 TCP） |
 | Telegram 自定义反代 | 支持 | 支持（HTTPS） |
 | 管理员密码 | Argon2id | PBKDF2-SHA256 |
-| 定时调度 | 进程内 Ticker | 外部 HTTP 触发 `/__cron`（不用 CF Cron，避免免费额度超限） |
+| 定时调度 | 进程内 Ticker | 原生 Cron Trigger + 外部 HTTP 触发 `/__cron`（双链路，防抖去重） |
 | 存储 | SQLite | Cloudflare D1 |
 | 通知渠道 | 邮件/Telegram/Webhook | 增加 Server酱、PushPlus，邮件改 SMTP |
 
@@ -122,17 +122,19 @@ RAM → 权限策略 → 创建自定义策略（脚本编辑），粘贴以下 
 不启用账单功能时，可删去两条 `bss:` 权限进一步收窄。
 管理台「账号」页底部也提供同一份策略与一键复制。
 
-## 定时监控（外部 HTTP 触发）
+## 定时监控（原生 Cron 为主 + 外部触发为备份）
 
-本项目**不使用 Cloudflare 自带 Cron**（免费额度仅 5 个，易超限），改用外部定时服务每 N 分钟请求一次 `/__cron` 接口触发监控：
+主链路使用 **Cloudflare 原生 Cron Trigger**（`wrangler.toml` 的 `[triggers]`，默认每 5 分钟），`scheduled()` 直调内部监控函数，无需任何密钥。
+备份链路可用外部定时服务请求 `/__cron`（需携带 `CRON_SECRET`，见下），两条链路共用防抖 + 原子槽位抢占，不会重复执行。
 
 ```
-https://你的worker地址/__cron
+curl -H "X-Cron-Secret: 你的密钥" https://你的worker地址/__cron
 ```
 
-监控间隔在管理台「设置」里配置（默认 5 分钟），Worker 内部按此间隔防抖，外部频繁调用不会重复执行。
+- 监控间隔在管理台「设置」里配置（默认 5 分钟），Worker 内部按此间隔防抖，频繁调用不会重复执行
+- `/__cron` 受鉴权保护：`CRON_SECRET` 或管理员会话任一通过即可，未配置密钥时匿名请求返回 401
 
-> 外部定时服务配置教程（cron-job.org / GitHub Actions 等）见 [DEPLOY-CRON.md](./DEPLOY-CRON.md)。
+> 详细配置教程（原生 Cron / cron-job.org / GitHub Actions / 密钥设置）见 [DEPLOY-CRON.md](./DEPLOY-CRON.md)。
 
 ## 本地开发
 
