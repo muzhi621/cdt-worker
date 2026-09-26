@@ -382,7 +382,32 @@ async function logsHandler(ctx: Context): Promise<Response> {
   const category = url.searchParams.get('category') || 'all';
   const page = parseInt(url.searchParams.get('page') || '1', 10) || 1;
   const pageSize = parseInt(url.searchParams.get('pageSize') || '50', 10) || 50;
-  return json(await store.listLogs(ctx.env, category, page, pageSize));
+  const data = await store.listLogs(ctx.env, category, page, pageSize);
+  // D1 的 created_at 是 UTC（datetime('now')），按配置时区转换为本地时间字符串展示
+  let tz = 'Asia/Shanghai';
+  try {
+    const cfg = await store.getConfig(ctx.env);
+    tz = cfg.timezone || tz;
+  } catch { /* 读配置失败用默认时区 */ }
+  const logs = data.logs.map((l) => ({ ...l, created_at: toZoneString(l.created_at, tz) }));
+  return json({ ...data, logs, timezone: tz });
+}
+
+// 把 "YYYY-MM-DD HH:mm:ss"（UTC）转为指定时区的同格式字符串
+function toZoneString(utc: string, timezone: string): string {
+  if (!utc) return utc;
+  const ms = Date.parse(utc.replace(' ', 'T') + 'Z');
+  if (isNaN(ms)) return utc;
+  try {
+    const parts = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: timezone, hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).format(new Date(ms));
+    return parts; // sv-SE 恰好是 YYYY-MM-DD HH:mm:ss
+  } catch {
+    return utc;
+  }
 }
 
 async function clearLogsHandler(ctx: Context): Promise<Response> {
@@ -509,12 +534,17 @@ async function runMonitorCycle(env: Env): Promise<Response> {
   if (!(await store.shouldRunMonitor(env, config.monitorInterval))) {
     return json({ monitored: 0, skipped: true, next_in_seconds: config.monitorInterval * 60 });
   }
-  const results = [];
-  for (const account of config.accounts) {
-    try {
-      results.push(await engine.processAccount(env, account));
-    } catch (err) {
-      await store.addLog(env, 'error', `监控账号失败: ${err}`);
+  const started = Date.now();
+  // 账号并行处理（并发上限 5）：串行时 5 个账号需 18s+，易触发外部触发的 curl 超时
+  const results: Awaited<ReturnType<typeof engine.processAccount>>[] = [];
+  const CONCURRENCY = 5;
+  for (let i = 0; i < config.accounts.length; i += CONCURRENCY) {
+    const batch = config.accounts.slice(i, i + CONCURRENCY);
+    const settled = await Promise.allSettled(batch.map((a) => engine.processAccount(env, a, false, config)));
+    for (let j = 0; j < settled.length; j++) {
+      const s = settled[j];
+      if (s.status === 'fulfilled') results.push(s.value);
+      else await store.addLog(env, 'error', `监控账号失败 [${batch[j].remark || batch[j].accessKeyId}]: ${s.reason}`);
     }
   }
   await store.markMonitorRun(env);
@@ -529,8 +559,9 @@ async function runMonitorCycle(env: Env): Promise<Response> {
     await store.cleanupExpiredLogs(env, config.logRetentionDays);
   } catch { /* 清理失败不影响监控主流程 */ }
   // 记录本次监控周期到日志，让前台「日志页」能确认定时触发确实在运行
+  const elapsed = Date.now() - started;
   if (results.length > 0) {
-    await store.addLog(env, 'info', `监控周期完成，本次处理 ${results.length} 个账号`);
+    await store.addLog(env, 'info', `监控周期完成，本次处理 ${results.length} 个账号（耗时 ${elapsed} ms）`);
   } else {
     await store.addLog(env, 'info', '监控周期已触发，但尚未配置任何账号（请到「账号」页添加）');
   }

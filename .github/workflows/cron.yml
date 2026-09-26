@@ -1,5 +1,7 @@
 # CDT Monitor 外部定时触发（方式二 · GitHub Actions）
 # 每 5 分钟请求一次监控触发地址，Worker 内部按「监控间隔」防抖
+# 注意：GitHub 的 schedule 使用 UTC 时间且可能延迟数分钟（高峰期更明显），
+# Worker 侧已放宽定时开关机的命中窗口以容忍延迟。
 name: cdt-monitor-trigger
 
 on:
@@ -7,9 +9,33 @@ on:
     - cron: '*/5 * * * *'   # 每 5 分钟（GitHub 免费账户最小间隔）
   workflow_dispatch: {}      # 支持在 Actions 页面手动触发
 
+# 避免上一次还没跑完就叠加新任务（5 分钟粒度下偶发慢请求时有用）
+concurrency:
+  group: cdt-monitor-trigger
+  cancel-in-progress: false
+
 jobs:
   trigger:
     runs-on: ubuntu-latest
     steps:
       - name: Trigger monitor
-        run: curl -sS -m 30 "https://cdt.dddde.de/__cron"
+        run: |
+          echo "触发时间(UTC): $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "目标地址: https://cdt.dddde.de/__cron"
+          set +e
+          resp=$(curl -sS \
+            --retry 2 --retry-delay 5 --retry-connrefused \
+            -m 90 \
+            -w "\n---\nHTTP_CODE:%{http_code} TIME:%{time_total}s" \
+            "https://cdt.dddde.de/__cron" 2>&1)
+          status=$?
+          set -e
+          echo "$resp"
+          if [ $status -ne 0 ]; then
+            echo "::warning::curl 退出码 $status（网络抖动或超时），本次跳过；下次触发会自动重试"
+            exit 0
+          fi
+          code=$(printf '%s' "$resp" | sed -n 's/.*HTTP_CODE:\([0-9]\{3\}\).*/\1/p' | tail -1)
+          if [ "$code" != "200" ]; then
+            echo "::warning::触发地址返回 HTTP $code，请检查 Worker 是否正常"
+          fi

@@ -15,6 +15,9 @@ const StatusStopped = 'Stopped';
 const StatusRunning = 'Running';
 const StatusUnknown = 'Unknown';
 
+// 定时开关机命中窗口（2 小时）：容忍外部 cron 延迟，幂等键保证一天只执行一次
+const SCHEDULE_WINDOW_MS = 2 * 60 * 60 * 1000;
+
 function masked(accessKeyId: string): string {
   return accessKeyId.length <= 7 ? accessKeyId + '***' : accessKeyId.slice(0, 7) + '***';
 }
@@ -144,8 +147,14 @@ export interface MonitorResult {
 }
 
 // 处理单个账号的监控，等价 processAccount()
-export async function processAccount(env: Env, account: Account, force = false): Promise<MonitorResult> {
-  const config = await store.getConfig(env);
+// preloadedConfig：批量监控时复用已读取的配置，避免每个账号重复读 D1 + 解密
+export async function processAccount(
+  env: Env,
+  account: Account,
+  force = false,
+  preloadedConfig?: store.Config,
+): Promise<MonitorResult> {
+  const config = preloadedConfig ?? await store.getConfig(env);
   const actions: string[] = [];
   let statusChangedBySchedule = false;
   const now = new Date();
@@ -154,8 +163,10 @@ export async function processAccount(env: Env, account: Account, force = false):
   const localFields = zoneFields(now, config.timezone);
 
   // 定时开关机
+  // 命中窗口放宽到 2 小时：外部 cron（GitHub Actions 等）常有数分钟到数十分钟延迟，
+  // 窗口过窄会整天错过；action_events 幂等键（含日期）保证同一天只执行一次
   if (account.scheduleEnabled) {
-    if (dueWithin(local, account.startTime, 10 * 60 * 1000)) {
+    if (dueWithin(local, account.startTime, SCHEDULE_WINDOW_MS)) {
       const changed = await executeScheduledAction(env, config, account, 'start', now);
       if (changed) {
         actions.push('scheduled_start');
@@ -163,7 +174,7 @@ export async function processAccount(env: Env, account: Account, force = false):
         statusChangedBySchedule = true;
       }
     }
-    if (dueWithin(local, account.stopTime, 10 * 60 * 1000)) {
+    if (dueWithin(local, account.stopTime, SCHEDULE_WINDOW_MS)) {
       const changed = await executeScheduledAction(env, config, account, 'stop', now);
       if (changed) {
         actions.push('scheduled_stop');

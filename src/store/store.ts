@@ -81,6 +81,8 @@ export async function isInitialized(env: Env): Promise<boolean> {
 }
 
 // 监控防抖：距上次监控是否已超过配置间隔（分钟）
+// 加 45 秒容差：外部定时器间隔与配置间隔相同时，若因执行耗时导致刚好差几秒，
+// 会被误判为「过密」而跳过，实际退化成双倍间隔
 export async function shouldRunMonitor(env: Env, intervalMinutes: number): Promise<boolean> {
   const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?')
     .bind('last_monitor_run')
@@ -88,7 +90,7 @@ export async function shouldRunMonitor(env: Env, intervalMinutes: number): Promi
   if (!row) return true; // 首次运行
   const lastRun = parseInt(getString(row, 'value'), 10) || 0;
   const elapsed = Math.floor(Date.now() / 1000) - lastRun;
-  return elapsed >= intervalMinutes * 60;
+  return elapsed >= intervalMinutes * 60 - 45;
 }
 
 // 记录本次监控完成时间（Unix 秒）
