@@ -298,7 +298,7 @@ export async function processAccount(
     }
   }
 
-  // 账单：余额 + 本月实例消费，随监控周期刷新（缓存 10 分钟，近似实时）
+  // 账单：余额 + 本月消费，随监控周期刷新（缓存 10 分钟，近似实时）
   if (config.enableBilling) {
     const BILL_TTL_HOURS = 10 / 60; // 10 分钟
     const cycle = now.toISOString().slice(0, 7); // UTC 月份 YYYY-MM
@@ -308,12 +308,25 @@ export async function processAccount(
         const balance = await aliyun.getAccountBalance(account, account.accessKeySecret);
         await store.setBillingCache(env, account.id, 'balance', '', balance);
       }
-      if (account.instanceId) {
-        const billCache = await store.billingCache(env, account.id, 'instance_bill', cycle, BILL_TTL_HOURS);
-        if (!billCache.hit) {
-          const bill = await aliyun.getInstanceBill(account, account.accessKeySecret, cycle);
-          await store.setBillingCache(env, account.id, 'instance_bill', cycle, bill);
+    } catch (err) {
+      await store.addLog(env, 'error', `余额查询失败 [${masked(account.accessKeyId)}]: ${err}`);
+    }
+    try {
+      const billCache = await store.billingCache<{ totalCost: number }>(env, account.id, 'instance_bill', cycle, BILL_TTL_HOURS);
+      if (!billCache.hit) {
+        // 先按实例查；无数据时回退到账号级（当月账单延迟出账、或包年包月实例无账单时）
+        let bill = await aliyun.getInstanceBill(account, account.accessKeySecret, cycle);
+        let scope = '实例';
+        if ((!bill.totalCost || !bill.itemCount) && account.instanceId) {
+          const accountBill = await aliyun.getInstanceBill(account, account.accessKeySecret, cycle, '');
+          if (accountBill.totalCost > 0) {
+            bill = accountBill;
+            scope = '账号';
+          }
         }
+        await store.setBillingCache(env, account.id, 'instance_bill', cycle, bill);
+        await store.addLog(env, 'info',
+          `账单已刷新 [${masked(account.accessKeyId)}] ${cycle} ${scope}账单 ¥${bill.totalCost}（${bill.itemCount ?? 0} 条）`);
       }
     } catch (err) {
       await store.addLog(env, 'error', `账单查询失败 [${masked(account.accessKeyId)}]: ${err}`);

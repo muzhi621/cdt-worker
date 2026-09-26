@@ -817,12 +817,13 @@
                 <option value="KeepCharging">普通停机 KeepCharging（继续收费·稳妥）</option>
                 <option value="StopCharging">节省停机 StopCharging（省钱·有重启风险）</option>
               </select>
-              <p class="hint">账号级设置优先于「设置 → 监控参数」里的全局停机模式。</p>
+              <p class="hint">账号级设置优先于全局停机模式。</p>
             </div>
-            <div class="field full" data-page-node-id="AK-SCHED-BLOCK">
+            <div class="field" data-page-node-id="AK-SCHED-BLOCK">
+              <label>每日定时开关机</label>
               <label class="check" for="ak-schedule" data-page-node-id="AK-SCHED-CHK">
                 <input type="checkbox" id="ak-schedule" data-page-node-id="AK-SCHED-INPUT" />
-                每日定时开关机（按配置时区，开机/关机各触发一次）
+                按配置时区开关机
               </label>
             </div>
             <div class="field" id="ak-start-field" data-page-node-id="AK-START-BLOCK">
@@ -942,13 +943,13 @@
               <label for="set-timezone" data-page-node-id="rdpEp0ewX0MY3PeErBGwM0">时区</label>
               <input id="set-timezone" class="control" placeholder="Asia/Shanghai" data-page-node-id="TZshI4GeGhax0LNiGoyb3u" />
             </div>
-            <div class="field full" data-page-node-id="eSfFDKtqdWx07tPXZEWZoy">
+            <div class="field" data-page-node-id="eSfFDKtqdWx07tPXZEWZoy">
               <label class="check" for="set-keepalive" data-page-node-id="W9ypnl2QejOmm3hCMM73Gk">
                 <input type="checkbox" id="set-keepalive" data-page-node-id="w1jg7O5V7gzUWOdFaeroay" />
                 抢占式实例保活（低于保活水位时自动开机）
               </label>
             </div>
-            <div class="field full" data-page-node-id="w4gUbXBYWtxVkjHmhFKjjL">
+            <div class="field" data-page-node-id="w4gUbXBYWtxVkjHmhFKjjL">
               <label class="check" for="set-billing" data-page-node-id="GXmgSPhfKv7cBnfGdfTTXo">
                 <input type="checkbox" id="set-billing" data-page-node-id="EsDySSrCidO4jeaLRvnO2j" />
                 启用账单查询（BSS 接口，失败不影响监控主流程）
@@ -1295,20 +1296,21 @@
             <label for="ed-instance">实例 ID</label>
             <input id="ed-instance" class="control" placeholder="i-2ze..." autocomplete="off" spellcheck="false" />
           </div>
-          <div class="field full">
-            <label for="ed-shutdown">停机模式（优先于系统全局设置）</label>
-            <select id="ed-shutdown" class="control">
-              <option value="">跟随系统设置</option>
-              <option value="KeepCharging">普通停机 KeepCharging（继续收费·稳妥）</option>
-              <option value="StopCharging">节省停机 StopCharging（省钱·有重启风险）</option>
-            </select>
-          </div>
-          <div class="field full">
-            <label class="check" for="ed-schedule">
-              <input type="checkbox" id="ed-schedule" />
-              每日定时开关机（按配置时区）
-            </label>
-          </div>
+            <div class="field">
+              <label for="ed-shutdown">停机模式（优先全局）</label>
+              <select id="ed-shutdown" class="control">
+                <option value="">跟随系统设置</option>
+                <option value="KeepCharging">普通停机 KeepCharging（继续收费·稳妥）</option>
+                <option value="StopCharging">节省停机 StopCharging（省钱·有重启风险）</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>每日定时开关机</label>
+              <label class="check" for="ed-schedule">
+                <input type="checkbox" id="ed-schedule" />
+                按配置时区开关机
+              </label>
+            </div>
             <div class="field" id="ed-start-field">
               <label for="ed-start">定时开机时间</label>
               <input id="ed-start" class="control" type="time" value="08:00" />

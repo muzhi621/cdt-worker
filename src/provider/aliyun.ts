@@ -30,6 +30,7 @@ export interface BillingBalance {
 
 export interface BillingBill {
   totalCost: number;
+  itemCount?: number; // 账单条目数，便于排查「查不到金额」的原因
 }
 
 // RFC 3986 百分号编码，等价原 percentEncode()
@@ -292,24 +293,44 @@ export async function getInstanceBill(
   account: Account,
   secret: string,
   cycle: string,
+  instanceId?: string,
 ): Promise<BillingBill> {
   const bss = bssEndpoint(account.siteType);
-  const result = await callAliyun(
-    account.accessKeyId,
-    secret,
-    bss.region,
-    bss.host,
-    '2017-12-14',
-    'DescribeInstanceBill',
-    { BillingCycle: cycle, InstanceID: account.instanceId, Granularity: 'MONTHLY' },
-  );
-  const data = result.Data as Record<string, unknown> | undefined;
-  let items = asSlice(data?.Items);
-  if (items.length === 0) items = asSlice((data?.Items as Record<string, unknown>)?.Item);
+  const targetInstance = instanceId !== undefined ? instanceId : account.instanceId;
   let total = 0;
-  for (const item of items) {
-    const obj = item as Record<string, unknown>;
-    total += number(obj.PretaxAmount);
+  let itemCount = 0;
+  let nextToken = '';
+  // 分页拉取（MaxResults 最大 300，最多 3 页防止异常循环）
+  for (let page = 0; page < 3; page++) {
+    const extras: Record<string, string> = {
+      BillingCycle: cycle,
+      Granularity: 'MONTHLY',
+      MaxResults: '300',
+    };
+    // InstanceID 为空时不能传空字符串（会被判为非法参数）
+    if (targetInstance) extras.InstanceID = targetInstance;
+    if (nextToken) extras.NextToken = nextToken;
+
+    const result = await callAliyun(
+      account.accessKeyId,
+      secret,
+      bss.region,
+      bss.host,
+      '2017-12-14',
+      'DescribeInstanceBill',
+      extras,
+    );
+    const data = result.Data as Record<string, unknown> | undefined;
+    let items = asSlice(data?.Items);
+    if (items.length === 0) items = asSlice((data?.Items as Record<string, unknown>)?.Item);
+    for (const item of items) {
+      const obj = item as Record<string, unknown>;
+      total += number(obj.PretaxAmount);
+      itemCount++;
+    }
+    const next = data?.NextToken ? String(data.NextToken) : '';
+    if (!next || items.length === 0) break;
+    nextToken = next;
   }
-  return { totalCost: Math.round(total * 100) / 100 };
+  return { totalCost: Math.round(total * 100) / 100, itemCount };
 }
