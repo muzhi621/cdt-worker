@@ -298,16 +298,25 @@ export async function processAccount(
     }
   }
 
-  // 账单
+  // 账单：余额 + 本月实例消费，随监控周期刷新（缓存 10 分钟，近似实时）
   if (config.enableBilling) {
-    const balanceCache = await store.billingCache(env, account.id, 'balance', '', 6);
-    if (force || localFields.hour % 6 === 0 || !balanceCache.hit) {
-      try {
+    const BILL_TTL_HOURS = 10 / 60; // 10 分钟
+    const cycle = now.toISOString().slice(0, 7); // UTC 月份 YYYY-MM
+    try {
+      const balanceCache = await store.billingCache(env, account.id, 'balance', '', BILL_TTL_HOURS);
+      if (!balanceCache.hit) {
         const balance = await aliyun.getAccountBalance(account, account.accessKeySecret);
         await store.setBillingCache(env, account.id, 'balance', '', balance);
-      } catch (err) {
-        await store.addLog(env, 'error', `账单查询失败 [${masked(account.accessKeyId)}]: ${err}`);
       }
+      if (account.instanceId) {
+        const billCache = await store.billingCache(env, account.id, 'instance_bill', cycle, BILL_TTL_HOURS);
+        if (!billCache.hit) {
+          const bill = await aliyun.getInstanceBill(account, account.accessKeySecret, cycle);
+          await store.setBillingCache(env, account.id, 'instance_bill', cycle, bill);
+        }
+      }
+    } catch (err) {
+      await store.addLog(env, 'error', `账单查询失败 [${masked(account.accessKeyId)}]: ${err}`);
     }
   }
 

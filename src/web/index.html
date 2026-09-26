@@ -822,14 +822,14 @@
             <div class="field full" data-page-node-id="AK-SCHED-BLOCK">
               <label class="check" for="ak-schedule" data-page-node-id="AK-SCHED-CHK">
                 <input type="checkbox" id="ak-schedule" data-page-node-id="AK-SCHED-INPUT" />
-                启用定时开关机（按配置时区，开机/关机各触发一次）
+                每日定时开关机（按配置时区，开机/关机各触发一次）
               </label>
             </div>
-            <div class="field" data-page-node-id="AK-START-BLOCK">
+            <div class="field" id="ak-start-field" data-page-node-id="AK-START-BLOCK">
               <label for="ak-start" data-page-node-id="AK-START-LBL">定时开机时间</label>
               <input id="ak-start" class="control" type="time" value="08:00" data-page-node-id="AK-START-INPUT" />
             </div>
-            <div class="field" data-page-node-id="AK-STOP-BLOCK">
+            <div class="field" id="ak-stop-field" data-page-node-id="AK-STOP-BLOCK">
               <label for="ak-stop" data-page-node-id="AK-STOP-LBL">定时关机时间</label>
               <input id="ak-stop" class="control" type="time" value="23:00" data-page-node-id="AK-STOP-INPUT" />
             </div>
@@ -864,78 +864,7 @@
         </div>
       </div>
 
-      <!-- 账号配置编辑弹窗 -->
-      <dialog id="edit-dialog">
-        <form id="edit-form" novalidate autocomplete="off" method="dialog">
-          <h3 style="margin:0 0 4px;font-size:17px">编辑账号配置</h3>
-          <p class="hint" style="margin:0 0 14px">AccessKey 留空表示保持不变；修改仅影响本地配置，不会触碰云上实例</p>
-          <div class="form-grid">
-            <div class="field">
-              <label for="ed-remark">备注</label>
-              <input id="ed-remark" class="control" placeholder="例如：香港生产机" autocomplete="off" />
-            </div>
-            <div class="field">
-              <label for="ed-max">流量上限（GB）</label>
-              <input id="ed-max" class="control" type="number" min="1" step="1" inputmode="numeric" />
-            </div>
-            <div class="field">
-              <label for="ed-region">地域 ID</label>
-              <input id="ed-region" class="control" list="region-list" autocomplete="off" spellcheck="false" />
-            </div>
-            <div class="field">
-              <label for="ed-site">站点类型</label>
-              <select id="ed-site" class="control">
-                <option value="china">中国站</option>
-                <option value="international">国际站</option>
-              </select>
-            </div>
-            <div class="field full">
-              <label for="ed-instance">实例 ID</label>
-              <input id="ed-instance" class="control" placeholder="i-2ze..." autocomplete="off" spellcheck="false" />
-            </div>
-            <div class="field full">
-              <label for="ed-shutdown">停机模式（优先于系统全局设置）</label>
-              <select id="ed-shutdown" class="control">
-                <option value="">跟随系统设置</option>
-                <option value="KeepCharging">普通停机 KeepCharging（继续收费·稳妥）</option>
-                <option value="StopCharging">节省停机 StopCharging（省钱·有重启风险）</option>
-              </select>
-            </div>
-            <div class="field full">
-              <label class="check" for="ed-schedule">
-                <input type="checkbox" id="ed-schedule" />
-                启用定时开关机（按配置时区）
-              </label>
-            </div>
-            <div class="field">
-              <label for="ed-start">定时开机时间</label>
-              <input id="ed-start" class="control" type="time" value="08:00" />
-            </div>
-            <div class="field">
-              <label for="ed-stop">定时关机时间</label>
-              <input id="ed-stop" class="control" type="time" value="23:00" />
-            </div>
-            <div class="field full">
-              <label for="ed-akid">AccessKey ID（留空保持不变）</label>
-              <input id="ed-akid" class="control" placeholder="LTAI5t..." autocomplete="off" spellcheck="false" />
-            </div>
-            <div class="field full">
-              <label for="ed-aksecret">AccessKey Secret（留空保持不变）</label>
-              <div class="input-wrap">
-                <input id="ed-aksecret" class="control" type="password" autocomplete="new-password" placeholder="加密存储" />
-                <button type="button" class="toggle-eye" data-eye="ed-aksecret" aria-label="显示密码" aria-pressed="false">
-                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
-                </button>
-              </div>
-            </div>
-          </div>
-          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
-            <button class="btn btn-ghost" type="button" id="edit-cancel" style="width:auto">取消</button>
-            <button class="btn btn-primary" type="button" id="edit-save" style="width:auto">保存修改</button>
-          </div>
-        </form>
-      </dialog>
-
+      
       <div class="card" data-page-node-id="RAM-POLICY-CARD">
         <div class="card-head" data-page-node-id="RAM-POLICY-HEAD">
           <div data-page-node-id="RAM-POLICY-TITLE">
@@ -1336,6 +1265,78 @@
       </div>
     </section>
   </div>
+
+<!-- 账号配置编辑弹窗 -->
+    <dialog id="edit-dialog">
+      <form id="edit-form" novalidate autocomplete="off" method="dialog">
+        <h3 style="margin:0 0 4px;font-size:17px">编辑账号配置</h3>
+        <p class="hint" style="margin:0 0 14px">AccessKey 留空表示保持不变；修改仅影响本地配置，不会触碰云上实例</p>
+        <div class="form-grid">
+          <div class="field">
+            <label for="ed-remark">备注</label>
+            <input id="ed-remark" class="control" placeholder="例如：香港生产机" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="ed-max">流量上限（GB）</label>
+            <input id="ed-max" class="control" type="number" min="1" step="1" inputmode="numeric" />
+          </div>
+          <div class="field">
+            <label for="ed-region">地域 ID</label>
+            <input id="ed-region" class="control" list="region-list" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="ed-site">站点类型</label>
+            <select id="ed-site" class="control">
+              <option value="china">中国站</option>
+              <option value="international">国际站</option>
+            </select>
+          </div>
+          <div class="field full">
+            <label for="ed-instance">实例 ID</label>
+            <input id="ed-instance" class="control" placeholder="i-2ze..." autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field full">
+            <label for="ed-shutdown">停机模式（优先于系统全局设置）</label>
+            <select id="ed-shutdown" class="control">
+              <option value="">跟随系统设置</option>
+              <option value="KeepCharging">普通停机 KeepCharging（继续收费·稳妥）</option>
+              <option value="StopCharging">节省停机 StopCharging（省钱·有重启风险）</option>
+            </select>
+          </div>
+          <div class="field full">
+            <label class="check" for="ed-schedule">
+              <input type="checkbox" id="ed-schedule" />
+              每日定时开关机（按配置时区）
+            </label>
+          </div>
+            <div class="field" id="ed-start-field">
+              <label for="ed-start">定时开机时间</label>
+              <input id="ed-start" class="control" type="time" value="08:00" />
+            </div>
+            <div class="field" id="ed-stop-field">
+              <label for="ed-stop">定时关机时间</label>
+              <input id="ed-stop" class="control" type="time" value="23:00" />
+            </div>
+          <div class="field full">
+            <label for="ed-akid">AccessKey ID（留空保持不变）</label>
+            <input id="ed-akid" class="control" placeholder="LTAI5t..." autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field full">
+            <label for="ed-aksecret">AccessKey Secret（留空保持不变）</label>
+            <div class="input-wrap">
+              <input id="ed-aksecret" class="control" type="password" autocomplete="new-password" placeholder="加密存储" />
+              <button type="button" class="toggle-eye" data-eye="ed-aksecret" aria-label="显示密码" aria-pressed="false">
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+          <button class="btn btn-ghost" type="button" id="edit-cancel" style="width:auto">取消</button>
+          <button class="btn btn-primary" type="button" id="edit-save" style="width:auto">保存修改</button>
+        </div>
+      </form>
+    </dialog>
 
   <div class="toast-host" id="toast-host" aria-live="polite" aria-atomic="false" data-page-node-id="2F9tNCYGkZotOpfpMVyXL4"></div>
 
@@ -1839,8 +1840,25 @@
       }
       paintRegionList("china"); // 初始为中国站
       $("ak-site").addEventListener("change", function () { paintRegionList(this.value); });
+
+      // 每日定时开关：仅当开关打开时才显示开机/关机时间（默认隐藏）
+      function syncScheduleFields() {
+        const on = $("ak-schedule").checked;
+        $("ak-start-field").style.display = on ? "" : "none";
+        $("ak-stop-field").style.display = on ? "" : "none";
+      }
+      function syncEditScheduleFields() {
+        const on = $("ed-schedule").checked;
+        $("ed-start-field").style.display = on ? "" : "none";
+        $("ed-stop-field").style.display = on ? "" : "none";
+      }
+      $("ak-schedule").addEventListener("change", syncScheduleFields);
+      $("ed-schedule").addEventListener("change", syncEditScheduleFields);
+      syncScheduleFields();
+      syncEditScheduleFields();
+
       $("account-form").addEventListener("reset", function () {
-        setTimeout(() => paintRegionList($("ak-site").value), 0);
+        setTimeout(() => { paintRegionList($("ak-site").value); syncScheduleFields(); }, 0);
       });
 
       $("account-form").addEventListener("submit", async function (e) {
@@ -1930,6 +1948,7 @@
         $("ed-schedule").checked = !!a.scheduleEnabled;
         $("ed-start").value = a.startTime || "08:00";
         $("ed-stop").value = a.stopTime || "23:00";
+        syncEditScheduleFields();
         $("ed-akid").value = a.accessKeyId || "";
         $("ed-aksecret").value = "";
         $("edit-dialog").dataset.id = String(a.id);
