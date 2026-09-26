@@ -134,6 +134,47 @@ curl -H "X-Cron-Secret: 你的密钥" https://你的worker地址/__cron
 - 监控间隔在管理台「设置」里配置（默认 5 分钟），Worker 内部按此间隔防抖，频繁调用不会重复执行
 - `/__cron` 受鉴权保护：`CRON_SECRET` 或管理员会话任一通过即可，未配置密钥时匿名请求返回 401
 
+### CRON_SECRET 配置方案
+
+`CRON_SECRET` 是保护 `/__cron` 备份触发链路的共享密钥。**推荐配置**：主链路走原生 Cron（无需密钥），`CRON_SECRET` 供外部定时服务（cron-job.org / GitHub Actions 等）调用 `/__cron` 时使用；不使用外部触发可不配置，`/__cron` 匿名请求会返回 401。
+
+**第 1 步 · 生成密钥**（任选一种，256 位随机值）：
+
+```bash
+# OpenSSL（Git Bash / Linux / macOS）
+openssl rand -hex 32
+
+# Node.js
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+**第 2 步 · 配置到 Worker**（本地 wrangler 方式，或 Dashboard 手动添加）：
+
+```bash
+npx wrangler secret put CRON_SECRET
+# 提示后粘贴上面生成的密钥
+```
+
+Dashboard 方式：Workers → 你的 Worker → Settings → Variables and Secrets → Add，类型选 **Secret**，变量名 `CRON_SECRET`。
+
+**第 3 步 ·（可选）配置到 GitHub Actions**：仓库 → Settings → Secrets and variables → Actions → New repository secret，名称 `CRON_SECRET`，值与第 2 步相同。`.github/workflows/cron.yml` 会自动读取并经 `X-Cron-Secret` 头发送。
+
+**第 4 步 · 外部触发时携带密钥**（两种方式任选）：
+
+```bash
+# 请求头（推荐）
+curl -H "X-Cron-Secret: 你的密钥" https://你的worker地址/__cron
+
+# URL 参数
+curl "https://你的worker地址/__cron?key=你的密钥"
+```
+
+**注意事项**：
+
+- 密钥是凭据，**不要提交到仓库**、不要写进 `.dev.vars` 后 push；泄露后重新生成并同步更新两处配置即可（旧密钥立即失效）。
+- Worker 侧与触发侧必须使用**同一个值**，不一致时 `/__cron` 返回 401。
+- 本地开发（`wrangler dev`）可在 `.dev.vars` 中配置 `CRON_SECRET=xxx` 供调试，该文件已被 `.gitignore` 排除。
+
 > 详细配置教程（原生 Cron / cron-job.org / GitHub Actions / 密钥设置）见 [DEPLOY-CRON.md](./DEPLOY-CRON.md)。
 
 ## 本地开发
