@@ -66,6 +66,13 @@ function zoneFields(date: Date, timezone: string): { year: number; month: number
   }
 }
 
+// 以配置时区的年月作为账单账期（YYYY-MM），与日志/通知/定时一致。
+// 不能用 UTC 月份（toISOString().slice(0,7)），否则每月月初/月末 8 小时账单月份错位。
+function localCycle(now: Date, timezone: string): string {
+  const f = zoneFields(now, timezone);
+  return `${f.year}-${String(f.month).padStart(2, '0')}`;
+}
+
 function usagePercent(traffic: number, maxTraffic: number): number {
   if (maxTraffic <= 0) return 0;
   return Math.round((traffic / maxTraffic) * 10000) / 100;
@@ -81,8 +88,16 @@ function dueWithin(now: Date, hhmm: string, windowMs: number): boolean {
   if (isNaN(h) || isNaN(m)) return false;
   const target = new Date(now);
   target.setHours(h, m, 0, 0);
-  const delta = now.getTime() - target.getTime();
-  return delta >= 0 && delta <= windowMs;
+  let delta = now.getTime() - target.getTime();
+  // 跨午夜窗口：若 target 在今天（墙钟），而 now 已过午夜（delta < 0），
+  // 则可能是「昨天同一时刻」的窗口仍在延续（如 stopTime=23:00 窗口覆盖到次日 01:00）。
+  // 此时把 target 回拨 24h 再判断，使 2 小时窗口能正确跨越午夜。
+  if (delta < 0) {
+    delta += 24 * 3600 * 1000;
+    if (delta <= windowMs) return true;
+    return false;
+  }
+  return delta <= windowMs;
 }
 
 function inTimeRange(current: string, start: string, end: string): boolean {
@@ -236,7 +251,7 @@ export async function processAccount(
     try {
       const bal = await store.billingCache<{ amount: number; currency: string }>(env, account.id, 'balance', '', 6);
       if (bal.hit && bal.value) balanceText = `${bal.value.amount} ${bal.value.currency || ''}`.trim();
-      const bill = await store.billingCache<{ totalCost: number }>(env, account.id, 'instance_bill', now.toISOString().slice(0, 7), 6);
+      const bill = await store.billingCache<{ totalCost: number }>(env, account.id, 'instance_bill', localCycle(now, config.timezone), 6);
       if (bill.hit && bill.value) costText = `${bill.value.totalCost}`;
     } catch { /* 账单读取失败不影响通知 */ }
   }
@@ -301,7 +316,7 @@ export async function processAccount(
   // 账单：余额 + 本月消费，随监控周期刷新（缓存 10 分钟，近似实时）
   if (config.enableBilling) {
     const BILL_TTL_HOURS = 10 / 60; // 10 分钟
-    const cycle = now.toISOString().slice(0, 7); // UTC 月份 YYYY-MM
+    const cycle = localCycle(now, config.timezone); // 配置时区月份 YYYY-MM
     try {
       const balanceCache = await store.billingCache(env, account.id, 'balance', '', BILL_TTL_HOURS);
       if (!balanceCache.hit) {
@@ -346,11 +361,29 @@ async function executeScheduledAction(
   action: 'start' | 'stop',
   now: Date,
 ): Promise<boolean> {
-  // key 对齐原项目 scheduleActionKey：schedule:{id}:{YYYYMMDD}:{action}:{HH:mm}
+  // key 对齐原项目 scheduleActionKey：schedule:{id}:{YYYYMMDD}:{action}:{配置时间}
+  // 注意：时间维度必须用「配置的固定时间」而非「当前墙钟分钟」——
+  // 否则 2 小时命中窗口内每分钟 key 都不同，去重失效，导致重复调用启停 API。
+  const configuredTime = action === 'start' ? (account.startTime || '08:00') : (account.stopTime || '23:00');
   const f = zoneFields(now, config.timezone);
-  const dateStr = `${f.year}${String(f.month).padStart(2, '0')}${String(f.day).padStart(2, '0')}`;
-  const timeStr = `${String(f.hour).padStart(2, '0')}:${String(f.minute).padStart(2, '0')}`;
-  const key = `schedule:${account.id}:${dateStr}:${action}:${timeStr}`;
+  let dateStr = `${f.year}${String(f.month).padStart(2, '0')}${String(f.day).padStart(2, '0')}`;
+  // 跨午夜窗口归属：若 now 的墙钟早于配置时间（即命中的是「昨天」该时刻的窗口，
+  // 如 stopTime=23:00 窗口延续到次日 00:30），则 key 的日期应回退到昨天，
+  // 避免同一次逻辑关机因跨天被拆成两天、重复执行。
+  {
+    const [h, m] = configuredTime.split(':').map(Number);
+    if (!isNaN(h) && !isNaN(m)) {
+      const targetMin = h * 60 + m;
+      const nowMin = f.hour * 60 + f.minute;
+      if (nowMin < targetMin) {
+        // 现在是次日凌晨，属于昨天配置时间的窗口 → 日期减一天
+        const d = new Date(Date.UTC(f.year, f.month - 1, f.day));
+        d.setUTCDate(d.getUTCDate() - 1);
+        dateStr = `${d.getUTCFullYear()}${String(d.getUTCMonth() + 1).padStart(2, '0')}${String(d.getUTCDate()).padStart(2, '0')}`;
+      }
+    }
+  }
+  const key = `schedule:${account.id}:${dateStr}:${action}:${configuredTime}`;
   const fresh = await store.recordActionEvent(env, key, account.id, 'schedule_' + action, 'attempting', '');
   if (!fresh) return false;
   try {
@@ -399,7 +432,7 @@ export async function control(
 // 汇总状态，等价 Summary()
 export async function summary(env: Env) {
   const config = await store.getConfig(env);
-  const cycle = new Date().toISOString().slice(0, 7); // UTC 月份，与账单缓存键一致
+  const cycle = localCycle(new Date(), config.timezone); // 配置时区月份，与账单缓存键一致
   const result = [];
   for (const account of config.accounts) {
     const percentage = usagePercent(account.trafficUsed, account.maxTraffic);
@@ -469,7 +502,7 @@ export async function flushOutbox(env: Env, config: store.Config): Promise<void>
     const detail = failures.map((f) => `${f.channel}: ${f.error}`).join('; ');
     const outcome = await store.markOutboxRetry(env, row.id, detail, 300, 24 * 3600);
     if (outcome === 'failed') {
-      await store.addLog(env, 'error', `通知发送失败已放弃(#{${row.id}}): ${detail}`);
+      await store.addLog(env, 'error', `通知发送失败已放弃(#${row.id}): ${detail}`);
     } else {
       await store.addLog(env, 'warning', `通知部分通道发送失败，5 分钟后重试: ${detail}`);
     }

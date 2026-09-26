@@ -23,9 +23,13 @@ function error(code: string, message: string, status: number): Response {
 }
 
 function clientIP(request: Request): string {
+  // 优先用 Cloudflare 注入的 CF-Connecting-IP（不可伪造），X-Forwarded-For 仅作本地 dev 兜底。
+  // 此前优先 XFF 可被客户端伪造，影响登录限流 key 与审计日志里的 IP。
+  const cf = request.headers.get('CF-Connecting-IP');
+  if (cf) return cf.trim();
   const xff = request.headers.get('X-Forwarded-For');
   if (xff) return xff.split(',')[0].trim();
-  return request.headers.get('CF-Connecting-IP') || 'unknown';
+  return 'unknown';
 }
 
 // 简单内存限流（单 Isolate 内有效）
@@ -216,10 +220,11 @@ async function logout(ctx: Context): Promise<Response> {
     const hash = await tokenHash(match[1]);
     await ctx.env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(hash).run();
   }
-  return new Response(JSON.stringify({ success: true }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json', 'Set-Cookie': clearAuthCookies() },
-  });
+  const headers = new Headers({ 'Content-Type': 'application/json' });
+  // 必须 append 两次，不能逗号拼接成一个 Set-Cookie 头（否则浏览器只清掉第一个 cookie）
+  headers.append('Set-Cookie', 'cdt_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict');
+  headers.append('Set-Cookie', 'cdt_csrf=; Path=/; Max-Age=0; SameSite=Strict');
+  return new Response(JSON.stringify({ success: true }), { status: 200, headers });
 }
 
 async function createSession(env: Env, request: Request): Promise<{ token: string; csrf: string }> {
@@ -238,10 +243,6 @@ function setAuthCookies(response: Response, token: string, csrf: string, request
   headers.append('Set-Cookie', `cdt_session=${token}; Path=/; HttpOnly; ${secure ? 'Secure; ' : ''}SameSite=Strict; Max-Age=86400`);
   headers.append('Set-Cookie', `cdt_csrf=${csrf}; Path=/; ${secure ? 'Secure; ' : ''}SameSite=Strict; Max-Age=86400`);
   return new Response(response.body, { status: response.status, headers });
-}
-
-function clearAuthCookies(): string {
-  return 'cdt_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict, cdt_csrf=; Path=/; Max-Age=0; SameSite=Strict';
 }
 
 async function statusHandler(ctx: Context): Promise<Response> {
@@ -493,8 +494,16 @@ function matchRoute(method: string, pathname: string): { route: (typeof routes)[
     for (let i = 0; i < patternParts.length; i++) {
       const p = patternParts[i];
       const q = pathParts[i];
-      if (p.startsWith(':')) params[p.slice(1)] = decodeURIComponent(q);
-      else if (p !== q) { match = false; break; }
+      if (p.startsWith(':')) {
+        // 畸形百分号编码（如 %ZZ）会让 decodeURIComponent 抛 URIError，这里容错为不匹配，
+        // 避免单请求导致 Worker 500（此前该异常在 try/catch 之外直接冒泡）
+        try {
+          params[p.slice(1)] = decodeURIComponent(q);
+        } catch {
+          match = false;
+          break;
+        }
+      } else if (p !== q) { match = false; break; }
     }
     if (match) return { route, params };
   }
@@ -506,7 +515,19 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
   const pathname = url.pathname;
 
   // Cron 触发器（监控循环）
+  // 加共享密钥校验：/__cron 是公开 URL，任何人可访问，若不校验会被人恶意高频触发，
+  // 放大阿里云 API 调用与 D1 写入。密钥通过环境变量 CRON_SECRET 配置（未配置则放行，
+  // 保持向后兼容；建议生产配置）。
   if (request.headers.get('X-Cron-Trigger') === 'true' || url.pathname === '/__cron') {
+    const expected = (env as unknown as { CRON_SECRET?: string }).CRON_SECRET;
+    if (expected) {
+      const provided = request.headers.get('X-Cron-Secret')
+        || url.searchParams.get('key')
+        || '';
+      if (!provided || !(await constantTimeEqual(expected, provided))) {
+        return error('unauthorized', 'cron 触发密钥无效', 401);
+      }
+    }
     return runMonitorCycle(env);
   }
 
@@ -539,11 +560,14 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
 }
 
 async function runMonitorCycle(env: Env): Promise<Response> {
-  const config = await store.getConfig(env);
-  // 防抖：距上次监控不足配置间隔则跳过（避免外部 cron 频繁触发重复执行）
-  if (!(await store.shouldRunMonitor(env, config.monitorInterval))) {
-    return json({ monitored: 0, skipped: true, next_in_seconds: config.monitorInterval * 60 });
+  // 防抖前置：先做轻量判断（单条 settings 查询），命中跳过则直接返回，
+  // 不再全量 getConfig（读全量 settings + 解密所有账号 AK/SK），省 CPU 与 D1 读。
+  const state = await store.getMonitorState(env);
+  const sinceLastRun = state.lastRun > 0 ? Math.floor(Date.now() / 1000) - state.lastRun : Infinity;
+  if (state.lastRun > 0 && sinceLastRun < state.intervalMinutes * 60 - 45) {
+    return json({ monitored: 0, skipped: true, next_in_seconds: Math.max(0, state.intervalMinutes * 60 - 45 - sinceLastRun) });
   }
+  const config = await store.getConfig(env);
   const started = Date.now();
   // 账号并行处理（并发上限 5）：串行时 5 个账号需 18s+，易触发外部触发的 curl 超时
   const results: Awaited<ReturnType<typeof engine.processAccount>>[] = [];
@@ -564,9 +588,11 @@ async function runMonitorCycle(env: Env): Promise<Response> {
   } catch (err) {
     await store.addLog(env, 'error', `通知队列处理异常: ${err}`);
   }
-  // 顺带清理超期日志（幂等、低成本，避免日志无限增长）
+  // 顺带清理超期数据（日志 + traffic_stats/action_events/login_attempts/sessions，
+  // 幂等、低成本，避免数据无限增长逼近 D1 存储上限）
   try {
     await store.cleanupExpiredLogs(env, config.logRetentionDays);
+    await store.cleanupExpiredData(env, config.logRetentionDays);
   } catch { /* 清理失败不影响监控主流程 */ }
   // 记录本次监控周期到日志，让前台「日志页」能确认定时触发确实在运行
   const elapsed = Date.now() - started;

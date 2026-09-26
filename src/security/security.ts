@@ -155,4 +155,7 @@ export interface Env {
   // 可选：Cloudflare 控制台配置的恢复密码（明文变量或 Secret 均可）
   // 忘记管理员密码时用它登录，登录成功后会自动写回 D1 密码哈希
   ADMIN_PASSWORD?: string;
+  // 可选：/__cron 触发监控的共享密钥（防滥用）。外部定时服务在请求时带上
+  // X-Cron-Secret 头或 ?key= 参数；未配置则放行（保持向后兼容）
+  CRON_SECRET?: string;
 }

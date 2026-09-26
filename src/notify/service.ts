@@ -197,6 +197,8 @@ function escapeHtml(s: string): string {
 function replacements(event: NotificationEvent, text: string): Record<string, string> {
   const traffic = (event.fields['当前流量'] ?? '').replace(/GB$/, '').trim();
   const threshold = (event.fields['设定阈值'] ?? '').replace(/%$/, '').trim();
+  // 流量上限：从「流量上限」字段取（去 GB），与阈值分开——此前误把阈值当上限
+  const maxTraffic = (event.fields['流量上限'] ?? '').replace(/GB$/, '').trim();
   const createdAt = new Date(event.createdAt).toISOString();
   return {
     '#TITLE#': event.title,
@@ -205,7 +207,7 @@ function replacements(event: NotificationEvent, text: string): Record<string, st
     '#ACCOUNT_ID#': String(event.accountId),
     '#TRAFFIC#': traffic,
     '#TRAFFIC_GB#': traffic,
-    '#MAX_TRAFFIC#': threshold,
+    '#MAX_TRAFFIC#': maxTraffic,
     '#THRESHOLD_PERCENT#': threshold,
     '#INSTANCE#': event.fields['实例'] ?? '',
     '#STATUS#': event.fields['实例状态'] ?? '',

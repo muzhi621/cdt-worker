@@ -80,25 +80,29 @@ export async function isInitialized(env: Env): Promise<boolean> {
   return (await getPasswordHash(env)) !== '';
 }
 
-// 监控防抖：距上次监控是否已超过配置间隔（分钟）
-// 加 45 秒容差：外部定时器间隔与配置间隔相同时，若因执行耗时导致刚好差几秒，
-// 会被误判为「过密」而跳过，实际退化成双倍间隔
-export async function shouldRunMonitor(env: Env, intervalMinutes: number): Promise<boolean> {
-  const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?')
-    .bind('last_monitor_run')
-    .first();
-  if (!row) return true; // 首次运行
-  const lastRun = parseInt(getString(row, 'value'), 10) || 0;
-  const elapsed = Math.floor(Date.now() / 1000) - lastRun;
-  return elapsed >= intervalMinutes * 60 - 45;
-}
-
 // 记录本次监控完成时间（Unix 秒）
 export async function markMonitorRun(env: Env): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   await env.DB.prepare('INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,datetime(\'now\'))')
     .bind('last_monitor_run', String(now))
     .run();
+}
+
+// 轻量读取监控间隔（分钟）与上次监控时间，用于防抖判断——避免在「应跳过」的触发上
+// 还全量 getConfig（读全部 settings + 解密所有账号 AK/SK，浪费 CPU 与 D1 读）。
+export async function getMonitorState(env: Env): Promise<{ intervalMinutes: number; lastRun: number }> {
+  const rows = await env.DB.prepare(
+    "SELECT key, value FROM settings WHERE key IN ('monitor_interval', 'last_monitor_run')",
+  ).all();
+  let intervalMinutes = DEFAULT_CONFIG.monitorInterval;
+  let lastRun = 0;
+  for (const r of rows.results ?? []) {
+    const k = String((r as Record<string, unknown>).key);
+    const v = String((r as Record<string, unknown>).value ?? '');
+    if (k === 'monitor_interval') intervalMinutes = parseInt(v, 10) || DEFAULT_CONFIG.monitorInterval;
+    else if (k === 'last_monitor_run') lastRun = parseInt(v, 10) || 0;
+  }
+  return { intervalMinutes, lastRun };
 }
 
 export async function getConfig(env: Env): Promise<Config> {
@@ -109,16 +113,27 @@ export async function getConfig(env: Env): Promise<Config> {
   }
   const cfg: Config = structuredClone(DEFAULT_CONFIG);
   cfg.adminPasswordHash = map.get('admin_password_hash') ?? '';
-  cfg.trafficThreshold = parseInt(map.get('traffic_threshold') ?? '95', 10) || 95;
-  cfg.shutdownMode = map.get('shutdown_mode') ?? 'KeepCharging';
-  cfg.thresholdAction = map.get('threshold_action') ?? 'stop_and_notify';
-  cfg.apiInterval = parseInt(map.get('api_interval') ?? '600', 10) || 600;
-  cfg.monitorInterval = parseInt(map.get('monitor_interval') ?? '5', 10) || 5;
-  cfg.timezone = map.get('timezone') ?? 'Asia/Shanghai';
-  cfg.keepAlive = map.get('keep_alive') === '1';
-  cfg.enableBilling = map.get('enable_billing') === '1';
+  // 兜底值统一与 DEFAULT_CONFIG 一致：仅在 map 有值时覆盖，否则保留 structuredClone 的默认值。
+  // 此前写死 '95'/'KeepCharging'/false/false 与 DEFAULT_CONFIG(90/StopCharging/true/true) 冲突，
+  // 在 ensureSchema 默认键写入失败或旧库缺键时会静默回退到错误默认值。
+  cfg.trafficThreshold = map.has('traffic_threshold')
+    ? parseInt(map.get('traffic_threshold') ?? '', 10) || DEFAULT_CONFIG.trafficThreshold
+    : DEFAULT_CONFIG.trafficThreshold;
+  cfg.shutdownMode = map.get('shutdown_mode') || DEFAULT_CONFIG.shutdownMode;
+  cfg.thresholdAction = map.get('threshold_action') || DEFAULT_CONFIG.thresholdAction;
+  cfg.apiInterval = map.has('api_interval')
+    ? parseInt(map.get('api_interval') ?? '', 10) || DEFAULT_CONFIG.apiInterval
+    : DEFAULT_CONFIG.apiInterval;
+  cfg.monitorInterval = map.has('monitor_interval')
+    ? parseInt(map.get('monitor_interval') ?? '', 10) || DEFAULT_CONFIG.monitorInterval
+    : DEFAULT_CONFIG.monitorInterval;
+  cfg.timezone = map.get('timezone') || DEFAULT_CONFIG.timezone;
+  cfg.keepAlive = map.has('keep_alive') ? map.get('keep_alive') === '1' : DEFAULT_CONFIG.keepAlive;
+  cfg.enableBilling = map.has('enable_billing') ? map.get('enable_billing') === '1' : DEFAULT_CONFIG.enableBilling;
   cfg.enableScheduleMail = map.get('enable_schedule_mail') === '1';
-  cfg.logRetentionDays = parseInt(map.get('log_retention_days') ?? '30', 10) || 30;
+  cfg.logRetentionDays = map.has('log_retention_days')
+    ? parseInt(map.get('log_retention_days') ?? '', 10) || DEFAULT_CONFIG.logRetentionDays
+    : DEFAULT_CONFIG.logRetentionDays;
   // 通知配置从 JSON 字段读取：与默认值逐通道深合并。
   // 旧版本写入的配置可能缺少新通道键（smtp/serverchan/pushplus/template），
   // 整体替换会让下游 `n.smtp.password` 之类访问抛 TypeError，导致接口 500。
@@ -316,14 +331,46 @@ export async function clearLogs(env: Env, category: string): Promise<void> {
 }
 
 // 清理超期日志：删除 created_at 早于 N 天的记录（幂等，返回删除条数）
-// D1 的 datetime('now') 为 UTC，created_at 也是 datetime('now') 写入的 UTC 时间，可直接比较
+// D1 的 datetime('now') 为 UTC，created_at 也是 datetime('now') 写入的 UTC 时间，可直接比较。
+// 注意：不能写 datetime('now','-? days') —— ? 在单引号字符串字面量内不会被当绑定参数，
+// 会得到 NULL 导致恒 false（删 0 行）。这里用字符串拼接把天数参数化。
 export async function cleanupExpiredLogs(env: Env, retentionDays: number): Promise<number> {
   const days = Math.max(1, Math.floor(retentionDays));
   const result = await env.DB.prepare(
-    "DELETE FROM logs WHERE created_at < datetime('now', '-? days')",
+    "DELETE FROM logs WHERE created_at < datetime('now', '-' || ? || ' days')",
   ).bind(String(days)).run();
   // D1 的 run() 返回 meta.changes 可能不可靠，这里只返回执行状态（0 表示无超期或成功）
   return 0;
+}
+
+// 清理其他「只增不删」的辅助表，避免长期无限增长逼近 D1 存储上限。
+// 各表时间字段格式不同，需分别处理：
+//   - traffic_stats.recorded_at 为 ISO 字符串（now.toISOString()），用 ISO 阈值比较
+//   - action_events.created_at / login_attempts.created_at 为 datetime('now') UTC，用 SQL 修饰符
+//   - sessions 按 expires_at（ISO）清理已过期会话 + created_at 兜底
+// 全部幂等、失败互不影响；保留天数与日志一致（logRetentionDays）。
+export async function cleanupExpiredData(env: Env, retentionDays: number): Promise<void> {
+  const days = Math.max(1, Math.floor(retentionDays));
+
+  // traffic_stats：ISO 格式，阈值日期 = N 天前的 ISO 字符串
+  const isoThreshold = new Date(Date.now() - days * 86400 * 1000).toISOString();
+  await env.DB.prepare('DELETE FROM traffic_stats WHERE recorded_at < ?').bind(isoThreshold).run();
+
+  // action_events：datetime('now') UTC 格式
+  await env.DB.prepare(
+    "DELETE FROM action_events WHERE created_at < datetime('now', '-' || ? || ' days')",
+  ).bind(String(days)).run();
+
+  // login_attempts：datetime('now') UTC 格式
+  await env.DB.prepare(
+    "DELETE FROM login_attempts WHERE created_at < datetime('now', '-' || ? || ' days')",
+  ).bind(String(days)).run();
+
+  // sessions：清掉已过期会话（expires_at 为 ISO）+ 长期未更新的僵尸会话兜底
+  await env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(new Date().toISOString()).run();
+  await env.DB.prepare(
+    "DELETE FROM sessions WHERE created_at < datetime('now', '-' || ? || ' days')",
+  ).bind(String(days)).run();
 }
 
 // 动作事件幂等键
