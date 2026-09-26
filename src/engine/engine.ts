@@ -7,7 +7,7 @@ import * as aliyun from '../provider/aliyun';
 import * as store from '../store/store';
 import { deliverEvent, hasActiveChannel, type NotificationEvent, type NotifyConfig } from '../notify/service';
 import { newToken, type Env } from '../security/security';
-import { dueWithin, inTimeRange, localCycle, toZone, zoneFields } from './time';
+import { dueWithin, inTimeRange, localCycle, stopWindowOver, toZone, zoneFields } from './time';
 
 // 状态常量（与原 Go 项目一致）
 const StatusStarting = 'Starting';
@@ -119,6 +119,9 @@ export async function processAccount(
   const local = toZone(now, config.timezone);
   const localFields = zoneFields(now, config.timezone);
 
+  // 当前配置时区墙钟 HH:mm（定时/保活/补偿共用）
+  const hhmm = `${String(localFields.hour).padStart(2, '0')}:${String(localFields.minute).padStart(2, '0')}`;
+
   // 定时开关机
   // 命中窗口放宽到 2 小时：外部 cron（GitHub Actions 等）常有数分钟到数十分钟延迟，
   // 窗口过窄会整天错过；action_events 幂等键（含日期）保证同一天只执行一次
@@ -221,8 +224,30 @@ export async function processAccount(
     }
   }
 
+  // 错过窗口补偿：关机窗口内没有任何触发源成功执行时（外部触发断档、服务重启等），
+  // 恢复后的第一轮监控把漏掉的定时关机补上——否则实例会一直运行，持续产生费用。
+  // 触发条件（全部满足）：定时启用、当前不在运行窗口、实例仍在 Running、今天关机窗口已结束。
+  // 幂等：复用与窗口内执行相同的 action_events 键（schedule:{id}:{date}:stop:{stopTime}），
+  // 窗口内已成功执行过则此处直接跳过；补偿执行失败会删键、下轮自动重试。
+  // 语义说明：定时启用时，窗口外的 Running 实例一律会被关回（含手动开机的场景）；
+  // 跨天后不再追溯（隔天仍 Running 视为手动/保活意图）。
+  if (account.scheduleEnabled && !statusChangedBySchedule && status === StatusRunning) {
+    const stopTime = account.stopTime || '23:00';
+    if (!inTimeRange(hhmm, account.startTime || '08:00', stopTime)
+        && stopWindowOver(localFields, stopTime, SCHEDULE_WINDOW_MS)) {
+      const changed = await executeScheduledAction(env, config, account, 'stop', now);
+      if (changed) {
+        actions.push('scheduled_stop_compensated');
+        account.instanceStatus = StatusStopping;
+        status = StatusStopping;
+        statusChangedBySchedule = true;
+        await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
+        await store.addLog(env, 'warning', `定时关机窗口曾被错过，已补偿执行关机 [${masked(account.accessKeyId)}]`);
+      }
+    }
+  }
+
   // 保活
-  const hhmm = `${String(localFields.hour).padStart(2, '0')}:${String(localFields.minute).padStart(2, '0')}`;
   if (config.keepAlive && !overThreshold && !statusChangedBySchedule && status === StatusStopped &&
       (!account.scheduleEnabled || inTimeRange(hhmm, account.startTime, account.stopTime))) {
     const key = `keepalive:${account.id}:${localFields.year}${String(localFields.month).padStart(2, '0')}${String(localFields.day).padStart(2, '0')}${String(localFields.hour).padStart(2, '0')}${String(localFields.minute).padStart(2, '0')}`;
