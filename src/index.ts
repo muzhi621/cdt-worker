@@ -17,7 +17,8 @@ export default {
     return handleRequest(env, request);
   },
 
-  // 原生 Cron Trigger 入口（wrangler.toml [triggers] 配置调度）。
+  // 原生 Cron Trigger 入口（需 wrangler.toml 的 [triggers] 启用，默认关闭：
+  // 免费版账号 5 个 Cron 额度易耗尽，会报 error 10072 导致部署失败）。
   // 直调内部监控函数，不经过 HTTP 层 —— 天然可信，无需 CRON_SECRET，
   // 与外部触发共用同一套防抖与原子抢占（并发时只有一轮真正执行）。
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {

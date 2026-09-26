@@ -1,7 +1,8 @@
-# CDT Monitor 外部定时触发（备份链路 · GitHub Actions）
-# 主链路为 Worker 原生 Cron Trigger（wrangler.toml [triggers]，无需密钥）；
-# 本 workflow 作为外部备份触发，每 5 分钟请求一次 /__cron。
-# Worker 内部按「监控间隔」防抖 + 原子槽位抢占，两条链路并发也不会重复执行。
+# CDT Monitor 定时触发（外部链路 · GitHub Actions）
+# 默认主链路：每 5 分钟请求一次 /__cron（携带 CRON_SECRET）。
+# 注：Worker 原生 Cron Trigger 默认不启用——免费版账号仅 5 个 cron 额度，
+# 额度用尽时 wrangler deploy 会报 error 10072 导致部署失败（详见 DEPLOY-CRON.md）。
+# 两条链路可并存且互不重复：Worker 内部按「监控间隔」防抖 + 原子槽位抢占。
 #
 # 密钥：在仓库 Settings → Secrets and variables → Actions 添加 CRON_SECRET，
 # 值与 Worker 的 CRON_SECRET 环境变量一致。未配置时 workflow 仍会运行，

@@ -1,11 +1,15 @@
-# 监控定时触发配置（原生 Cron 为主 + 外部触发为备份）
+# 监控定时触发配置（外部触发为主，原生 Cron 可选）
 
-> CDT-Monitor Worker 版现在使用**双链路**定时触发：
-> 1. **主链路**：Cloudflare 原生 Cron Trigger（`wrangler.toml` 的 `[triggers]`），`scheduled()` 直调内部监控函数，**无需任何密钥**；
-> 2. **备份链路**：外部定时服务请求 `/__cron`，需携带 `CRON_SECRET`（或管理员会话）。
+> CDT-Monitor Worker 版现在使用**双链路**定时触发，默认启用的是外部触发：
+> 1. **主链路（默认）**：外部定时服务（cron-job.org / GitHub Actions 等）请求 `/__cron`，需携带 `CRON_SECRET`；
+> 2. **可选增强**：Cloudflare 原生 Cron Trigger（`wrangler.toml` 的 `[triggers]`），`scheduled()` 直调内部监控函数，**无需密钥**。
 >
 > 两条链路共用 Worker 内部防抖（前台「监控间隔」分钟数）+ 原子槽位抢占，
 > 无论多少个触发源同时打过来，同一防抖窗口内只有一轮监控真正执行。
+>
+> ⚠️ **为什么原生 Cron 默认关闭**：Cloudflare 免费版每个账号只有 **5 个 Cron Trigger**
+> 额度。若账号额度已用尽，`wrangler deploy` 会在注册 cron 时直接失败并报
+> `error 10072`，导致整个部署中断（代码已上传但触发器配置回滚失败）。
 
 ---
 
@@ -24,24 +28,46 @@
 
 ---
 
-## 主链路：原生 Cron Trigger（已默认启用）
+## 主链路：外部触发 `/__cron`（已默认启用）
 
-`wrangler.toml` 已包含：
+`wrangler.toml` **不包含** `[triggers]` 段，外部服务定时请求 `/__cron` 即可：
+
+```
+https://你的worker地址/__cron   （带 X-Cron-Secret 头）
+```
+
+实际监控频率由前台「监控间隔」控制（防抖跳过多余触发）。
+
+### 启用步骤（二选一，推荐 GitHub Actions）
+
+**A. GitHub Actions**（仓库已内置 `.github/workflows/cron.yml`，每 5 分钟一次）
+
+1. Worker 侧设置环境变量 `CRON_SECRET`（Dashboard → Worker → Settings → Variables and Secrets，类型选 **Secret**），值用 `openssl rand -hex 32` 生成；
+2. GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret，名称 `CRON_SECRET`，值与上一步一致；
+3. 在 Actions 页面手动 Run workflow 验证一次。
+
+**B. cron-job.org / 其他外部服务**
+
+1. URL 填 `https://你的worker地址/__cron`；
+2. 添加请求头 `X-Cron-Secret: <你的 CRON_SECRET>`（不支持 header 的服务可用 `?key=<你的 CRON_SECRET>`）；
+3. 调度频率建议 ≥ 前台「监控间隔」。
+
+---
+
+## 可选增强：原生 Cron Trigger（需账号有余量才建议开启）
+
+确认额度充足后再启用（Dashboard → Workers → 任一 Worker 的 Triggers 页可见已用数量）：
 
 ```toml
 [triggers]
 crons = ["*/5 * * * *"]
 ```
 
-`wrangler deploy` 后即生效，无需其他配置。每 5 分钟由 Cloudflare 调度一次，
-实际监控频率仍由前台「监控间隔」控制（防抖跳过多余触发）。
-
-> Cloudflare 免费版每个账号只有 5 个 Cron 触发器额度（本项目占用 1 个）。
-> 若你的账号额度紧张，可删除 `[triggers]` 段，仅用下方外部触发链路。
+去掉 `wrangler.toml` 中该段的注释即可，重新 `wrangler deploy` 后 `scheduled()`
+接管调度（不经过 HTTP 层，无需密钥）。外部触发链路同时保持可用。
+升级到 Workers Paid（$5/月）后额度提升到 1000，可放心开启。
 
 ---
-
-## 备份链路：GitHub Actions（可选）
 
 仓库已内置 `.github/workflows/cron.yml`（每 5 分钟请求一次 `/__cron`）。启用步骤：
 
@@ -73,8 +99,15 @@ crons = ["*/5 * * * *"]
 
 ## 验证是否生效
 
-1. **原生 Cron**：部署后到 Dashboard → Worker → Logs（或 observability）看 `scheduled` 事件；也可回管理台「日志」页看 `heartbeat` 监控日志。
-2. **外部触发**（已配置密钥时）：
+1. **外部触发**：看 GitHub Actions 运行记录（cdt-monitor-trigger）是否成功；或手动：
+   ```bash
+   curl -H "X-Cron-Secret: 你的密钥" https://你的地址/__cron
+   ```
+   应返回 `{"monitored": N, "interval_minutes": 5}`（N 是账号数；`skipped: true` 表示刚运行过、被防抖跳过）。
+2. **原生 Cron**（仅开启时）：到 Dashboard → Worker → Logs（或 observability）看 `scheduled` 事件；也可回管理台「日志」页看 `heartbeat` 监控日志。
+3. **部署失败报 error 10072**：说明账号 Cron 额度用尽（`This account has reached the Workers Free limit of 5 cron triggers per account`）。
+   确认 `wrangler.toml` 中 `[triggers]` 段已注释掉后重新部署；或在 Dashboard 删除其他 Worker 的 cron 触发器、升级 Workers Paid。
+4. 管理台「立即监控」按钮：已登录状态下点击即可，无需密钥。
    ```bash
    curl -H "X-Cron-Secret: 你的密钥" https://你的地址/__cron
    ```

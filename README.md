@@ -62,6 +62,15 @@ cdt-worker/
    ```
 4. 首次访问进入安装向导，设置管理员密码，然后在「设置」中添加阿里云账号（AK/Secret 会加密存储）。
 
+> ⚠️ **部署方式与自定义域名的关系**：仓库里的 `wrangler.toml` **不包含 `routes`**，
+> 而自定义域名（如 `cdt.dddde.de`）是在 Dashboard 上附加的。本地/CI 执行
+> `wrangler deploy` 时，云端会用本地配置**覆盖**远端配置，可能把自定义域名路由
+> 一并移除（日志里会出现 "Uploading the Worker will override the remote
+> configuration" 警告）。因此：
+>
+> - 已在 Dashboard 绑定域名的，**推荐用 Dashboard 部署**（[DEPLOY-DASHBOARD.md](./DEPLOY-DASHBOARD.md)），不会动路由；
+> - 必须用本地部署时，先确认路由是否还在（部署后访问域名，异常则到 Dashboard 重新附加自定义域）。
+
 > 更详细的 Dashboard 前台部署教程见 [DEPLOY-DASHBOARD.md](./DEPLOY-DASHBOARD.md)。
 
 ## 阿里云 RAM 权限（必读）
@@ -122,10 +131,11 @@ RAM → 权限策略 → 创建自定义策略（脚本编辑），粘贴以下 
 不启用账单功能时，可删去两条 `bss:` 权限进一步收窄。
 管理台「账号」页底部也提供同一份策略与一键复制。
 
-## 定时监控（原生 Cron 为主 + 外部触发为备份）
+## 定时监控（外部触发为主，原生 Cron 可选）
 
-主链路使用 **Cloudflare 原生 Cron Trigger**（`wrangler.toml` 的 `[triggers]`，默认每 5 分钟），`scheduled()` 直调内部监控函数，无需任何密钥。
-备份链路可用外部定时服务请求 `/__cron`（需携带 `CRON_SECRET`，见下），两条链路共用防抖 + 原子槽位抢占，不会重复执行。
+默认主链路使用**外部定时服务请求 `/__cron`**（携带 `CRON_SECRET`，见下），`scheduled()` 入口保留但默认不启用——Cloudflare 免费版每账号仅 5 个 Cron Trigger 额度，额度用尽时 `wrangler deploy` 会报 `error 10072` 导致部署失败。账号额度充足或升级 Paid 后，取消 `wrangler.toml` 里 `[triggers]` 的注释即可切回原生 Cron。
+
+两条链路共用防抖 + 原子槽位抢占，同时开启也不会重复执行。
 
 ```
 curl -H "X-Cron-Secret: 你的密钥" https://你的worker地址/__cron
@@ -136,7 +146,7 @@ curl -H "X-Cron-Secret: 你的密钥" https://你的worker地址/__cron
 
 ### CRON_SECRET 配置方案
 
-`CRON_SECRET` 是保护 `/__cron` 备份触发链路的共享密钥。**推荐配置**：主链路走原生 Cron（无需密钥），`CRON_SECRET` 供外部定时服务（cron-job.org / GitHub Actions 等）调用 `/__cron` 时使用；不使用外部触发可不配置，`/__cron` 匿名请求会返回 401。
+`CRON_SECRET` 是保护 `/__cron` 触发链路的共享密钥。**推荐配置**：`CRON_SECRET` 供外部定时服务（cron-job.org / GitHub Actions 等）调用 `/__cron` 时使用；不配置则该链路匿名请求返回 401，仅管理员会话可手动触发。
 
 **第 1 步 · 生成密钥**（任选一种，256 位随机值）：
 

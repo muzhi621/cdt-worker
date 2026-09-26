@@ -23,13 +23,22 @@ binding = "DB"
 database_name = "cdt-monitor-db"
 
 # ─────────────────────────────────────────────────────────────
-# 监控调度（双保险）：
-# 1. 原生 Cron Trigger：scheduled() 直调内部监控函数，无需密钥、不怕外部服务停摆
-# 2. 外部 HTTP 触发（可选备份）：定时 GET /__cron，带 X-Cron-Secret 头（见 DEPLOY-CRON.md）
-# 两条链路共用 Worker 内部防抖（monitorInterval，分钟）+ 原子槽位抢占，不会重复跑
+# 监控调度：默认使用「外部 HTTP 触发」GET /__cron（携带 CRON_SECRET）
+#
+# ⚠️ 原生 Cron Trigger 默认【不启用】，原因：
+#    Cloudflare 免费版每个账号只有 5 个 Cron Trigger 额度，本项目部署时会直接
+#    报 error 10072（额度用尽）导致整个 deploy 失败。
+#
+# 如你的账号仍有余量（Dashboard → Workers → 任一 Worker 的 Triggers 页可见），
+# 想改回原生 Cron，取消下面几行的注释即可：
+#
+# [triggers]
+# crons = ["*/5 * * * *"]
+#
+# 开启后 src/index.ts 的 scheduled() 会接管调度（直调内部监控函数，无需密钥）；
+# 外部触发链路保持可用，两条链路共用防抖 + 原子槽位抢占，不会重复执行。
+# 详见 DEPLOY-CRON.md。
 # ─────────────────────────────────────────────────────────────
-[triggers]
-crons = ["*/5 * * * *"]
 
 [observability]
 enabled = true
