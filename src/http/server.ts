@@ -269,12 +269,13 @@ async function getConfig(ctx: Context): Promise<Response> {
     enableBilling: config.enableBilling,
     enableScheduleMail: config.enableScheduleMail,
     logRetentionDays: config.logRetentionDays,
+    // 每个通道用空对象兜底：即使 D1 里的旧配置缺某个通道键也不会抛错
     notifications: {
-      telegram: { ...n.telegram, token: '', tokenConfigured: !!n.telegram.token },
-      webhook: { ...n.webhook, secret: '', secretConfigured: !!n.webhook.secret },
-      serverchan: { ...n.serverchan, sendKey: '', sendKeyConfigured: !!n.serverchan.sendKey },
-      pushplus: { ...n.pushplus, token: '', tokenConfigured: !!n.pushplus.token },
-      smtp: { ...n.smtp, password: '', passwordConfigured: !!n.smtp.password },
+      telegram: { ...(n.telegram ?? {}), token: '', tokenConfigured: !!n.telegram?.token },
+      webhook: { ...(n.webhook ?? {}), secret: '', secretConfigured: !!n.webhook?.secret },
+      serverchan: { ...(n.serverchan ?? {}), sendKey: '', sendKeyConfigured: !!n.serverchan?.sendKey },
+      pushplus: { ...(n.pushplus ?? {}), token: '', tokenConfigured: !!n.pushplus?.token },
+      smtp: { ...(n.smtp ?? {}), password: '', passwordConfigured: !!n.smtp?.password },
       template: { body: n.template?.body ?? '' },
     },
     // AccessKey ID 非敏感信息（Secret 才是），明文返回供界面展示与编辑；
@@ -310,8 +311,8 @@ async function saveConfig(ctx: Context): Promise<Response> {
   const b = body as Record<string, unknown>;
   // 仅写入请求中显式传入的设置项：添加账号只传 accounts 时不会重置其他参数
   const optionalSettings: [string, unknown, string][] = [
-    ['traffic_threshold', b.trafficThreshold, String(b.trafficThreshold ?? 95)],
-    ['shutdown_mode', b.shutdownMode, String(b.shutdownMode ?? 'KeepCharging')],
+    ['traffic_threshold', b.trafficThreshold, String(b.trafficThreshold ?? 90)],
+    ['shutdown_mode', b.shutdownMode, String(b.shutdownMode ?? 'StopCharging')],
     ['threshold_action', b.thresholdAction, String(b.thresholdAction ?? 'stop_and_notify')],
     ['api_interval', b.apiInterval, String(b.apiInterval ?? 600)],
     ['monitor_interval', b.monitorInterval, String(b.monitorInterval ?? 5)],
@@ -527,7 +528,14 @@ export async function handleRequest(env: Env, request: Request): Promise<Respons
       return error('forbidden', 'API Key 权限不足', 403);
     }
   }
-  return matched.route.handler(ctx);
+  // 统一异常兜底：handler 抛错时返回可读的 JSON 错误（而非 Cloudflare 默认
+  // 纯文本 500，前端无法解析只能显示「操作失败」）
+  try {
+    return await matched.route.handler(ctx);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return error('handler_failed', `${matched.route.method} ${matched.route.pattern} 执行失败：${msg}`, 500);
+  }
 }
 
 async function runMonitorCycle(env: Env): Promise<Response> {

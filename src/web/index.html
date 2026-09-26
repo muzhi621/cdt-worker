@@ -870,7 +870,7 @@
         <div class="card-head" data-page-node-id="RAM-POLICY-HEAD">
           <div data-page-node-id="RAM-POLICY-TITLE">
             <h2>RAM 账号最小权限</h2>
-            <p class="card-desc">建议为本系统创建专用 RAM 用户并只授予下方 6 个权限，避免使用主账号 AccessKey</p>
+            <p class="card-desc">建议为本系统创建专用 RAM 用户并只授予下方权限，避免使用主账号 AccessKey（与仓库 README「阿里云 RAM 权限」章节一致）</p>
           </div>
           <span class="spacer" data-page-node-id="RAM-POLICY-SPACER"></span>
           <button class="btn btn-ghost btn-sm" type="button" id="copy-policy">复制策略 JSON</button>
@@ -893,9 +893,26 @@
           <ol>
             <li><code>cdt:ListCdtInternetTraffic</code> — 读取 CDT 互联网流量明细（核心监控数据）</li>
             <li><code>ecs:DescribeInstanceStatus</code> — 读取实例运行状态</li>
-            <li><code>ecs:StartInstance / ecs:StopInstance</code> — 阈值自动停机与保活开机</li>
-            <li><code>bss:QueryAccountBalance / bss:DescribeInstanceBill</code> — 账户余额与实例账单（可选功能）</li>
+            <li><code>ecs:StartInstance / ecs:StopInstance</code> — 阈值自动停机、保活、每日定时开关机、手动启停</li>
+            <li><code>bss:QueryAccountBalance / bss:DescribeInstanceBill</code> — 账户余额与本月账单金额（可选功能）</li>
           </ol>
+        </div>
+
+        <div class="steps">
+          <strong>所需权限清单 · 方案一：系统策略（最省事，已验证可用）</strong>
+          <ol>
+            <li><code>AliyunCDTReadOnlyAccess</code> — ✅ 必需（流量监控）</li>
+            <li><code>AliyunECSFullAccess</code> — ✅ 必需（实例状态读取 + 启停）</li>
+            <li><code>AliyunBSSReadOnlyAccess</code> — 可选（账户余额 / 本月账单）</li>
+            <li><code>AliyunCloudMonitorFullAccess</code> — ❌ 系统未使用，无需授权</li>
+          </ol>
+          <p class="hint" style="margin-top:8px">只读权限即可满足全部功能，无需 FullAccess。以下多余授权可移除：
+            <code>AliyunCDTFullAccess</code>、<code>AliyunBSSFullAccess</code>、<code>AliyunCloudMonitorFullAccess</code>。</p>
+        </div>
+
+        <div class="steps">
+          <strong>方案二：最小权限自定义策略（推荐，安全加固）</strong>
+          <p class="hint">使用上方「复制策略 JSON」在 RAM → 权限策略 → 创建自定义策略（脚本编辑）中粘贴即可，权限与代码实际调用的 6 个 API 严格一一对应。</p>
         </div>
       </div>
     </section>
@@ -913,11 +930,11 @@
           <div class="form-grid" data-page-node-id="aewEgLuUpDNRr6reOGPncd">
             <div class="field" data-page-node-id="5FKGSGUb1WcIatID18SSOj">
               <label for="set-threshold" data-page-node-id="gtxsylcMRA6fslsiK2AoRw">流量阈值（%）</label>
-              <input id="set-threshold" class="control" type="number" min="1" max="100" inputmode="numeric" data-page-node-id="F8EgZmJg2YQ8YLWhgijfe4" />
+              <input id="set-threshold" class="control" type="number" min="1" max="100" placeholder="90" inputmode="numeric" data-page-node-id="F8EgZmJg2YQ8YLWhgijfe4" />
             </div>
             <div class="field" data-page-node-id="xHmiUhVFABNyR5CDdU6B6p">
               <label for="set-interval" data-page-node-id="oFmiaaDVlVjl1ZXhc5ixMD">API 间隔（秒）</label>
-              <input id="set-interval" class="control" type="number" min="10" step="5" inputmode="numeric" data-page-node-id="ieSXYkb66ePsq2fbooeLwx" />
+              <input id="set-interval" class="control" type="number" min="10" step="5" placeholder="600" inputmode="numeric" data-page-node-id="ieSXYkb66ePsq2fbooeLwx" />
             </div>
             <div class="field" data-page-node-id="35ePzoGgNiGEDdDtayw1ON">
               <label for="set-action" data-page-node-id="dYsGffRCNIzpdIRJwihYSl">阈值动作</label>
@@ -936,7 +953,7 @@
             </div>
             <div class="field" data-page-node-id="ZAtFHCy0TBnLf6WgOZP7Hb">
               <label for="set-monitor" data-page-node-id="XMWSts8E8Tc4mr6GxOk8CL">监控间隔（分钟）</label>
-              <input id="set-monitor" class="control" type="number" min="1" max="1440" inputmode="numeric" data-page-node-id="PpgoIxjV6q6P4dUqtZp4aq" />
+              <input id="set-monitor" class="control" type="number" min="1" max="1440" placeholder="5" inputmode="numeric" data-page-node-id="PpgoIxjV6q6P4dUqtZp4aq" />
               <p class="hint" data-page-node-id="Q7OHCAXYfhBJLVy0UK6RCv">配合下方外部定时服务；Worker 内部按此间隔防抖，触发过密会自动跳过。</p>
             </div>
             <div class="field" data-page-node-id="pFeW9700aeOLHrA1y7ufAi">
@@ -2007,7 +2024,14 @@
       /* ---------- 设置页 ---------- */
       async function loadConfig() {
         const r = await apiJson("/api/v1/config");
-        if (!r.ok) return;
+        if (!r.ok) {
+          // 不再静默返回：否则设置页会呈现「一片空白」，无法判断是加载失败还是真没值
+          $("set-threshold").placeholder = "90";
+          $("set-interval").placeholder = "600";
+          $("set-monitor").placeholder = "5";
+          toast("配置读取失败：" + errText(r.data), "err");
+          return;
+        }
         const d = r.data;
         if (d.trafficThreshold != null) $("set-threshold").value = d.trafficThreshold;
         if (d.apiInterval != null) $("set-interval").value = d.apiInterval;

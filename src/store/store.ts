@@ -30,14 +30,14 @@ export interface Config {
 
 const DEFAULT_CONFIG: Config = {
   adminPasswordHash: '',
-  trafficThreshold: 95,
-  shutdownMode: 'KeepCharging',
+  trafficThreshold: 90,
+  shutdownMode: 'StopCharging',
   thresholdAction: 'stop_and_notify',
   apiInterval: 600,
   monitorInterval: 5,
   timezone: 'Asia/Shanghai',
-  keepAlive: false,
-  enableBilling: false,
+  keepAlive: true,
+  enableBilling: true,
   enableScheduleMail: false,
   logRetentionDays: 30,
   notifications: {
@@ -119,11 +119,26 @@ export async function getConfig(env: Env): Promise<Config> {
   cfg.enableBilling = map.get('enable_billing') === '1';
   cfg.enableScheduleMail = map.get('enable_schedule_mail') === '1';
   cfg.logRetentionDays = parseInt(map.get('log_retention_days') ?? '30', 10) || 30;
-  // 通知配置从 JSON 字段读取
+  // 通知配置从 JSON 字段读取：与默认值逐通道深合并。
+  // 旧版本写入的配置可能缺少新通道键（smtp/serverchan/pushplus/template），
+  // 整体替换会让下游 `n.smtp.password` 之类访问抛 TypeError，导致接口 500。
   const notifRaw = map.get('notifications');
   if (notifRaw) {
     try {
-      cfg.notifications = JSON.parse(notifRaw);
+      const stored = JSON.parse(notifRaw) as Record<string, unknown>;
+      const merged: Record<string, unknown> = {};
+      for (const [chan, def] of Object.entries(cfg.notifications)) {
+        const cur = stored[chan];
+        merged[chan] = cur && typeof cur === 'object'
+          ? { ...(def as Record<string, unknown>), ...(cur as Record<string, unknown>) }
+          : def;
+      }
+      // 兼容最早的三通道版本：email → smtp（字段名不同，按需映射）
+      const legacy = stored.email as Record<string, unknown> | undefined;
+      if (legacy && typeof legacy === 'object') {
+        merged.smtp = { ...(merged.smtp as Record<string, unknown>), ...legacy };
+      }
+      cfg.notifications = merged as unknown as Config['notifications'];
     } catch { /* 保留默认 */ }
   }
   cfg.accounts = await listAccounts(env);

@@ -112,9 +112,23 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE accounts ADD COLUMN shutdown_mode TEXT NOT NULL DEFAULT ''`,
 ];
 
+// 默认设置项：首次部署写入；已部署库仅补齐缺失的键（INSERT OR IGNORE 不覆盖现有值）
+const DEFAULT_SETTINGS: [string, string][] = [
+  ['traffic_threshold', '90'],
+  ['shutdown_mode', 'StopCharging'],
+  ['threshold_action', 'stop_and_notify'],
+  ['api_interval', '600'],
+  ['monitor_interval', '5'],
+  ['timezone', 'Asia/Shanghai'],
+  ['keep_alive', '1'],
+  ['enable_billing', '1'],
+  ['enable_schedule_mail', '0'],
+  ['log_retention_days', '30'],
+];
+
 let schemaReady = false;
 
-// 幂等建表 + 增量迁移，多次调用只真正执行一次（进程内标记）
+// 幂等建表 + 增量迁移 + 默认值补齐，多次调用只真正执行一次（进程内标记）
 export async function ensureSchema(env: Env): Promise<void> {
   if (schemaReady) return;
   const statements = SCHEMA_STATEMENTS.map((sql) => env.DB.prepare(sql));
@@ -125,5 +139,13 @@ export async function ensureSchema(env: Env): Promise<void> {
       await env.DB.prepare(sql).run();
     } catch { /* 已应用过，忽略 */ }
   }
+  // 补齐缺失的设置默认值（已存在的不覆盖）
+  try {
+    await env.DB.batch(
+      DEFAULT_SETTINGS.map(([k, v]) =>
+        env.DB.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)').bind(k, v),
+      ),
+    );
+  } catch { /* 默认值写入失败不影响启动 */ }
   schemaReady = true;
 }
