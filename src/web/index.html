@@ -977,7 +977,7 @@
         <div class="table-wrap" data-page-node-id="7BiFiZzsTGVKDZnr2IxIlM">
           <table data-page-node-id="RcWIECGvBxtHVJOe4c7So4">
             <thead data-page-node-id="iifG7NzCPLDBcvSztfOXqh">
-              <tr data-page-node-id="BpOcUnWLmDx4SfoWba3CYt"><th data-page-node-id="Ug2tRIhH8APXr8vlKpVnzz">备注 / 账号</th><th data-page-node-id="oSyhj78WNNxI4H6prBKOEi">地域</th><th data-page-node-id="v5Tqut1qkBuQugAZyXn1SY">实例</th><th data-page-node-id="lu7IUKkgBCjOTFdlaBAEG9">流量</th><th data-page-node-id="ACCT-SCHED-TH">定时</th><th style="text-align:right" data-page-node-id="d4wbJfRuBVzBnR95BOXL72">操作</th></tr>
+              <tr data-page-node-id="BpOcUnWLmDx4SfoWba3CYt"><th data-page-node-id="Ug2tRIhH8APXr8vlKpVnzz">备注 / 账号</th><th data-page-node-id="oSyhj78WNNxI4H6prBKOEi">地域</th><th data-page-node-id="v5Tqut1qkBuQugAZyXn1SY">实例</th><th data-page-node-id="lu7IUKkgBCjOTFdlaBAEG9">流量</th><th data-page-node-id="ACCT-SCHED-TH">定时</th><th>保活</th><th style="text-align:right" data-page-node-id="d4wbJfRuBVzBnR95BOXL72">操作</th></tr>
             </thead>
             <tbody id="accounts-manage" data-page-node-id="1rl9A6PO99UcROIP5qGfrx"></tbody>
           </table>
@@ -1082,7 +1082,7 @@
             <div class="field" data-page-node-id="eSfFDKtqdWx07tPXZEWZoy">
               <label class="check" for="set-keepalive" data-page-node-id="W9ypnl2QejOmm3hCMM73Gk">
                 <input type="checkbox" id="set-keepalive" data-page-node-id="w1jg7O5V7gzUWOdFaeroay" />
-                抢占式实例保活（低于保活水位时自动开机）
+                实例保活总开关（实例意外停止时自动开机；各账号可在「账号配置」里单独关闭）
               </label>
             </div>
             <div class="field" data-page-node-id="w4gUbXBYWtxVkjHmhFKjjL">
@@ -1592,10 +1592,10 @@
               <input id="ed-stop" class="control" type="time" value="23:00" />
             </div>
             <div class="field">
-              <label>实例保活</label>
+              <label>实例保活（账号级开关）</label>
               <label class="check" for="ed-keepalive">
                 <input type="checkbox" id="ed-keepalive" />
-                意外停机时自动开机（关掉后该账号允许手动关机）
+                意外停机时自动开机（需设置页总开关同时开启；关闭后该账号允许手动关机）
               </label>
             </div>
           <div class="field full">
@@ -2199,22 +2199,31 @@
       async function loadAccountsManage() {
         const r = await apiJson("/api/v1/config");
         const tbody = $("accounts-manage");
-        if (!r.ok) { tbody.innerHTML = '<tr><td colspan="6">' + esc(errText(r.data)) + "</td></tr>"; return; }
+        if (!r.ok) { tbody.innerHTML = '<tr><td colspan="7">' + esc(errText(r.data)) + "</td></tr>"; return; }
         const list = r.data.accounts || [];
+        const globalKa = !!r.data.keepAlive;
         if (!list.length) {
-          tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px">暂无账号，先在上方添加</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px">暂无账号，先在上方添加</td></tr>';
           return;
         }
         tbody.innerHTML = list.map((a) => {
           const sched = a.scheduleEnabled
             ? '<span style="color:var(--success);font-weight:600">' + esc(a.startTime || "08:00") + " → " + esc(a.stopTime || "23:00") + "</span>"
             : '<span style="color:var(--muted)">未启用</span>';
+          // 保活落库状态直接展示在列表里：保存账号配置后无需开弹窗即可核对是否生效。
+          // 账号级是收窄开关，最终生效 = 全局开 AND 账号未显式关闭。
+          const ka = !globalKa
+            ? '<span style="color:var(--muted)">全局未开启</span>'
+            : (a.keepAlive !== false
+              ? '<span style="color:var(--success);font-weight:600">生效中</span>'
+              : '<span style="color:var(--muted)">账号已关闭</span>');
           return "<tr>" +
             "<td><div style='font-weight:600'>" + esc(a.remark || a.name || "-") + "</div><div class='mono'>" + esc(a.accessKeyId || "") + "</div></td>" +
             "<td class='mono'>" + esc(a.regionId || "-") + "</td>" +
             "<td class='mono'>" + esc(a.instanceId || "-") + "</td>" +
             "<td>" + (Number(a.maxTraffic) || 0) + " GB</td>" +
             "<td>" + sched + "</td>" +
+            "<td>" + ka + "</td>" +
             '<td style="text-align:right;white-space:nowrap">' +
             '<button class="btn btn-ghost btn-sm" type="button" data-edit="' + esc(a.id) + '">配置</button> ' +
             '<button class="btn btn-danger btn-sm" type="button" data-del="' + esc(a.id) + '">删除</button></td></tr>';
@@ -3049,6 +3058,18 @@
         } else stopLogTimer();
       });
       function stopLogTimer() { if (logTimer) { clearInterval(logTimer); logTimer = null; } }
+
+      /* ---------- 构建标识 ----------
+       * 每次改动前端后手动更新此值。作用：部署后强刷页面（Ctrl+F5）时看页脚即可
+       * 确认浏览器加载的是哪个构建，用于区分「线上已更新但浏览器缓存了旧 JS」——
+       * 这是「保存无效 / 新功能不见」类问题的第一排查步骤。 */
+      const APP_BUILD = "20260927-2300";
+      try {
+        const el = document.createElement("div");
+        el.style.cssText = "text-align:center;color:var(--muted);font-size:11px;padding:12px 0;opacity:.7";
+        el.textContent = "build " + APP_BUILD;
+        document.body.appendChild(el);
+      } catch { /* 无论如何不影响主流程 */ }
 
       /* ---------- 启动 ---------- */
       boot();
