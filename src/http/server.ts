@@ -762,7 +762,7 @@ async function route(env: Env, request: Request): Promise<Response> {
       // 复用本次读取结果更新「上次触发时间」，避免 touch 内部二次读库（省 D1 读）
       await store.touchTriggerSource(env, source, Math.floor(Date.now() / 1000), state.seen);
       // 把已读到的状态传给监控循环，省掉一次重复查询
-      return runMonitorCycle(env, false, state);
+      return runMonitorCycle(env, false, state, source);
     }
     return runMonitorCycle(env);
   }
@@ -996,7 +996,7 @@ async function testTrigger(ctx: Context): Promise<Response> {
     });
   }
   await store.touchTriggerSource(ctx.env, source, nowSec, seen);
-  const resp = await runMonitorCycle(ctx.env, true);
+  const resp = await runMonitorCycle(ctx.env, true, undefined, source, true);
   const data = await resp.clone().json().catch(() => ({})) as Record<string, unknown>;
   // 原生 Cron 的说明：CF 固定每 5 分钟调度一次，实际频率由「监控间隔」决定；
   // 手动测试这一轮是强制执行的，不必等下一个周期。
@@ -1042,10 +1042,14 @@ async function checkTriggerGaps(
 }
 
 // 执行一轮监控（供 fetch 的 /__cron 与 scheduled 入口共用，都走同一套防抖与抢占）
+// source：本轮的触发渠道（原生 Cron / 外部渠道 / 测试按钮）；未传表示管理台「立即监控」的手动触发。
+// isTest：是否来自「测试渠道」按钮，仅用于在日志里区分，不影响并发与幂等逻辑。
 export async function runMonitorCycle(
   env: Env,
   force = false,
   triggerState?: { sources: Record<TriggerSource, boolean>; seen: Partial<Record<TriggerSource, number>> },
+  source?: TriggerSource,
+  isTest = false,
 ): Promise<Response> {
   // 防抖前置：先做轻量判断（单条 settings 查询），命中跳过则直接返回，
   // 不再全量 getConfig（读全量 settings + 解密所有账号 AK/SK），省 CPU 与 D1 读。
@@ -1104,14 +1108,17 @@ export async function runMonitorCycle(
   // 记录本次监控周期到日志，让前台「日志页」能确认定时触发确实在运行。
   // 账号级 heartbeat 只在「有动作 / 状态变化」时写，这里补一条周期级汇总，
   // 这样日志页既能看到"每轮都在跑"，又不会灌进 5 账号 × 288 轮的重复噪声。
+  // 带上触发渠道：日志页要能看出「这轮是谁叫起来的」（原生 Cron / 外部渠道 / 手动），
+  // 否则多渠道并行时排查只能靠猜。渠道名取自 TRIGGER_LABELS，未传即管理台手动触发。
   const elapsed = Date.now() - started;
   const refreshed = results.filter((r) => r && r.refreshed).length;
   const changed = results.filter((r) => r && r.statusChanged).length;
+  const origin = source ? TRIGGER_LABELS[source] + (isTest ? ' · 测试' : '') : '手动触发';
   if (results.length > 0) {
     await store.addLog(env, 'info',
-      `监控周期完成：处理 ${results.length} 个账号（${refreshed} 个刷新数据，${changed} 个状态有变化，耗时 ${elapsed} ms）`);
+      `监控周期完成 [${origin}]：处理 ${results.length} 个账号（${refreshed} 个刷新数据，${changed} 个状态有变化，耗时 ${elapsed} ms）`);
   } else {
-    await store.addLog(env, 'info', '监控周期已触发，但尚未配置任何账号（请到「账号」页添加）');
+    await store.addLog(env, 'info', `监控周期已触发 [${origin}]，但尚未配置任何账号（请到「账号」页添加）`);
   }
-  return json({ monitored: results.length, interval_minutes: config.monitorInterval });
+  return json({ monitored: results.length, interval_minutes: config.monitorInterval, source: source ?? 'manual' });
 }
