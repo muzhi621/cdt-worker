@@ -1,6 +1,7 @@
 // 自动建表：部署后首次请求时幂等执行 schema
 // 对应 schema.sql，全部用 IF NOT EXISTS 保证可重复执行
 import type { Env } from '../security/security';
+import { DEFAULT_CONFIG } from './store';
 
 const SCHEMA_STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS settings (
@@ -115,20 +116,26 @@ const SCHEMA_STATEMENTS: string[] = [
 const MIGRATIONS: string[] = [
   // 账号级停机模式：'' 表示跟随系统全局设置，StopCharging/KeepCharging 覆盖全局
   `ALTER TABLE accounts ADD COLUMN shutdown_mode TEXT NOT NULL DEFAULT ''`,
+  // jobs 表早已零引用（通知走 notification_outbox、账单走 billing_cache），直接回收
+  `DROP TABLE IF EXISTS jobs`,
 ];
 
-// 默认设置项：首次部署写入；已部署库仅补齐缺失的键（INSERT OR IGNORE 不覆盖现有值）
+// 默认设置项：首次部署写入；已部署库仅补齐缺失的键（INSERT OR IGNORE 不覆盖现有值）。
+// 唯一数据源是 store.ts 的 DEFAULT_CONFIG，这里只描述「settings key ↔ Config 字段」的映射，
+// 避免默认值在两个文件里各写一份后漂移（历史上 enable_status_change_notify 就只在 DEFAULT_CONFIG 里）。
 const DEFAULT_SETTINGS: [string, string][] = [
-  ['traffic_threshold', '90'],
-  ['shutdown_mode', 'StopCharging'],
-  ['threshold_action', 'stop_and_notify'],
-  ['api_interval', '600'],
-  ['monitor_interval', '5'],
-  ['timezone', 'Asia/Shanghai'],
-  ['keep_alive', '1'],
-  ['enable_billing', '1'],
-  ['enable_schedule_mail', '0'],
-  ['log_retention_days', '30'],
+  ['traffic_threshold', String(DEFAULT_CONFIG.trafficThreshold)],
+  ['shutdown_mode', DEFAULT_CONFIG.shutdownMode],
+  ['threshold_action', DEFAULT_CONFIG.thresholdAction],
+  ['api_interval', String(DEFAULT_CONFIG.apiInterval)],
+  ['monitor_interval', String(DEFAULT_CONFIG.monitorInterval)],
+  ['timezone', DEFAULT_CONFIG.timezone],
+  ['keep_alive', DEFAULT_CONFIG.keepAlive ? '1' : '0'],
+  ['enable_billing', DEFAULT_CONFIG.enableBilling ? '1' : '0'],
+  ['enable_schedule_mail', DEFAULT_CONFIG.enableScheduleMail ? '1' : '0'],
+  ['log_retention_days', String(DEFAULT_CONFIG.logRetentionDays)],
+  // 新增设置项时在此追加一行即可，取值一律来自 DEFAULT_CONFIG
+  ['enable_status_change_notify', DEFAULT_CONFIG.enableStatusChangeNotify ? '1' : '0'],
 ];
 
 let schemaReady = false;

@@ -471,6 +471,9 @@ export async function summary(env: Env) {
       instanceId: account.instanceId,
       shutdownMode: resolveShutdownMode(account, config),
       scheduleEnabled: account.scheduleEnabled,
+      // 保活开启时后端会拒绝手动关机（config.keepAlive && 账号级保活未关），
+      // 前端据此禁用按钮并给出原因，避免"点了没反应"的困惑
+      keepAliveBlocked: config.keepAlive && account.keepAlive !== false,
       balance,
       cost,
       currency,

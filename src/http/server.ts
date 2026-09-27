@@ -444,7 +444,8 @@ async function saveConfig(ctx: Context): Promise<Response> {
     } catch {
       merged = mergeNotifySecrets(undefined, merged);
     }
-    await ctx.env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind('notifications', JSON.stringify(merged)).run();
+    await ctx.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,datetime('now'))")
+      .bind('notifications', JSON.stringify(merged)).run();
   }
   // 保存账号：带 id 走更新（AK/SK 留空=保持不变），无 id 且提供 AK/SK 才新增
   if (Array.isArray(b.accounts)) {
@@ -573,6 +574,9 @@ async function deleteApiKeyHandler(ctx: Context): Promise<Response> {
 }
 
 async function clearLogsHandler(ctx: Context): Promise<Response> {
+  if (!allowRate('clearlogs:' + clientIP(ctx.request), 10, 60_000)) {
+    return error('rate_limited', '清空日志过于频繁，请 1 分钟后再试', 429);
+  }
   const category = new URL(ctx.request.url).searchParams.get('category') || 'all';
   await store.clearLogs(ctx.env, category);
   return json({ success: true });
@@ -676,7 +680,44 @@ function matchRoute(method: string, pathname: string): { route: (typeof routes)[
   return null;
 }
 
+// 安全响应头：SPA 已 100% 转义，XSS 风险低，但补齐这些头成本近乎为零。
+function withSecurityHeaders(resp: Response, request: Request): Response {
+  const out = new Response(resp.body, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers: resp.headers,
+  });
+  const headers = new Headers(out.headers);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Referrer-Policy', 'no-referrer');
+  headers.set('X-Frame-Options', 'DENY');
+  headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  // CSP 只给 HTML 页面：API 响应加它只会徒增负担
+  if ((headers.get('Content-Type') || '').includes('text/html') && !headers.has('Content-Security-Policy')) {
+    headers.set('Content-Security-Policy', [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline'",      // 单文件 SPA 内联脚本
+      "style-src 'self' 'unsafe-inline'",       // 运行时注入的样式
+      "img-src 'self' data:",
+      "connect-src 'self'",
+      "form-action 'self'",
+      "frame-ancestors 'none'",
+      "base-uri 'none'",
+      "object-src 'none'",
+    ].join('; '));
+  }
+  if (request.url.startsWith('https://')) {
+    headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  return new Response(out.body, { status: out.status, statusText: out.statusText, headers });
+}
+
 export async function handleRequest(env: Env, request: Request): Promise<Response> {
+  // 统一出口包一层安全响应头，避免每个分支各自维护
+  return withSecurityHeaders(await route(env, request), request);
+}
+
+async function route(env: Env, request: Request): Promise<Response> {
   const url = new URL(request.url);
   const pathname = url.pathname;
 

@@ -445,3 +445,55 @@ Cloudflare 免费额度是**账号级汇总**的。把上表 1.5%/3%/10% 的水�
 - [x] 显式假设：以「5 账号 / 5 分钟一轮 / 默认配置」为基准，账号数或间隔变化按比例伸缩
 - [x] 明确"现在不要做什么"，避免过度设计
 - [x] 结论可执行：P0 三项合计约 1 小时
+
+---
+
+## 十、整改实施记录（对应第五章问题清单）
+
+> 基线：`dfa1dd2` → P0 波 `37eb483` / P1 波 `b2a157d` / P2 波见下。每波均通过 `tsc --noEmit` 与 `npm test`。
+
+### P0 阻塞级（已修）
+
+| 编号 | 处理 |
+|---|---|
+| 🔴-1 | `refresh` 增加按账号的分钟级节流键 `refresh:{id}:{YYYYMMDDHHmm}`，命中返回 429 |
+| 🔴-2 | 补齐 API Key 能力：`GET/POST /api/v1/system/api-keys` + `DELETE .../:id`；服务端只存 SHA-256 哈希，明文仅创建时返回一次；`authenticate` 命中后按 isolate 内存 60s 节流刷新 `last_used_at`；新增「密钥」页与管理 UI（新建/吊销/有效期/权限勾选）。同时移除未被引用的 `cron:run` scope，避免再造一个死权限 |
+| 🔴-3 | `ADMIN_PASSWORD` 长度 <10 直接拒绝登录（400 + 明确提示），成功登录后一律强制回写 D1，彻底消除"新旧双密码" |
+| 🔴-4 | 补偿关机分支不再写 `account.instanceStatus`，改为只更新局部变量 `status` |
+
+### P1 重要项（已修）
+
+| 编号 | 处理 |
+|---|---|
+| 🟠-5 | PBKDF2 迭代 60000 → 12000（老哈希串带 `i=` 段仍按其记录值校验，可平滑迁移） |
+| 🟠-6 | 新增 `time.formatWallClock()` 导出并复用 formatter 缓存，日志页不再每页 new 50 次 `Intl.DateTimeFormat` |
+| 🟠-7 | `security.ts` 按主密钥字节缓存 AES `CryptoKey`；`aliyun.ts` 按 AK Secret 缓存 HMAC `CryptoKey`（上限 64 条）。一轮监控约减少 20 次 importKey |
+| 🟠-8 | heartbeat 改为周期级汇总：账号级只在「有动作 / 状态变化」时写，周期末在 `runMonitorCycle` 写一条汇总（含刷新数与状态变化数），日志量约 1440 → 480 条/天 |
+| 🟠-9 | `accounts.keep_alive` 接入判定（全局 AND 账号级）；`saveAccount` 未指定时默认 true；账号编辑弹窗新增「实例保活」开关 |
+| 🟠-10 | 日志接口改用 `store.getSetting(env,'timezone')` 单行查询，不再为取一个字段做全量 `getConfig` + 解密所有 AK/SK |
+| 🟠-11 | `listLogs` 的 COUNT 改为 `SELECT COUNT(*) FROM (SELECT 1 FROM logs ... LIMIT 100000)` 上限截断 |
+| 🟠-12 | 登录失败响应恒定返回 `env_password_available: false` |
+| 🟠-13 | `mergeNotifySecrets` 增加 `template.body` 继承；前端同时禁止空模板保存，语义明确 |
+| 🟠-14 | 账号批次失败日志改用 `masked()`，不再把完整 AccessKeyId 写进日志 |
+| 🟠-15 | `recordActionEvent` 改为 `INSERT OR IGNORE` + `meta.changes` 判胜负，省掉每次一次 SELECT |
+| 🟠-16 | 通知各通道（Telegram / Webhook / Server酱 / PushPlus）加 `AbortSignal.timeout(8000)`，网络抖动不再拖长监控周期 |
+| 🟠-17 | 断档检查加整点/半点门控，省掉 288 轮里绝大多数空转请求的约 7 次 D1 读 |
+| 🟠-18 | 引入 `class AliyunError extends Error { retryable }`；网络错误路径补 `retryable=true`；重试判定改为 `instanceof` |
+
+### P2 工程化（已修）
+
+| 编号 | 处理 |
+|---|---|
+| 🟡-1 | `DEFAULT_CONFIG` 导出为唯一默认源，`schema.ts` 的 settings 默认值全部从它派生，消除两处漂移 |
+| 🟡-2 | 迁移中增加 `DROP TABLE IF EXISTS jobs`，回收零引用表 |
+| 🟡-3 | `cleanupExpiredLogs` 返回真实删除量（`meta.changes`） |
+| 🟡-4 | settings 写入补 `updated_at=datetime('now')`，覆盖写时同步刷新 |
+| 🟡-5 | 响应统一出口 `withSecurityHeaders()`：nosniff / Referrer-Policy / X-Frame-Options / Permissions-Policy / CSP（仅 HTML）/ HSTS（仅 https） |
+| 🟡-6 | 新增 `test/audit-fix.test.ts`（7 例）：`formatWallClock` 格式与非法时区兜底、`AliyunError` 语义、PBKDF2 迭代数与校验、损坏哈希降级。测试总数 44 → 51 |
+| 🟡-7 | 状态页「关机」按钮在保活开启时禁用并给出原因 tooltip（前后端判定一致） |
+| 🟡-8 | `clearLogs` 增加 IP 级 60 秒限流（前端原有二次确认保留） |
+
+### 未采纳项（附理由）
+
+- **crypto AAD**：改动涉及所有已加密数据，迁移风险 > 收益，保持 `enc:v1:` 前缀格式不变。
+- **getConfig 全量缓存**：会引入配置读取陈旧问题；当前 CPU 热点已由 CryptoKey/formatter 缓存解决。

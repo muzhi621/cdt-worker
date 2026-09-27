@@ -2009,7 +2009,9 @@
             '<span style="display:flex;gap:6px;flex-wrap:wrap">' +
             '<button class="btn btn-ghost btn-sm" type="button" data-refresh="' + esc(a.id) + '">刷新</button>' +
             '<button class="btn btn-ghost btn-sm" type="button" data-start="' + esc(a.id) + '"' + (busy || running ? " disabled" : "") + ">开机</button>" +
-            '<button class="btn btn-ghost btn-sm" type="button" data-stop="' + esc(a.id) + '"' + (busy || !running ? " disabled" : "") + ">关机</button>" +
+            '<button class="btn btn-ghost btn-sm" type="button" data-stop="' + esc(a.id) + '"' +
+              (a.keepAliveBlocked ? ' disabled title="保活已开启，不允许手动关机；可在「账号 → 配置」里关闭该账号的实例保活"'
+                : ((busy || !running) ? " disabled" : "")) + ">关机</button>" +
             '<button class="btn btn-ghost btn-sm" type="button" data-config="' + esc(a.id) + '">配置</button>' +
             "</span></div></article>";
         }).join("");

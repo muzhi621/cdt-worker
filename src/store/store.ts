@@ -32,7 +32,8 @@ export interface Config {
   accounts: Account[];
 }
 
-const DEFAULT_CONFIG: Config = {
+// 全项目唯一的默认配置源：schema.ts 的 settings 默认值也从这里派生，避免两处漂移
+export const DEFAULT_CONFIG: Config = {
   adminPasswordHash: '',
   trafficThreshold: 90,
   shutdownMode: 'StopCharging',
@@ -421,8 +422,9 @@ export async function cleanupExpiredLogs(env: Env, retentionDays: number): Promi
   const result = await env.DB.prepare(
     "DELETE FROM logs WHERE created_at < datetime('now', '-' || ? || ' days')",
   ).bind(String(days)).run();
-  // D1 的 run() 返回 meta.changes 可能不可靠，这里只返回执行状态（0 表示无超期或成功）
-  return 0;
+  // 返回实际删除量。绝大多数 D1 版本对 DELETE 的 meta.changes 是准确的；
+  // 个别版本恒为 0 也只会让调用方看到"删了 0 条"，不影响正确性（清理本身是幂等的）。
+  return result?.meta?.changes ?? 0;
 }
 
 // 清理其他「只增不删」的辅助表，避免长期无限增长逼近 D1 存储上限。
