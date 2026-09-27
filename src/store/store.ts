@@ -420,20 +420,24 @@ export async function saveAccount(env: Env, account: Omit<Account, 'id'> & { id?
   const keepAlive = account.keepAlive === undefined ? true : account.keepAlive;
   if (account.id) {
     await env.DB.prepare(
-      `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, access_key_id_enc=?, access_key_secret_enc=?, site_type=?, max_traffic=?, start_time=?, stop_time=?, schedule_enabled=?, keep_alive=?, shutdown_mode=?, updated_at=datetime('now') WHERE id=?`,
+      `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, access_key_id_enc=?, access_key_secret_enc=?, site_type=?, max_traffic=?, start_time=?, stop_time=?, schedule_enabled=?, keep_alive=?, shutdown_mode=?, updated_at=? WHERE id=?`,
     ).bind(
       name, remark, account.regionId, instanceId,
       akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
-      account.scheduleEnabled ? 1 : 0, keepAlive ? 1 : 0, account.shutdownMode ?? '', account.id,
+      account.scheduleEnabled ? 1 : 0, keepAlive ? 1 : 0, account.shutdownMode ?? '',
+      // 统一用带 Z 后缀的 ISO：datetime('now') 写入的是 UTC 无后缀字符串，前端 new Date
+      // 会按浏览器本地时区解析，东八区恰好差 8 小时（账号卡片「更新 15:30」实为 23:30）
+      new Date().toISOString(), account.id,
     ).run();
     return account.id;
   }
   const result = await env.DB.prepare(
-    `INSERT INTO accounts (name, remark, region_id, instance_id, access_key_id_enc, access_key_secret_enc, site_type, max_traffic, start_time, stop_time, schedule_enabled, keep_alive, shutdown_mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO accounts (name, remark, region_id, instance_id, access_key_id_enc, access_key_secret_enc, site_type, max_traffic, start_time, stop_time, schedule_enabled, keep_alive, shutdown_mode, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).bind(
     name, remark, account.regionId, instanceId,
     akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
     account.scheduleEnabled ? 1 : 0, keepAlive ? 1 : 0, account.shutdownMode ?? '',
+    new Date().toISOString(),
   ).run();
   return Number(result.meta.last_row_id ?? 0);
 }
@@ -458,7 +462,9 @@ export async function updateAccountConfig(env: Env, a: Partial<Account> & { id: 
     (hasKeepAlive ? ', keep_alive=?' : '') +
     (akEnc ? ', access_key_id_enc=?' : '') +
     (skEnc ? ', access_key_secret_enc=?' : '') +
-    `, updated_at=datetime('now') WHERE id=?`;
+    // updated_at 与 updateRuntime 一致用带 Z 的 ISO；datetime('now') 是 UTC 无后缀，
+    // 前端按本地时区解析会差 8 小时（东八区「更新 15:30」实为 23:30 的成因之一）
+    `, updated_at=? WHERE id=?`;
   const vals: unknown[] = [
     name, remark, a.regionId ?? '', a.instanceId ?? '', a.siteType ?? 'china',
     a.maxTraffic ?? 0, a.scheduleEnabled ? 1 : 0, a.startTime ?? '', a.stopTime ?? '', a.shutdownMode ?? '',
@@ -466,6 +472,8 @@ export async function updateAccountConfig(env: Env, a: Partial<Account> & { id: 
   if (hasKeepAlive) vals.push(a.keepAlive ? 1 : 0);
   if (akEnc) vals.push(akEnc);
   if (skEnc) vals.push(skEnc);
+  // updated_at 排在全部动态列之后，与 SQL 拼接顺序一致
+  vals.push(new Date().toISOString());
   vals.push(a.id);
   await env.DB.prepare(sql).bind(...vals).run();
 }

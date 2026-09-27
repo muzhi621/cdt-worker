@@ -1978,12 +1978,18 @@
         if (pct > 0) return "ok";
         return "";
       }
-      function fmtTime(iso) {
+      function fmtTime(iso, withSec) {
         if (!iso) return "—";
-        const d = new Date(iso);
+        // D1 datetime('now') 写入的是 UTC 无时区后缀（"2026-09-27 15:30:12"），new Date
+        // 会按浏览器本地时区解析，东八区恰好差 8 小时（卡片「更新 15:30」实为 23:30）。
+        // 与 relFromNow 相同的兜底：无后缀视为 UTC 补 Z 再解析。
+        let s = String(iso).trim();
+        if (!/[Zz]|[+-]\d\d:?\d\d$/.test(s)) s = s.replace(" ", "T") + "Z";
+        const d = new Date(s);
         if (isNaN(d.getTime())) return "—";
         const pad = (n) => String(n).padStart(2, "0");
-        return pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+        const hm = pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+        return withSec ? hm + ":" + pad(d.getSeconds()) : hm;
       }
 
       async function loadStatus() {
@@ -3005,7 +3011,7 @@
         }
         box.innerHTML = logs.map((l) =>
           '<div class="log-row ' + esc(l.type || "") + '">' +
-          '<span class="lt">' + esc(l.created_at || "") + "</span>" +
+          '<span class="lt">' + esc(fmtTime(l.created_at, true)) + "</span>" +
           '<span class="lm">' + esc(l.message || "") + "</span></div>"
         ).join("");
       }
