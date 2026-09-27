@@ -1,6 +1,6 @@
 // 时区与调度窗口纯函数单测
 import { describe, it, expect } from 'vitest';
-import { dueWithin, inTimeRange, localCycle, stopWindowOver, toZone, zoneFields } from '../src/engine/time';
+import { dueWithin, inTimeRange, localCycle, stopWindowOver, toZone, windowOver, zoneFields } from '../src/engine/time';
 
 describe('dueWithin（定时开关机 2 小时窗口）', () => {
   const WINDOW = 2 * 60 * 60 * 1000;
@@ -79,6 +79,27 @@ describe('stopWindowOver（错过窗口补偿判定）', () => {
   it('非法 stopTime 返回 false', () => {
     expect(stopWindowOver(f(15, 0), '', WINDOW)).toBe(false);
     expect(stopWindowOver(f(15, 0), 'xx:yy', WINDOW)).toBe(false);
+  });
+});
+
+describe('windowOver（通用错过窗口判定：补偿开机与补偿关机共用）', () => {
+  const WINDOW = 2 * 60 * 60 * 1000;
+  const f = (hour: number, minute: number) => ({ hour, minute });
+
+  // 回归：日本2（14:00–01:00 跨天窗口）17:45 仍 Stopped——
+  // 开机窗口 14:00–16:00 已过，必须判为「可补偿」，否则整天不会补开机
+  it('开机窗口过后、仍在运行窗口内 → 可补偿', () => {
+    expect(windowOver(f(17, 45), '14:00', WINDOW)).toBe(true);
+    expect(windowOver(f(16, 1), '14:00', WINDOW)).toBe(true);
+  });
+
+  it('开机窗口内 / 开始前 → 不可补偿（正常路径负责）', () => {
+    expect(windowOver(f(15, 59), '14:00', WINDOW)).toBe(false); // 窗口 14:00–16:00 内
+    expect(windowOver(f(13, 59), '14:00', WINDOW)).toBe(false); // 还没到
+  });
+
+  it('跨天窗口的凌晨段不补偿（02:00 < start 16:00+2h，交由保活兜底）', () => {
+    expect(windowOver(f(0, 30), '16:00', WINDOW)).toBe(false);
   });
 });
 

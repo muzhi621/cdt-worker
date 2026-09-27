@@ -7,7 +7,7 @@ import * as aliyun from '../provider/aliyun';
 import * as store from '../store/store';
 import { deliverEvent, hasActiveChannel, type NotificationEvent, type NotifyConfig } from '../notify/service';
 import { newToken, type Env } from '../security/security';
-import { dueWithin, inTimeRange, localCycle, stopWindowOver, toZone, zoneFields } from './time';
+import { dueWithin, inTimeRange, localCycle, toZone, windowOver, zoneFields } from './time';
 
 // 状态常量（与原 Go 项目一致）
 const StatusStarting = 'Starting';
@@ -242,7 +242,7 @@ export async function processAccount(
   if (account.scheduleEnabled && !statusChangedBySchedule && status === StatusRunning) {
     const stopTime = account.stopTime || '23:00';
     if (!inTimeRange(hhmm, account.startTime || '08:00', stopTime)
-        && stopWindowOver(localFields, stopTime, SCHEDULE_WINDOW_MS)) {
+        && windowOver(localFields, stopTime, SCHEDULE_WINDOW_MS)) {
       const changed = await executeScheduledAction(env, config, account, 'stop', now);
       if (changed) {
         actions.push('scheduled_stop_compensated');
@@ -252,6 +252,31 @@ export async function processAccount(
         statusChangedBySchedule = true;
         await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
         await store.addLog(env, 'warning', `定时关机窗口曾被错过，已补偿执行关机 [${masked(account.accessKeyId)}]`);
+      }
+    }
+  }
+
+  // 错过窗口补偿（开机方向，与上面的关机补偿对称）：开机窗口（start ± 2h）内没有任何
+  // 成功执行（窗口内监控断档、部署重启、指令失败等），而当前已处于运行窗口内、
+  // 实例仍是 Stopped —— 说明今天该开的开没开，补发开机指令，
+  // 否则按量付费实例会一直停机，用户购买的时间窗白白浪费一整天。
+  // 幂等：复用与窗口内执行相同的 action_events 键（schedule:{id}:{date}:start:{startTime}）。
+  //   今天窗口内已成功开过机的（含之后被手动关机的场景）键已存在，recordActionEvent
+  //   返回 false，不会违背用户手动关机的意图重复拉起；补偿失败会删键、下轮自动重试。
+  // 跨天窗口（如 16:00–02:00）的凌晨段不补偿：开机窗口属于昨天，日期归属复杂且价值低，
+  // 交由保活兜底；此处只在「今天的开机窗口已过、且仍在今天窗口内」时补。
+  if (account.scheduleEnabled && !statusChangedBySchedule && status === StatusStopped) {
+    const startTime = account.startTime || '08:00';
+    if (inTimeRange(hhmm, startTime, account.stopTime || '23:00')
+        && !dueWithin(local, startTime, SCHEDULE_WINDOW_MS)
+        && windowOver(localFields, startTime, SCHEDULE_WINDOW_MS)) {
+      const changed = await executeScheduledAction(env, config, account, 'start', now);
+      if (changed) {
+        actions.push('scheduled_start_compensated');
+        status = StatusStarting;
+        statusChangedBySchedule = true;
+        await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
+        await store.addLog(env, 'warning', `定时开机窗口曾被错过，已补偿执行开机 [${masked(account.accessKeyId)}]`);
       }
     }
   }

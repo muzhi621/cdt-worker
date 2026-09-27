@@ -104,13 +104,19 @@ export function inTimeRange(current: string, start: string, end: string): boolea
   return current >= start || current < end;
 }
 
+// 配置时刻 + 容忍窗口是否已过（通用判定，分钟比较）：供「错过窗口补偿」使用。
+// 补偿关机与补偿开机共用：now 的墙钟分钟 > time + 窗口时长 → 窗口已彻底错过。
+export function windowOver(fields: { hour: number; minute: number }, time: string, windowMs: number): boolean {
+  const [h, m] = time.split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return false;
+  const targetMin = h * 60 + m;
+  const nowMin = fields.hour * 60 + fields.minute;
+  return nowMin > targetMin + Math.floor(windowMs / 60000);
+}
+
 // 关机窗口是否已结束（同一天内）：now 的墙钟分钟 > stopTime + 窗口时长。
 // 供「错过窗口补偿」使用——只在关机窗口结束后的当天补执行，跨天后不再追溯
 //（隔天仍 Running 的实例属于手动/保活意图，不强行关回）。
 export function stopWindowOver(fields: { hour: number; minute: number }, stopTime: string, windowMs: number): boolean {
-  const [h, m] = stopTime.split(':').map(Number);
-  if (isNaN(h) || isNaN(m)) return false;
-  const stopMin = h * 60 + m;
-  const nowMin = fields.hour * 60 + fields.minute;
-  return nowMin > stopMin + Math.floor(windowMs / 60000);
+  return windowOver(fields, stopTime, windowMs);
 }
