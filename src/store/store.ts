@@ -444,13 +444,13 @@ export async function recordActionEvent(
   state: string,
   detail = '',
 ): Promise<boolean> {
-  const existing = await env.DB.prepare('SELECT key FROM action_events WHERE key = ?').bind(key).first();
-  if (existing) return false;
+  // 直接 INSERT OR IGNORE，用 meta.changes 判胜负：省掉原来"先 SELECT 再 INSERT"的一次读，
+  // 且唯一键冲突仍由数据库兜底，语义不变（高并发下不会重复占位）。
   try {
-    await env.DB.prepare(
-      'INSERT INTO action_events (key, account_id, type, state, detail) VALUES (?,?,?,?,?)',
+    const res = await env.DB.prepare(
+      'INSERT OR IGNORE INTO action_events (key, account_id, type, state, detail) VALUES (?,?,?,?,?)',
     ).bind(key, accountId, type, state, detail).run();
-    return true;
+    return (res?.meta?.changes ?? 0) > 0;
   } catch {
     return false; // 唯一键冲突视为已存在
   }
@@ -543,4 +543,63 @@ export async function markOutboxRetry(env: Env, id: number, error: string, retry
     "UPDATE notification_outbox SET error = ?, available_at = unixepoch() + ?, updated_at = unixepoch() WHERE id = ?",
   ).bind(error.slice(0, 500), retrySeconds, id).run();
   return 'retry';
+}
+
+// ---------- API Keys ----------
+// 说明：明文 token 只在创建时返回一次，库中只存 tokenHash（与会话 token 同一哈希口径）。
+export interface ApiKeyRow {
+  id: number;
+  name: string;
+  scopes: string[];
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+}
+
+export async function listApiKeys(env: Env): Promise<ApiKeyRow[]> {
+  const rows = await env.DB.prepare(
+    'SELECT id, name, scopes, created_at, last_used_at, expires_at, revoked_at FROM api_keys ORDER BY id DESC',
+  ).all();
+  return (rows.results ?? []).map((r) => {
+    const row = r as Record<string, unknown>;
+    let scopes: string[] = [];
+    try { scopes = JSON.parse(String(row.scopes || '[]')); } catch { /* empty */ }
+    return {
+      id: Number(row.id),
+      name: String(row.name ?? ''),
+      scopes,
+      created_at: String(row.created_at ?? ''),
+      last_used_at: row.last_used_at ? String(row.last_used_at) : null,
+      expires_at: row.expires_at ? String(row.expires_at) : null,
+      revoked_at: row.revoked_at ? String(row.revoked_at) : null,
+    };
+  });
+}
+
+// 返回明文 token（仅此一次）；调用方必须立即展示给用户
+export async function createApiKey(
+  env: Env,
+  name: string,
+  scopes: string[],
+  expiresAt: string | null,
+  tokenPlain: string,
+  tokenHashValue: string,
+): Promise<number> {
+  const res = await env.DB.prepare(
+    'INSERT INTO api_keys (name, token_hash, scopes, expires_at) VALUES (?,?,?,?)',
+  ).bind(name, tokenHashValue, JSON.stringify(scopes), expiresAt).run();
+  return Number(res?.meta?.last_row_id ?? 0);
+}
+
+export async function deleteApiKey(env: Env, id: number): Promise<boolean> {
+  const res = await env.DB.prepare('DELETE FROM api_keys WHERE id = ?').bind(id).run();
+  return (res?.meta?.changes ?? 0) > 0;
+}
+
+// 命中鉴权时刷新 last_used_at；写失败不影响请求（仅用于展示，不做重试）
+export async function touchApiKey(env: Env, hash: string): Promise<void> {
+  try {
+    await env.DB.prepare('UPDATE api_keys SET last_used_at = datetime(\'now\') WHERE token_hash = ?').bind(hash).run();
+  } catch { /* 忽略 */ }
 }

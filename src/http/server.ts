@@ -19,6 +19,9 @@ type Context = { env: Env; request: Request; params: Record<string, string> };
 // 幂等方法不做 CSRF 校验（无副作用）
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+// API Key 最近一次「已刷新 last_used_at」的时间戳（isolate 内有效，用于写库节流）
+const apiKeyUseCache = new Map<string, number>();
+
 // index.html 的 ETag（每个 isolate 只算一次，之后复用）
 let cachedETag = '';
 async function htmlETag(): Promise<string> {
@@ -91,6 +94,13 @@ async function authenticate(env: Env, request: Request): Promise<Principal | nul
     if (r.expires_at && new Date(String(r.expires_at)).getTime() < Date.now()) return null;
     let scopes: string[] = [];
     try { scopes = JSON.parse(String(r.scopes)); } catch { /* empty */ }
+    // 刷新 last_used_at，但按 isolate 内存做 60s 节流，避免每个请求一次写库
+    const nowMs = Date.now();
+    const last = apiKeyUseCache.get(hash) ?? 0;
+    if (nowMs - last > 60_000) {
+      apiKeyUseCache.set(hash, nowMs);
+      void store.touchApiKey(env, hash);
+    }
     return { admin: false, scopes: new Set(scopes) };
   }
 
@@ -142,6 +152,9 @@ const routes: { method: string; pattern: string; scope?: string; handler: (ctx: 
   { method: 'GET', pattern: '/api/v1/logs', scope: 'admin', handler: logsHandler },
   { method: 'DELETE', pattern: '/api/v1/logs', scope: 'admin', handler: clearLogsHandler },
   { method: 'POST', pattern: '/api/v1/notify/test', scope: 'admin', handler: notifyTestHandler },
+  { method: 'GET', pattern: '/api/v1/system/api-keys', scope: 'admin', handler: listApiKeysHandler },
+  { method: 'POST', pattern: '/api/v1/system/api-keys', scope: 'admin', handler: createApiKeyHandler },
+  { method: 'DELETE', pattern: '/api/v1/system/api-keys/:id', scope: 'admin', handler: deleteApiKeyHandler },
 ];
 
 async function setup(ctx: Context): Promise<Response> {
@@ -211,24 +224,31 @@ async function login(ctx: Context): Promise<Response> {
   if (!valid) {
     await ctx.env.DB.prepare('INSERT INTO login_attempts (ip) VALUES (?)').bind(ip).run();
     await store.addLog(ctx.env, 'warning', '管理员登录失败 [IP: ' + ip + ']');
-    // 环境变量恢复密码的可用性只对"尝试过登录的人"披露，不再通过 init-status 暴露
+    // 登录失败响应是攻击者完全可控的路径，绝不能在此处广播 ADMIN_PASSWORD 是否已设置
+    // （等于持续通报"后门是否开启"）。可用性只在成功登录的响应里返回。
     return json({
       error: { code: 'invalid_credentials', message: '密码错误' },
-      env_password_available: envPassword(ctx.env) !== '',
+      env_password_available: false,
     }, 401);
   }
 
   // 用环境变量密码登录成功：回写 D1 哈希，使密码与会话状态一致
   if (viaEnvPassword) {
-    if (password.length >= 10) {
-      await store.setPasswordHash(ctx.env, await hashPassword(password));
+    // 短密码不回写哈希会造成"双密码体系"：用户以为换成功，旧的 D1 哈希依然有效 → 影子后门。
+    // 直接拒绝，逼用户把 ADMIN_PASSWORD 设成 >=10 位，杜绝该分支。
+    if (password.length < 10) {
       await store.addLog(ctx.env, 'audit',
-        '使用环境变量 ADMIN_PASSWORD 登录成功，管理员密码已同步为该值 [IP: ' + ip + ']。'
-        + '建议尽快到 Cloudflare Dashboard 删除 ADMIN_PASSWORD 环境变量——'
-        + '留着它等于永久保留一个明文后门，任何人拿到该值即可进入系统');
-    } else {
-      await store.addLog(ctx.env, 'audit', '使用环境变量 ADMIN_PASSWORD 登录成功（密码长度不足 10 位，未同步到 D1）[IP: ' + ip + ']');
+        'ADMIN_PASSWORD 长度不足 10 位，拒绝用于登录 [IP: ' + ip + ']。'
+        + '请到 Cloudflare Dashboard 把 ADMIN_PASSWORD 改为 10 位以上后重试');
+      return error('weak_env_password',
+        'ADMIN_PASSWORD 长度不足 10 位，拒绝使用该凭据登录；请到 Cloudflare Dashboard 修改 ADMIN_PASSWORD 为 10 位以上后重试。',
+        400);
     }
+    await store.setPasswordHash(ctx.env, await hashPassword(password));
+    await store.addLog(ctx.env, 'audit',
+      '使用环境变量 ADMIN_PASSWORD 登录成功，管理员密码已同步为该值 [IP: ' + ip + ']。'
+      + '建议尽快到 Cloudflare Dashboard 删除 ADMIN_PASSWORD 环境变量——'
+      + '留着它等于永久保留一个明文后门，任何人拿到该值即可进入系统');
   }
 
   const { token, csrf } = await createSession(ctx.env, ctx.request);
@@ -439,8 +459,21 @@ async function refresh(ctx: Context): Promise<Response> {
   const config = await store.getConfig(ctx.env);
   const account = config.accounts.find((a) => a.id === id);
   if (!account) return error('account_not_found', '账号不存在', 404);
+
+  // 该接口走 force=true，绕过 runMonitorCycle 的防抖与槽位抢占，连点即可把阿里云 RPC
+  // 和通知通道打爆（会触发 Throttling.User 并污染其它账号）。按账号做分钟级节流。
+  const minuteKey = 'refresh:' + id + ':' + minuteStamp();
+  if (!(await store.recordActionEvent(ctx.env, minuteKey, id, 'refresh', 'attempting', ''))) {
+    return error('too_many_requests', '刷新过于频繁，请 1 分钟后再试', 429);
+  }
+
   const result = await engine.processAccount(ctx.env, account, true);
   return json({ job: result }, 202);
+}
+
+// "YYYYMMDDHHmm"，用于各类分钟/小时级幂等键与限流键
+function minuteStamp(now = new Date()): string {
+  return now.toISOString().slice(0, 16).replace(/[-:T]/g, '');
 }
 
 async function controlHandler(ctx: Context): Promise<Response> {
@@ -482,6 +515,61 @@ function toZoneString(utc: string, timezone: string): string {
   } catch {
     return utc;
   }
+}
+
+// ---------- API Keys（只读展示 / 创建 / 吊销） ----------
+// 与路由表中实际引用的 scope 保持一致（未使用的 scope 不列出，避免再造一个死权限）
+const API_KEY_SCOPES = ['widget:read', 'instance:control'];
+
+async function listApiKeysHandler(ctx: Context): Promise<Response> {
+  const keys = await store.listApiKeys(ctx.env);
+  return json({ keys, scopes: API_KEY_SCOPES });
+}
+
+async function createApiKeyHandler(ctx: Context): Promise<Response> {
+  if (!allowRate('apikey:' + clientIP(ctx.request), 10, 60_000)) {
+    return error('rate_limited', '操作过于频繁，请稍后再试', 429);
+  }
+  const body = await ctx.request.json().catch(() => null);
+  if (!body || typeof body !== 'object') return error('invalid_request', 'invalid JSON', 400);
+  const b = body as Record<string, unknown>;
+
+  const name = String(b.name ?? '').trim().slice(0, 40);
+  if (!name) return error('invalid_request', '请填写名称', 400);
+
+  const rawScopes = Array.isArray(b.scopes) ? b.scopes.map((s) => String(s)) : [];
+  // 白名单过滤：未知 scope 直接丢弃，避免自建 key 声明不存在的权限造成误导
+  const scopes = rawScopes.filter((s) => API_KEY_SCOPES.includes(s));
+  if (scopes.length === 0) {
+    return error('invalid_request', '请至少选择一个有效权限：' + API_KEY_SCOPES.join(' / '), 400);
+  }
+
+  let expiresAt: string | null = null;
+  if (b.expiresDays != null && b.expiresDays !== '') {
+    const days = parseInt(String(b.expiresDays), 10);
+    if (Number.isFinite(days) && days > 0) {
+      expiresAt = new Date(Date.now() + days * 86_400_000).toISOString();
+    }
+  }
+
+  const tokenPlain = 'cdt_' + newToken(24);
+  const hash = await tokenHash(tokenPlain);
+  await store.createApiKey(ctx.env, name, scopes, expiresAt, tokenPlain, hash);
+  await store.addLog(ctx.env, 'audit', '创建 API Key：' + name + ' [' + scopes.join(',') + ']');
+  // 明文仅在本次响应返回，服务端不再保存
+  return json({ success: true, token: tokenPlain, name, scopes, expires_at: expiresAt }, 201);
+}
+
+async function deleteApiKeyHandler(ctx: Context): Promise<Response> {
+  if (!allowRate('apikey-del:' + clientIP(ctx.request), 20, 60_000)) {
+    return error('rate_limited', '操作过于频繁，请稍后再试', 429);
+  }
+  const id = parseInt(ctx.params.id, 10);
+  if (!Number.isFinite(id)) return error('invalid_request', 'id 无效', 400);
+  const ok = await store.deleteApiKey(ctx.env, id);
+  if (!ok) return error('not_found', 'API Key 不存在或已删除', 404);
+  await store.addLog(ctx.env, 'audit', '吊销 API Key：#' + id);
+  return json({ success: true });
 }
 
 async function clearLogsHandler(ctx: Context): Promise<Response> {

@@ -242,7 +242,8 @@ export async function processAccount(
       const changed = await executeScheduledAction(env, config, account, 'stop', now);
       if (changed) {
         actions.push('scheduled_stop_compensated');
-        account.instanceStatus = StatusStopping;
+        // 只改局部变量 status：account 是调用方持有的共享对象（config.accounts 同一引用），
+        // 写它会污染 runMonitorCycle 批次间状态。
         status = StatusStopping;
         statusChangedBySchedule = true;
         await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());

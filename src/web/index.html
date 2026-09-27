@@ -319,6 +319,16 @@
     .card-head h2 { font-size: 16.5px; font-weight: 650; }
     .card-head .spacer { flex: 1 1 auto; }
     .card-desc { margin-top: 4px; font-size: 13px; color: var(--muted); }
+    .badge {
+      display: inline-block; padding: 1px 7px; border-radius: 999px;
+      font-size: 11px; font-weight: 700; vertical-align: middle;
+      background: var(--surface-3); color: var(--muted); border: 1px solid var(--border);
+    }
+    .badge.danger {
+      background: color-mix(in srgb, var(--danger) 14%, transparent);
+      color: var(--danger);
+      border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+    }
     .section-title {
       display: flex; align-items: center; gap: 8px;
       font-size: 12px; font-weight: 700; letter-spacing: 0.1em;
@@ -809,6 +819,10 @@
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" data-page-node-id="XihEmagGTRBEkEEoMCxCHP"><path d="M4 4h16v16H4z" data-page-node-id="XnZeKsE38GpCoHlLWCGHxA"/><path d="M8 9h8M8 13h8M8 17h5" data-page-node-id="FLhPf7hqWhKV9UjNuhnyKG"/></svg>
         日志
       </button>
+      <button class="tab" role="tab" type="button" data-tab="apikeys" aria-selected="false">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2 15 8"/><path d="M10.5 12.5 3 20l1 1 7.5-7.5"/><path d="m5.5 14.5 4 4"/><path d="M15 5l4-4 4 4-4 4"/></svg>
+        密钥
+      </button>
     </div>
 
     <div class="bottom-nav" role="tablist" aria-label="主导航（移动端）" data-page-node-id="oOPLR4ASfZ9tPAoGLOpA4c">
@@ -818,6 +832,8 @@
       <button type="button" data-tab="notify" aria-selected="false" data-page-node-id="NOTIFY-TAB-MOBILE"><span class="ic" data-page-node-id="NOTIFY-TAB-MICO"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="NOTIFY-TAB-MP1"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" data-page-node-id="NOTIFY-TAB-MP2"/><path d="M13.7 21a2 2 0 0 1-3.4 0" data-page-node-id="NOTIFY-TAB-MP3"/></svg></span>通知</button>
       <button type="button" data-tab="logs" aria-selected="false" data-page-node-id="beEnc5JPHtLoruYa9lwBNK"><span class="ic" data-page-node-id="PIdVHE9lGUCo9gasmagBdM"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="zAX2aBl8lMDLA7OUYhzOZi"><path d="M4 4h16v16H4z" data-page-node-id="jxGQjR9PwBNRvfY67M1Rk6"/><path d="M8 9h8M8 13h8M8 17h5" data-page-node-id="PakoQ01ymsnjIm5xW3NjQE"/></svg></span>日志</button>
     </div>
+
+    <!-- 移动端底部导航保持 5 项：密钥页可通过哈希 #apikeys 直达，避免挤占布局 -->
 
     <!-- 状态 -->
     <section id="tab-status" role="tabpanel" aria-label="状态" data-page-node-id="D9DDFzlIH2Zd6IerKK0e6t">
@@ -1418,6 +1434,53 @@
       </div>
     </section>
 
+    <!-- API 密钥 -->
+    <section id="tab-apikeys" class="hidden" role="tabpanel" aria-label="API 密钥">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>API 密钥</h2>
+            <p class="card-desc">为第三方程序或面板签发只读/受控令牌。明文密钥只在创建时显示一次，请立即保存。</p>
+          </div>
+          <span class="spacer"></span>
+          <button class="btn btn-primary btn-sm" type="button" id="apikey-new">新建密钥</button>
+        </div>
+
+        <div id="apikey-new-box" class="hidden" style="margin-bottom:14px">
+          <div class="form-grid">
+            <div class="field">
+              <label for="apikey-name">名称</label>
+              <input id="apikey-name" class="control" type="text" maxlength="40" placeholder="例如：Grafana / 自建面板" />
+            </div>
+            <div class="field">
+              <label for="apikey-expire">有效期（天，留空为长期有效）</label>
+              <input id="apikey-expire" class="control" type="number" min="1" max="3650" placeholder="不填即永不过期" />
+            </div>
+          </div>
+          <div class="field" style="margin-top:10px">
+            <label>权限</label>
+            <label class="check" for="apikey-scope-read"><input type="checkbox" id="apikey-scope-read" value="widget:read" checked /> widget:read — 读取概览 / 账号历史</label>
+            <label class="check" for="apikey-scope-ctrl" style="margin-top:4px"><input type="checkbox" id="apikey-scope-ctrl" value="instance:control" /> instance:control — 手动刷新与开机/关机</label>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+            <button class="btn btn-primary btn-sm" type="button" id="apikey-create">确认创建</button>
+            <button class="btn btn-ghost btn-sm" type="button" id="apikey-cancel">取消</button>
+          </div>
+        </div>
+
+        <div id="apikey-token-box" class="hidden" style="margin:12px 0">
+          <div class="hint ok">密钥已生成，请立即复制保存——离开此页面后无法再次查看。</div>
+          <div class="code-wrap" style="margin-top:8px">
+            <button class="copy-btn" type="button" data-copy-text="" aria-label="复制密钥">复制图标</button>
+            <pre><code id="apikey-token"></code></pre>
+          </div>
+        </div>
+
+        <div id="apikey-list" class="log-list" style="border:0;padding:0"></div>
+        <p class="hint">调用方式：<code>Authorization: Bearer &lt;密钥&gt;</code> 或 <code>X-API-Key: &lt;密钥&gt;</code>。密钥仅存哈希，服务端无法找回。</p>
+      </div>
+    </section>
+
     <!-- 日志 -->
     <section id="tab-logs" class="hidden" role="tabpanel" aria-label="日志" data-page-node-id="C8dJg4cXdyPYtXBlhTz5v6">
       <div class="card" data-page-node-id="gOUumsSm9gMAHlr6259R7L">
@@ -1544,7 +1607,7 @@
       }
       readCsrfCookie();
       let logTimer = null;
-      const TABS = ["status", "accounts", "settings", "notify", "logs"];
+      const TABS = ["status", "accounts", "settings", "notify", "logs", "apikeys"];
 
       /* ---------- 主题 ---------- */
       const themeBtn = $("theme-toggle");
@@ -1867,6 +1930,7 @@
         if (tab === "logs") loadLogs();
         if (tab === "accounts") loadAccountsManage();
         if (tab === "settings") fillCronUrl();
+        if (tab === "apikeys") loadApiKeys();
         try { location.hash = tab; } catch (e) { /* ignore */ }
       }
       document.querySelectorAll(".tab, .bottom-nav button").forEach((b) => {
@@ -2651,6 +2715,97 @@
         const url = window.location.origin + "/__cron?source=http";
         $("cron-url").value = url;
       }
+
+      /* ---------- API 密钥 ---------- */
+      function escHtml(s) {
+        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+      }
+      function relFromNow(iso) {
+        if (!iso) return "—";
+        const t = Date.parse(String(iso).replace(" ", "T") + (/[Zz]|[+-]\d\d:\d\d$/.test(String(iso)) ? "" : "Z"));
+        if (isNaN(t)) return String(iso);
+        const mins = Math.floor((Date.now() - t) / 60000);
+        if (mins < 1) return "刚刚";
+        if (mins < 60) return mins + " 分钟前";
+        const h = Math.floor(mins / 60);
+        if (h < 24) return h + " 小时前";
+        return Math.floor(h / 24) + " 天前";
+      }
+
+      async function loadApiKeys() {
+        const box = $("apikey-list");
+        if (!box) return;
+        const r = await apiJson("/api/v1/system/api-keys");
+        if (!r.ok) { box.innerHTML = '<p class="hint danger">' + escHtml(errText(r.data)) + "</p>"; return; }
+        const keys = (r.data && r.data.keys) || [];
+        if (keys.length === 0) {
+          box.innerHTML = '<p class="hint">还没有任何密钥。点击右上角「新建密钥」为面板或脚本签发一个。</p>';
+          return;
+        }
+        box.innerHTML = keys.map(function (k) {
+          const revoked = !!k.revoked_at;
+          const expired = k.expires_at && Date.parse(k.expires_at) < Date.now();
+          const dead = revoked || expired;
+          return '<div class="trigger-row">' +
+            '<div class="trigger-main">' +
+            '<div class="trigger-name">' + escHtml(k.name) + (dead && revoked ? ' <span class="badge">已吊销</span>' : "") + (dead && !revoked ? ' <span class="badge danger">已过期</span>' : "") + "</div>" +
+            '<div class="trigger-meta">权限：' + escHtml((k.scopes || []).join(", ")) +
+            " · 创建 " + relFromNow(k.created_at) +
+            " · 最近使用 " + relFromNow(k.last_used_at) +
+            (k.expires_at ? " · 到期 " + relFromNow(k.expires_at) : "") + "</div>" +
+            "</div>" +
+            (dead ? "" : '<button class="btn btn-danger btn-sm" type="button" data-apikey-del="' + k.id + '">吊销</button>') +
+            "</div>";
+        }).join("");
+        box.querySelectorAll("[data-apikey-del]").forEach(function (b) {
+          b.onclick = async function () {
+            if (!confirm("确定吊销该密钥？使用该密钥的程序会立即失去访问权限。")) return;
+            const d = await apiJson("/api/v1/system/api-keys/" + b.dataset.apikeyDel, { method: "DELETE" });
+            toast(d.ok ? "密钥已吊销" : errText(d.data), d.ok ? "ok" : "err");
+            if (d.ok) loadApiKeys();
+          };
+        });
+      }
+
+      function resetApiKeyBoxes() {
+        $("apikey-new-box").classList.add("hidden");
+        $("apikey-token-box").classList.add("hidden");
+      }
+
+      $("apikey-new").addEventListener("click", function () {
+        const box = $("apikey-new-box");
+        const showing = box.classList.contains("hidden");
+        if (showing) {
+          $("apikey-name").value = "";
+          $("apikey-expire").value = "";
+          $("apikey-scope-read").checked = true;
+          $("apikey-scope-ctrl").checked = false;
+        }
+        box.classList.toggle("hidden", !showing);
+        if (showing) $("apikey-name").focus();
+      });
+      $("apikey-cancel").addEventListener("click", resetApiKeyBoxes);
+      $("apikey-create").addEventListener("click", async function () {
+        const name = $("apikey-name").value.trim();
+        if (!name) { toast("请填写名称", "err"); return; }
+        const scopes = [];
+        if ($("apikey-scope-read").checked) scopes.push("widget:read");
+        if ($("apikey-scope-ctrl").checked) scopes.push("instance:control");
+        if (scopes.length === 0) { toast("请至少勾选一个权限", "err"); return; }
+        const expires = $("apikey-expire").value.trim();
+        const r = await apiJson("/api/v1/system/api-keys", {
+          method: "POST",
+          body: JSON.stringify({ name, scopes, expiresDays: expires === "" ? null : parseInt(expires, 10) }),
+        });
+        if (!r.ok) { toast(errText(r.data), "err"); return; }
+        $("apikey-token").textContent = r.data.token;
+        const copyBtn = document.querySelector("#apikey-token-box .copy-btn");
+        if (copyBtn) copyBtn.onclick = function () { copyText(r.data.token, "密钥已复制，请立即保存"); };
+        $("apikey-token-box").classList.remove("hidden");
+        resetApiKeyBoxes();
+        loadApiKeys();
+        toast("密钥已创建，请立即复制保存", "ok");
+      });
 
       function escAttr(s) {
         return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
