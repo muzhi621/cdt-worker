@@ -18,6 +18,7 @@ export interface Config {
   keepAlive: boolean;
   enableBilling: boolean;
   enableScheduleMail: boolean;
+  enableStatusChangeNotify: boolean; // 实例状态 Running <-> Stopped 变化时发送通知
   logRetentionDays: number; // 日志保留天数，超期自动清理
   notifications: {
     telegram: { enabled: boolean; token: string; chatId: string; proxyType: string; proxyUrl: string };
@@ -42,6 +43,7 @@ const DEFAULT_CONFIG: Config = {
   keepAlive: true,
   enableBilling: true,
   enableScheduleMail: false,
+  enableStatusChangeNotify: true,
   logRetentionDays: 30,
   notifications: {
     telegram: { enabled: false, token: '', chatId: '', proxyType: 'none', proxyUrl: '' },
@@ -188,6 +190,9 @@ export async function getConfig(env: Env): Promise<Config> {
   cfg.keepAlive = map.has('keep_alive') ? map.get('keep_alive') === '1' : DEFAULT_CONFIG.keepAlive;
   cfg.enableBilling = map.has('enable_billing') ? map.get('enable_billing') === '1' : DEFAULT_CONFIG.enableBilling;
   cfg.enableScheduleMail = map.get('enable_schedule_mail') === '1';
+  cfg.enableStatusChangeNotify = map.has('enable_status_change_notify')
+    ? map.get('enable_status_change_notify') === '1'
+    : DEFAULT_CONFIG.enableStatusChangeNotify;
   cfg.logRetentionDays = map.has('log_retention_days')
     ? parseInt(map.get('log_retention_days') ?? '', 10) || DEFAULT_CONFIG.logRetentionDays
     : DEFAULT_CONFIG.logRetentionDays;

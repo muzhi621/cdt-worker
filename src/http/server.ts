@@ -337,6 +337,7 @@ async function getConfig(ctx: Context): Promise<Response> {
     keepAlive: config.keepAlive,
     enableBilling: config.enableBilling,
     enableScheduleMail: config.enableScheduleMail,
+    enableStatusChangeNotify: config.enableStatusChangeNotify,
     logRetentionDays: config.logRetentionDays,
     // 每个通道用空对象兜底：即使 D1 里的旧配置缺某个通道键也不会抛错
     notifications: {
@@ -389,6 +390,7 @@ async function saveConfig(ctx: Context): Promise<Response> {
     ['keep_alive', b.keepAlive, b.keepAlive ? '1' : '0'],
     ['enable_billing', b.enableBilling, b.enableBilling ? '1' : '0'],
     ['enable_schedule_mail', b.enableScheduleMail, b.enableScheduleMail ? '1' : '0'],
+    ['enable_status_change_notify', b.enableStatusChangeNotify, b.enableStatusChangeNotify ? '1' : '0'],
   ];
   const settings: [string, string][] = [];
   for (const [key, present, value] of optionalSettings) {

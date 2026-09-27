@@ -3,23 +3,27 @@
 // 一旦断档，实例会错过整天的开关机窗口持续产生费用却无人察觉。
 // 因此每个渠道独立开关 + 记录「上次触发时间」+ 断档告警。
 
-export type TriggerSource = 'github' | 'http' | 'selfhost' | 'native';
+export type TriggerSource = 'github' | 'http' | 'selfhost' | 'native' | 'tencent' | 'aliyun';
 
-export const TRIGGER_SOURCES: TriggerSource[] = ['github', 'http', 'selfhost', 'native'];
+export const TRIGGER_SOURCES: TriggerSource[] = ['github', 'http', 'selfhost', 'native', 'tencent', 'aliyun'];
 
 export const TRIGGER_LABELS: Record<TriggerSource, string> = {
   github: 'GitHub Actions',
   http: '外部定时服务（cron-job.org 等）',
   selfhost: '自建驱动（self-hosted）',
   native: 'Cloudflare 原生 Cron',
+  tencent: '腾讯云云函数 SCF',
+  aliyun: '阿里云函数计算 FC',
 };
 
-// 默认开关：HTTP 类全开，原生 Cron 默认关（免费账号仅 5 个 cron 额度，容易部署失败）
+// 默认开关：HTTP 类与 GitHub 全开，原生 Cron 默认关（免费账号仅 5 个 cron 额度，容易部署失败）
 export const DEFAULT_TRIGGER_SOURCES: Record<TriggerSource, boolean> = {
   github: true,
   http: true,
   selfhost: true,
   native: false,
+  tencent: false,
+  aliyun: false,
 };
 
 // 断档判定阈值（秒）：已启用的渠道超过该时长没有触发即告警（默认 30 分钟）
@@ -32,6 +36,8 @@ export function normalizeSource(raw: string | null | undefined): TriggerSource {
   if (v === 'github' || v === 'github_actions' || v === 'actions') return 'github';
   if (v === 'selfhost' || v === 'self-host' || v === 'self_host' || v === 'driver') return 'selfhost';
   if (v === 'native' || v === 'cron' || v === 'scheduled') return 'native';
+  if (v === 'tencent' || v === 'scf' || v === 'tencent_cloud' || v === 'tencentcloud') return 'tencent';
+  if (v === 'aliyun' || v === 'fc' || v === 'alicloud' || v === 'aliyun_fc') return 'aliyun';
   return 'http';
 }
 

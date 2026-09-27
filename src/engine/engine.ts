@@ -119,6 +119,10 @@ export async function processAccount(
   const local = toZone(now, config.timezone);
   const localFields = zoneFields(now, config.timezone);
 
+  // 记录进入本轮时的实例状态，用于后面「状态变化」检测与通知。
+  // 注意：不要在本函数内直接修改 account.instanceStatus，否则会把后续判断基准破坏掉。
+  const previousStatus = account.instanceStatus;
+
   // 当前配置时区墙钟 HH:mm（定时/保活/补偿共用）
   const hhmm = `${String(localFields.hour).padStart(2, '0')}:${String(localFields.minute).padStart(2, '0')}`;
 
@@ -130,7 +134,6 @@ export async function processAccount(
       const changed = await executeScheduledAction(env, config, account, 'start', now);
       if (changed) {
         actions.push('scheduled_start');
-        account.instanceStatus = StatusStarting;
         statusChangedBySchedule = true;
       }
     }
@@ -138,7 +141,6 @@ export async function processAccount(
       const changed = await executeScheduledAction(env, config, account, 'stop', now);
       if (changed) {
         actions.push('scheduled_stop');
-        account.instanceStatus = StatusStopping;
         statusChangedBySchedule = true;
       }
     }
@@ -146,7 +148,7 @@ export async function processAccount(
 
   // 刷新频率判断
   let interval = config.apiInterval * 1000;
-  if (transient(account.instanceStatus)) interval = 60 * 1000;
+  if (transient(previousStatus)) interval = 60 * 1000;
   const updatedAt = account.updatedAt ? new Date(account.updatedAt).getTime() : 0;
   const due = force || updatedAt === 0 || Date.now() - updatedAt >= interval || localFields.minute === 0 || statusChangedBySchedule;
 
@@ -311,11 +313,35 @@ export async function processAccount(
 
   let message = `[${masked(account.accessKeyId)}] 流量 ${traffic.toFixed(2)}GB / ${account.maxTraffic.toFixed(2)}GB (${percentage.toFixed(2)}%) · 状态 ${status}`;
   if (actions.length > 0) message += ' · 动作 ' + actions.join(',');
-  // heartbeat 降频：默认每 15 分钟一条（整 15 分倍数时写），
-  // 但「状态发生变化」或「本轮产生了动作」时立即写，保证关键变化不丢。
-  // 原来每账号每周期都写，5 账号 × 288 周期 = 1440 条/天，绝大多数是无变化的重复噪声。
-  const statusChanged = status !== account.instanceStatus;
-  if (actions.length > 0 || statusChanged || localFields.minute % 15 === 0) {
+
+  // 状态变化通知：仅在「稳定状态」Running <-> Stopped 之间切换时触发，
+  // 避免 Starting/Stopping 等过渡态刷屏；且不与定时/阈值/保活等专项通知重复。
+  const statusChanged = status !== previousStatus;
+  const hasActionNotification = actions.some((a) =>
+    a === 'scheduled_start' || a === 'scheduled_stop' || a === 'threshold_stop' || a === 'keepalive_start',
+  );
+  const stableChanged = statusChanged &&
+    (status === StatusRunning || status === StatusStopped) &&
+    (previousStatus === StatusRunning || previousStatus === StatusStopped) &&
+    !hasActionNotification;
+  if (stableChanged && config.enableStatusChangeNotify) {
+    const title = status === StatusRunning ? '实例已启动' : '实例已停止';
+    const summary = `账号 ${masked(account.accessKeyId)} 的实例状态变为 ${status}。`;
+    const event = newEvent('status', title, summary, account.id, {
+      ...accountVars(account, config, {
+        traffic, status, percentage, now,
+        timezone: config.timezone, balance: balanceText, cost: costText,
+      }),
+      '变化前状态': previousStatus,
+      '变化后状态': status,
+    });
+    await store.addOutbox(env, 'notify', event);
+    await store.addLog(env, 'info', summary);
+  }
+
+  // heartbeat：每个监控周期都记录，确保用户在日志页能看到「每 5 分钟仍在监控」。
+  // 只有状态/动作完全未变且未刷新数据时，才不重复写——避免在「空转周期」刷屏。
+  if (due || actions.length > 0 || statusChanged) {
     await store.addLog(env, 'heartbeat', message);
   }
   return { accountId: account.id, message, actions };
