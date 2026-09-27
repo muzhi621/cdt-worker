@@ -809,15 +809,58 @@ async function route(env: Env, request: Request): Promise<Response> {
   }
 }
 
-// 下载自建驱动脚本（driver.mjs / install.sh），已按用户填写的配置注入
+// 下载类接口的失败响应：纯文本 + 首行是 shell 注释。
+// 用户习惯把 curl -o 的返回值直接当脚本执行，若错误体是 JSON，
+// 会报出「{error:code:unauthorized}: command not found」这种毫无指向的错。
+function downloadError(status: number, message: string): Response {
+  return new Response(`# 下载失败（HTTP ${status}）：${message}\n`, {
+    status,
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'X-CDT-Download-Error': message,
+    },
+  });
+}
+
+// 下载自建驱动脚本（driver.mjs / install.sh），已按用户填写的配置注入。
+//
+// 鉴权三条通道，任一通过即可：
+//   1) 管理员会话 / admin API Key —— 浏览器点「下载」按钮（原行为）；
+//   2) X-Cron-Secret 头或 ?key= 等于 CRON_SECRET —— 服务器 CLI 场景，curl 拿不到会话 cookie。
+// 脚本内容完全来自查询参数、不含服务端数据，所以 CRON_SECRET 通道不会造成信息泄露；
+// 而真正的触发密钥就写在脚本体内，不知道 CRON_SECRET 的人依旧刷不动监控。
 async function selfhostDownload(ctx: Context): Promise<Response> {
+  const cronSecret = (ctx.env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
   const sp = new URL(ctx.request.url).searchParams;
   const kind = sp.get('type') === 'install' ? 'install' : 'driver';
   const url = (sp.get('url') || 'https://你的域名/__cron?source=selfhost').trim();
   const secret = (sp.get('secret') || '').trim();
   const interval = parseInt(sp.get('interval') || '300', 10) || 300;
+
+  const presented = ctx.request.headers.get('X-Cron-Secret') || sp.get('key') || '';
+  const viaSecret = !!cronSecret && !!presented && await constantTimeEqual(cronSecret, presented);
+  if (!viaSecret) {
+    const principal = await authenticate(ctx.env, ctx.request);
+    if (!principal?.admin) {
+      return downloadError(401, cronSecret
+        ? '未通过鉴权。请登录管理台后重新复制下载链接；或在服务器上带上门槛密钥再取：'
+          + 'curl -H "X-Cron-Secret: <CRON_SECRET>" -o cdt-driver.mjs "<本链接>"'
+        : '未通过鉴权。请登录管理台后重新复制下载链接。');
+    }
+  }
+
+  // 脚本必须带密钥，否则驱动启动即退出。
+  // 链接里没填时，用服务端已配置的 CRON_SECRET 回填（能走到这里的人本就知道该密钥）；
+  // 两边都没有则给不出可用脚本，直接拒绝并说明怎么配。
+  const effectiveSecret = secret || cronSecret;
+  if (!effectiveSecret) {
+    return downloadError(400, '未取得触发密钥：请先在 Worker 侧配置 CRON_SECRET（wrangler secret put CRON_SECRET），'
+      + '然后回到本页填写教程变量中的 CRON_SECRET，再重新复制下载链接。');
+  }
+
   const isInstall = kind === 'install';
-  const body = isInstall ? installScript(url, secret, interval) : driverScript(url, secret, interval);
+  const body = isInstall ? installScript(url, effectiveSecret, interval) : driverScript(url, effectiveSecret, interval);
   const filename = isInstall ? 'cdt-trigger-install.sh' : 'cdt-trigger-driver.mjs';
   return new Response(body, {
     headers: {

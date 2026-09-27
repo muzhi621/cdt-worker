@@ -2427,11 +2427,16 @@
       function renderSelfhostLinks() {
         const box = $("sh-links");
         if (!box) return;
+        const v = tutorialVars();
         const d = selfhostLink("driver");
         const i = selfhostLink("install");
-        const cmd = 'curl -o cdt-driver.mjs "' + d + '" && curl -o install.sh "' + i + '" && sudo bash install.sh';
+        // -f：服务端返回 4xx 时 curl 直接非零退出且不落文件，
+        // 避免把错误提示文本存成脚本，再被 bash 执行出莫名其妙的错误
+        const cmd = 'curl -fsSL -o cdt-driver.mjs "' + d + '" && curl -fsSL -o install.sh "' + i + '" && sudo bash install.sh';
         const copyIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-        box.innerHTML =
+        const warn = v.secret ? "" :
+          '<div class="hint" style="margin-bottom:8px;color:var(--warning)">未填写 CRON_SECRET：将自动使用服务端已配置的密钥；服务端若也未配置，下载会被拒绝（需先 wrangler secret put CRON_SECRET）。</div>';
+        box.innerHTML = warn +
           '<div class="code-wrap">' +
           '<button class="copy-btn" type="button" data-copy-text="' + escAttr(cmd) + '" aria-label="复制一键命令">' + copyIcon + '</button>' +
           '<pre><code>' + cmd.replace(/</g, "&lt;") + '</code></pre>' +

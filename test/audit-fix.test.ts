@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { formatWallClock } from '../src/engine/time';
 import { AliyunError } from '../src/provider/aliyun';
 import { hashPassword, verifyPassword } from '../src/security/security';
+import { driverScript, installScript } from '../src/engine/selfhost';
 
 describe('formatWallClock（日志展示用，复用 formatter 缓存）', () => {
   it('输出 YYYY-MM-DD HH:mm:ss 墙钟格式', () => {
@@ -48,5 +49,43 @@ describe('hashPassword / verifyPassword', () => {
 
   it('损坏的 base64 段降级为验证失败而不是抛错', async () => {
     expect(await verifyPassword('$pbkdf2-sha256$i=12000$$!!!not-base64!!!', 'x'.repeat(20))).toBe(false);
+  });
+});
+
+describe('自建驱动脚本（selfhost）', () => {
+  const URL_ = 'https://cdt.example.com/__cron?source=selfhost';
+
+  it('driver 首行是 shebang，install.sh 的自检校验能通过', () => {
+    const driver = driverScript(URL_, 's3cr3t', 300);
+    expect(driver.split('\n')[0]).toMatch(/^#!/);
+    // install.sh 里有 head -n 1 driver.mjs | grep -q '^#!/'，模板一旦改坏这里会红
+    expect(driver).toContain('#!/usr/bin/env node');
+  });
+
+  it('install.sh 内置内容异常自检，避免把错误提示文本当成脚本执行', () => {
+    const install = installScript(URL_, 's3cr3t', 300);
+    expect(install).toContain('head -n 1 "${DIR}/driver.mjs" | grep -q \'^#!/\'');
+    expect(install).toContain('内容异常');
+  });
+
+  it('密钥与间隔被注入脚本，且单引号被转义', () => {
+    const install = installScript(URL_, "it's-secret", 300);
+    expect(install).toContain("SECRET='it\\'s-secret'");
+    expect(install).toContain('INTERVAL=300');
+    expect(driverScript(URL_, "it's-secret", 300)).toContain("secret: 'it\\'s-secret'");
+  });
+
+  it('配置真正落进 systemd 的 env 文件，而不是留在变量里', () => {
+    const install = installScript(URL_, 's3cr3t', 300);
+    expect(install).toContain("URL='https://cdt.example.com/__cron?source=selfhost'");
+    expect(install).toContain("SECRET='s3cr3t'");
+    expect(install).toContain('CDT_URL=${URL}');
+    expect(install).toContain('CDT_SECRET=${SECRET}');
+    expect(install).toContain('CDT_INTERVAL=${INTERVAL}');
+    expect(install).not.toContain('<你的 CRON_SECRET>');
+  });
+
+  it('间隔过小会被收敛到 30 秒下限', () => {
+    expect(installScript(URL_, 's3cr3t', 1)).toContain('INTERVAL=30');
   });
 });

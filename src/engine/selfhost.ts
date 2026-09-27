@@ -27,7 +27,9 @@ const once = process.env.CDT_ONCE === '1';
 const log = (m) => console.log(\`[\${new Date().toISOString()}] \${m}\`);
 
 if (!secret) {
-  console.error('缺少 CDT_SECRET');
+  console.error('缺少 CDT_SECRET：本次脚本未内置触发密钥，监控无法触发。');
+  console.error('处理方式：回到管理台「设置 → 监控触发源」，把 CRON_SECRET 填入教程变量后重新生成下载链接并重装；');
+  console.error('        或手工配置 环境变量 CDT_SECRET（如 /etc/cdt-trigger.env），改完重启本服务。');
   process.exit(2);
 }
 
@@ -70,6 +72,8 @@ INTERVAL=${Math.max(30, Math.floor(interval))}
 
 [ "$(id -u)" = "0" ] || { echo "请用 root 执行：sudo bash install.sh"; exit 1; }
 [ -f "\${DIR}/driver.mjs" ] || { echo "未找到 driver.mjs，请与本脚本放在同一目录"; exit 1; }
+# 下载失败时服务端返回的是错误提示文本，这里挡住它，避免当成脚本执行
+head -n 1 "\${DIR}/driver.mjs" | grep -q '^#!/' || { echo "driver.mjs 内容异常（不是脚本，可能下载失败被错误内容覆盖），请重新下载后重试"; exit 1; }
 
 mkdir -p "\${TARGET}"
 cp "\${DIR}/driver.mjs" "\${TARGET}/driver.mjs"
