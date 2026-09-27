@@ -2434,8 +2434,11 @@
         // 避免把错误提示文本存成脚本，再被 bash 执行出莫名其妙的错误
         const cmd = 'curl -fsSL -o cdt-driver.mjs "' + d + '" && curl -fsSL -o install.sh "' + i + '" && sudo bash install.sh';
         const copyIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-        const warn = v.secret ? "" :
-          '<div class="hint" style="margin-bottom:8px;color:var(--warning)">未填写 CRON_SECRET：将自动使用服务端已配置的密钥；服务端若也未配置，下载会被拒绝（需先 wrangler secret put CRON_SECRET）。</div>';
+        // 服务端未配 CRON_SECRET 时下载必返 401，必须在命令之前就拦住，
+        // 否则用户只看到一句 curl: (22) 401，完全不知道该去配密钥
+        const warn = triggerState.secretConfigured
+          ? (v.secret ? "" : '<div class="hint" style="margin-bottom:8px;color:var(--warning)">未填写 CRON_SECRET：将自动使用服务端已配置的密钥。</div>')
+          : '<div class="hint" style="margin-bottom:8px;color:var(--danger)">服务端尚未配置 CRON_SECRET，下载会返回 401。请先执行 wrangler secret put CRON_SECRET（内容自定）并重新部署。</div>';
         box.innerHTML = warn +
           '<div class="code-wrap">' +
           '<button class="copy-btn" type="button" data-copy-text="' + escAttr(cmd) + '" aria-label="复制一键命令">' + copyIcon + '</button>' +

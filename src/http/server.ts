@@ -843,10 +843,14 @@ async function selfhostDownload(ctx: Context): Promise<Response> {
   if (!viaSecret) {
     const principal = await authenticate(ctx.env, ctx.request);
     if (!principal?.admin) {
+      // 两种情况差别很大，必须分开说，否则用户只能看到一句没用的「请登录」：
+      //  - 站点没配 CRON_SECRET：自建驱动根本不可能工作，得先去配；
+      //  - 站点配了但请求没带：补上头或 ?key= 即可。
       return downloadError(401, cronSecret
-        ? '未通过鉴权。请登录管理台后重新复制下载链接；或在服务器上带上门槛密钥再取：'
+        ? '未通过鉴权。请登录管理台后重新复制下载链接，或在服务器上带上门槛密钥再取：'
           + 'curl -H "X-Cron-Secret: <CRON_SECRET>" -o cdt-driver.mjs "<本链接>"'
-        : '未通过鉴权。请登录管理台后重新复制下载链接。');
+        : '未通过鉴权，且本站点尚未配置 CRON_SECRET。自建驱动靠外部密钥触发监控，'
+          + '请先执行 wrangler secret put CRON_SECRET 并重新部署，再重试本命令。');
     }
   }
 
