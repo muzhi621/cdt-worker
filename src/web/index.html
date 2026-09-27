@@ -2372,6 +2372,9 @@
               triggerMsg(errText(r.data), "error");
             }
             await loadTriggers();
+            // 测试会真实跑一轮监控，顺手把状态页数据也刷新了，
+            // 否则用户只能看到一句"测试完成"，却看不到「更新」时间跳动，会误以为没生效
+            try { await loadStatus(); } catch (e) { /* 非状态页时忽略 */ }
           });
         });
         const st = $("trigger-state");
