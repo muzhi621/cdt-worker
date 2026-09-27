@@ -130,6 +130,20 @@ export function clampInt(raw: string | undefined, min: number, max: number, fall
   return Math.min(max, Math.max(min, Math.round(n)));
 }
 
+// 与 clampInt 的区别：非法（NaN / 越界）时返回 null 供调用方拒绝（400），而不是悄悄回退。
+// 「未传」语义（undefined / null / 空串）返回 fallback 放行——调用方自行决定是否落库。
+// ⚠️ 回归教训：542c57a 曾在 saveConfig 里把「未传 logRetentionDays」映射成 null 再与
+// 「非法值也是 null」共用同一个 400 判断，导致所有不携带该字段的 /api/v1/config 保存
+// （含账号配置、保活开关）全部被 400 拒绝且界面报「日志保留天数必须在 1~365 之间」。
+// 「未传」与「非法」必须走不同分支，绝不能共用同一个哨兵值。
+export function parseClampedNum(raw: unknown, min: number, max: number, fallback: number): number | null {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null; // 无法解析 → 拒绝
+  if (n < min || n > max) return null;  // 越界 → 拒绝
+  return Math.round(n);
+}
+
 export async function getPasswordHash(env: Env): Promise<string> {
   const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?')
     .bind('admin_password_hash')

@@ -416,21 +416,17 @@ async function saveConfig(ctx: Context): Promise<Response> {
   // （parseInt('1e9') === 1，parseInt('-50') === -50），threshold=-50 会让
   // `percentage >= threshold` 恒真，触发 stop_and_notify 批量停掉所有在线实例。
   // 这里在写库前统一校验并夹取，越界直接拒绝，不给脏值落库的机会。
-  const clampNum = (raw: unknown, min: number, max: number, fallback: number): number | null => {
-    if (raw === undefined || raw === null || raw === '') return fallback;
-    const n = Number(raw);
-    if (!Number.isFinite(n)) return null; // 无法解析 → 拒绝
-    if (n < min || n > max) return null;  // 越界 → 拒绝
-    return Math.round(n);
-  };
-  const trafficThreshold = clampNum(b.trafficThreshold, 1, 100, 90);
+  // 语义（见 store.parseClampedNum）：未传(undefined/null/'') → fallback 放行，
+  // 是否落库由下方「显式传入才写」的各自分支决定；非法/越界 → null → 400。
+  // ⚠️ 两条路径绝不能共用哨兵值：542c57a 曾把 logRetentionDays 的「未传」映射成
+  // null 与非法值合并判断，导致所有不带该字段的保存（含账号配置）全部 400。
+  const trafficThreshold = store.parseClampedNum(b.trafficThreshold, 1, 100, 90);
   if (trafficThreshold === null) return error('invalid_input', '流量阈值必须在 1~100 之间', 400);
-  const apiInterval = clampNum(b.apiInterval, 60, 86400, 600);
+  const apiInterval = store.parseClampedNum(b.apiInterval, 60, 86400, 600);
   if (apiInterval === null) return error('invalid_input', 'API 刷新间隔必须在 60~86400 秒之间', 400);
-  const monitorInterval = clampNum(b.monitorInterval, 1, 1440, 5);
+  const monitorInterval = store.parseClampedNum(b.monitorInterval, 1, 1440, 5);
   if (monitorInterval === null) return error('invalid_input', '监控间隔必须在 1~1440 分钟之间', 400);
-  const logRetentionDays = b.logRetentionDays === undefined
-    ? null : clampNum(b.logRetentionDays, 1, 365, 30);
+  const logRetentionDays = store.parseClampedNum(b.logRetentionDays, 1, 365, 30);
   if (logRetentionDays === null) return error('invalid_input', '日志保留天数必须在 1~365 之间', 400);
 
   // 字符串白名单校验：这几个值会直接进分支判断或时区格式化，非法值常不报错（被 try/catch
