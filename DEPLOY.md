@@ -183,10 +183,24 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && npm install
    ```
 3. 之后 wrangler 命令会自动使用该 token
 
-### Q3：Cron 没触发监控
+### Q3：监控没有自动跑起来
 
-- 检查 Cloudflare 控制台 → 你的 worker → 设置 → Cron 触发器，确认 `*/5 * * * *` 已配置
-- 免费版 Cron 触发也正常可用
+本项目**不使用** Cloudflare 原生 Cron Trigger，调度全部由外部服务请求 `/__cron` 驱动。
+先按「监控触发源」里每个渠道的教程确认外部服务已配置，再看：
+
+- 对应渠道的开关是否为「已开启」，「上次触发」时间戳是否在走动
+- `CRON_SECRET` 是否在 Worker 侧配置（Dashboard → Worker → Settings → Variables and Secrets）
+- 外部服务请求时是否携带了 `X-Cron-Secret` 头（或 `?key=` 参数）且值一致
+
+手动验证：
+
+```bash
+curl -H "X-Cron-Secret: 你的密钥" https://你的地址/__cron
+```
+
+另外若 Dashboard → Worker → Triggers 页看到该 Worker 有残留 cron 条目，
+请在该页面手动删除——wrangler 无法删除手工创建的条目，残留条目的调用会因
+没有 `scheduled` 处理函数而进入失败状态。
 
 ### Q4：主密钥丢了怎么办
 

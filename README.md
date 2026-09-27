@@ -37,7 +37,7 @@ CDT Monitor 的 Cloudflare Worker 移植版：阿里云 CDT 流量监控、ECS �
 ```
 cdt-worker/
 ├── src/
-│   ├── index.ts            # Worker 入口（fetch + scheduled）
+│   ├── index.ts            # Worker 入口（fetch）
 │   ├── provider/aliyun.ts  # 阿里云 RPC 签名 + CDT/ECS/BSS 调用
 │   ├── store/store.ts      # D1 数据访问 + 加密字段
 │   ├── engine/engine.ts    # 监控循环 + 阈值/保活/定时策略
@@ -131,11 +131,11 @@ RAM → 权限策略 → 创建自定义策略（脚本编辑），粘贴以下 
 不启用账单功能时，可删去两条 `bss:` 权限进一步收窄。
 管理台「账号」页底部也提供同一份策略与一键复制。
 
-## 定时监控（外部触发为主，原生 Cron 可选）
+## 定时监控（仅外部触发）
 
-默认主链路使用**外部定时服务请求 `/__cron`**（携带 `CRON_SECRET`，见下），`scheduled()` 入口保留但默认不启用——Cloudflare 免费版每账号仅 5 个 Cron Trigger 额度，额度用尽时 `wrangler deploy` 会报 `error 10072` 导致部署失败。账号额度充足或升级 Paid 后，取消 `wrangler.toml` 里 `[triggers]` 的注释即可切回原生 Cron。
+调度由**外部定时服务请求 `/__cron`**（携带 `CRON_SECRET`，见下）。Cloudflare 原生 Cron Trigger 已彻底移除，`wrangler.toml` 不含 `[triggers]` 段，`src/index.ts` 无 `scheduled()` 出口——免费版 Cron Trigger 额度是账号级 5 个，本项目用不上；且 `[triggers]` 段会触发 `error 10072` 导致部署失败，或报 `The script has no scheduled handler`。详见 [DEPLOY-CRON.md](./DEPLOY-CRON.md)。
 
-两条链路共用防抖 + 原子槽位抢占，同时开启也不会重复执行。
+若 Dashboard → Worker → Triggers 页看到该 Worker 有残留 cron 条目，需在该页面手动删除（wrangler 删不掉手工创建的条目）。
 
 ```
 curl -H "X-Cron-Secret: 你的密钥" https://你的worker地址/__cron

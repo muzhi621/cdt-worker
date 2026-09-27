@@ -2436,8 +2436,11 @@
         const copyIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
         // 服务端未配 CRON_SECRET 时下载必返 401，必须在命令之前就拦住，
         // 否则用户只看到一句 curl: (22) 401，完全不知道该去配密钥
+        // 密钥已配置但教程变量留空：脚本里会自动回填服务端密钥；
+        // 但若实测下载仍 401，说明线上跑的是加 CRON_SECRET 通道之前的旧版本，
+        // 必须 wrangler deploy，光配密钥没用（旧代码根本不认该头/参数）。
         const warn = triggerState.secretConfigured
-          ? (v.secret ? "" : '<div class="hint" style="margin-bottom:8px;color:var(--warning)">未填写 CRON_SECRET：将自动使用服务端已配置的密钥。</div>')
+          ? (v.secret ? "" : '<div class="hint" style="margin-bottom:8px;color:var(--warning)">未填写 CRON_SECRET：将自动使用服务端已配置的密钥。若下载仍返回 401，说明线上还是旧版本，请先 wrangler deploy 后再试。</div>')
           : '<div class="hint" style="margin-bottom:8px;color:var(--danger)">服务端尚未配置 CRON_SECRET，下载会返回 401。请先执行 wrangler secret put CRON_SECRET（内容自定）并重新部署。</div>';
         box.innerHTML = warn +
           '<div class="code-wrap">' +

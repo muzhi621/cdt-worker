@@ -117,10 +117,14 @@ Cloudflare 会开始构建。构建完成后，会显示一个部署地址：
 
 ---
 
-## Cron 触发器说明
+## 定时触发说明
 
-`wrangler.toml` 里已配置 `*/5 * * * *`（每 5 分钟监控一次）。
-通过 GitHub 集成部署时，Cron 配置会从 wrangler.toml 自动读取，无需手动设置。
+本项目**不使用** Cloudflare 原生 Cron Trigger（`wrangler.toml` 不含 `[triggers]` 段，
+`src/index.ts` 也没有 `scheduled` 出口）。原因：免费版 Cron Trigger 额度是账号级 5 个，
+本项目用不上；且配置后会报 `The script has no scheduled handler` 或直接 `error 10072`。
+
+自动监控由**外部定时服务**请求 `/__cron` 驱动，开关与配置见管理台「监控触发源」标签页。
+若 Dashboard → Worker → Triggers 页看到残留的 cron 条目，请在该页面手动删除。
 
 ---
 

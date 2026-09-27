@@ -3,25 +3,28 @@
 // 一旦断档，实例会错过整天的开关机窗口持续产生费用却无人察觉。
 // 因此每个渠道独立开关 + 记录「上次触发时间」+ 断档告警。
 
-export type TriggerSource = 'github' | 'http' | 'selfhost' | 'native' | 'tencent' | 'aliyun';
+// 注意：Cloudflare 原生 Cron Trigger 已彻底移除（含 src/index.ts 的 scheduled() 出口与
+// wrangler.toml 的 [triggers]）。原因：免费版 Cron Trigger 额度是【账号级 5 个】，本项目
+// 改用外部触发后不需要占用它；且 scheduled 事件会额外消耗 CPU 计费时长。
+// 存量数据兼容：老 settings 里可能残留 "native" 键，parseTriggerSources / parseTriggerSeen
+// 都按 TRIGGER_SOURCES 白名单遍历，会被自然忽略，不会报错也不会被读到。
+export type TriggerSource = 'github' | 'http' | 'selfhost' | 'tencent' | 'aliyun';
 
-export const TRIGGER_SOURCES: TriggerSource[] = ['github', 'http', 'selfhost', 'native', 'tencent', 'aliyun'];
+export const TRIGGER_SOURCES: TriggerSource[] = ['github', 'http', 'selfhost', 'tencent', 'aliyun'];
 
 export const TRIGGER_LABELS: Record<TriggerSource, string> = {
   github: 'GitHub Actions',
   http: '外部定时服务（cron-job.org 等）',
   selfhost: '自建驱动（self-hosted）',
-  native: 'Cloudflare 原生 Cron',
   tencent: '腾讯云云函数 SCF',
   aliyun: '阿里云函数计算 FC',
 };
 
-// 默认开关：HTTP 类与 GitHub 全开，原生 Cron 默认关（免费账号仅 5 个 cron 额度，容易部署失败）
+// 默认开关：三个外部渠道全开，两个云函数默认关（按需启用）
 export const DEFAULT_TRIGGER_SOURCES: Record<TriggerSource, boolean> = {
   github: true,
   http: true,
   selfhost: true,
-  native: false,
   tencent: false,
   aliyun: false,
 };
@@ -35,7 +38,8 @@ export function normalizeSource(raw: string | null | undefined): TriggerSource {
   const v = (raw || '').trim().toLowerCase();
   if (v === 'github' || v === 'github_actions' || v === 'actions') return 'github';
   if (v === 'selfhost' || v === 'self-host' || v === 'self_host' || v === 'driver') return 'selfhost';
-  if (v === 'native' || v === 'cron' || v === 'scheduled') return 'native';
+  // 'cron' / 'scheduled' 这两个历史别名不再映射到 native（该渠道已移除），
+  // 按下方兜底归入 http，行为与移除前一致。
   if (v === 'tencent' || v === 'scf' || v === 'tencent_cloud' || v === 'tencentcloud') return 'tencent';
   if (v === 'aliyun' || v === 'fc' || v === 'alicloud' || v === 'aliyun_fc') return 'aliyun';
   return 'http';

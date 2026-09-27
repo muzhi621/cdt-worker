@@ -11,9 +11,13 @@ describe('normalizeSource（来源识别）', () => {
     expect(normalizeSource('GitHub_Actions')).toBe('github');
     expect(normalizeSource('selfhost')).toBe('selfhost');
     expect(normalizeSource('driver')).toBe('selfhost');
-    expect(normalizeSource('native')).toBe('native');
-    expect(normalizeSource('scheduled')).toBe('native');
     expect(normalizeSource('http')).toBe('http');
+  });
+
+  // 原生 Cron 已移除：历史别名 'cron' / 'scheduled' 归入 http，而不是报错或NaN
+  it('原生 Cron 已移除，历史别名降级为 http', () => {
+    expect(normalizeSource('cron')).toBe('http');
+    expect(normalizeSource('scheduled')).toBe('http');
   });
 
   it('未声明/未知值归为 http（兼容 cron-job.org 等既有配置）', () => {
@@ -32,11 +36,21 @@ describe('parseTriggerSources / parseTriggerSeen（配置解析）', () => {
   });
 
   it('只接受布尔值，缺失项用默认补齐', () => {
-    const parsed = parseTriggerSources('{"github":false,"selfhost":true,"native":"yes"}');
+    const parsed = parseTriggerSources('{"github":false,"selfhost":true,"tencent":"yes"}');
     expect(parsed.github).toBe(false);
     expect(parsed.selfhost).toBe(true);
-    expect(parsed.native).toBe(DEFAULT_TRIGGER_SOURCES.native); // 非布尔 → 保持默认
     expect(parsed.http).toBe(DEFAULT_TRIGGER_SOURCES.http);
+  });
+
+  // 原生 Cron 移除后，D1 里存量的 {"native":false} 必须被静默忽略，
+  // 否则老部署的数据读出来会带着一个不存在的渠道，界面多出一行幽灵开关。
+  it('存量数据里的 native 键被忽略，不会污染配置', () => {
+    const parsed = parseTriggerSources('{"native":true,"http":false}');
+    expect('native' in parsed).toBe(false);
+    expect(parsed.http).toBe(false);
+    const seen = parseTriggerSeen('{"native":1700000000,"github":1700000001}');
+    expect('native' in seen).toBe(false);
+    expect(seen.github).toBe(1700000001);
   });
 
   it('时间戳解析：只保留正数，非法数据返回空', () => {

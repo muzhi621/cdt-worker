@@ -30,7 +30,7 @@
                  ├─ 触发源 B: cron-job.org / 自建驱动 → GET /__cron?source=http|selfhost
  [外部定时服务] ──┼─ 触发源 C: 腾讯云 SCF   → ?source=tencent
                  ├─ 触发源 D: 阿里云 FC    → ?source=aliyun
-                 └─ 触发源 E: CF 原生 Cron  → src/index.ts: scheduled()  （默认关闭）
+                 └─（无 CF 原生 Cron：scheduled() 已移除，见下方说明）
                                     │  携带 X-Cron-Secret（constantTimeEqual 校验）
                                     ▼
                           ┌─────────────────────┐
@@ -58,7 +58,7 @@
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│ 接入层  src/index.ts            Worker 入口（fetch + scheduled）│
+│ 接入层  src/index.ts            Worker 入口（仅 fetch）│
 │         src/http/server.ts      路由表 / 鉴权 / CSRF / 错误处理 │
 ├───────────────────────────────────────────────────────────┤
 │ 引擎层  src/engine/engine.ts    监控循环、策略判定、通知编排      │

@@ -73,18 +73,25 @@ https://你的worker地址/__cron   （带 X-Cron-Secret 头）
 
 ---
 
-## 可选增强：原生 Cron Trigger（需账号有余量才建议开启）
+## 关于 Cloudflare 原生 Cron Trigger：本项目的现状
 
-确认额度充足后再启用（Dashboard → Workers → 任一 Worker 的 Triggers 页可见已用数量）：
+**已彻底移除，无需任何操作。** 本项目从一开始就不使用原生 Cron Trigger：
 
-```toml
-[triggers]
-crons = ["*/5 * * * *"]
-```
+| 项目 | 说明 |
+| --- | --- |
+| 额度 | 免费版 Cron Trigger 是**账号级 5 个**（Paid 250 个），本项目不占用，留给账号上其他 Worker |
+| 部署失败 | 账号额度用尽时 `wrangler deploy` 会报 `error 10072`（`has reached the Workers Free limit of 5 cron triggers per account`），整个部署会失败 |
+| 代码 | `src/index.ts` 的 `scheduled()` 出口已删除，`wrangler.toml` 不含 `[triggers]` 段 |
+| CPU | Free 计划 10ms/请求，`scheduled` 事件同样计费；外部触发只在被调用时才计费 |
 
-去掉 `wrangler.toml` 中该段的注释即可，重新 `wrangler deploy` 后 `scheduled()`
-接管调度（不经过 HTTP 层，无需密钥）。外部触发链路同时保持可用。
-升级到 Workers Paid（$5/月）后额度提升到 1000，可放心开启。
+因此：
+
+- `wrangler.toml` **不要**添加 `[triggers]` 段。Cloudflare 会在部署时校验，
+  若 Worker 没有 `scheduled` 导出会直接报错 `The script has no scheduled handler`。
+- Dashboard → Worker → Triggers 页里若看到该 Worker 有残留的 cron 条目
+  （wrangler 无法删除手工创建的条目），请在该页面手动删除。
+- 调度全部交给外部服务，开关见管理台「监控触发源」的五个渠道：
+  GitHub Actions / 外部定时服务 / 自建驱动 / 腾讯云 SCF / 阿里云 FC。
 
 ---
 
