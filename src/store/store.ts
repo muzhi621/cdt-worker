@@ -512,10 +512,11 @@ export async function addLog(env: Env, type: string, message: string): Promise<v
   await env.DB.prepare('INSERT INTO logs (type, message) VALUES (?,?)').bind(type, message).run();
 }
 
-// 业务分类 → 底层日志类型集合（登录/监控/告警，其余归「全部」）
+// 业务分类 → 底层日志类型集合（登录/监控/保活/告警，其余归「全部」）
 const LOG_CATEGORY_TYPES: Record<string, string[]> = {
   auth: ['audit'],
   monitor: ['heartbeat', 'info'],
+  keepalive: ['keepalive'],
   alert: ['warning', 'error'],
 };
 

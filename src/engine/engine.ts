@@ -301,6 +301,7 @@ export async function processAccount(
         status = StatusStarting;
         await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
         actions.push('keepalive_start');
+        await store.addLog(env, 'keepalive', `实例保活启动 [${masked(account.accessKeyId)}]：检测到实例在允许运行时段意外停止，已发送启动指令。`);
         const event = newEvent('keepalive', '实例保活启动', '检测到实例在允许运行时段意外停止，已发送启动指令。', account.id, {
           ...accountVars(account, config, {
             traffic, status, percentage, now,

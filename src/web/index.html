@@ -616,6 +616,7 @@
     .log-row .lt { color: var(--muted); flex: none; }
     .log-row .lm { color: var(--text-2); word-break: break-all; }
     .log-row.audit .lm { color: var(--success); }
+    .log-row.keepalive .lm { color: var(--accent); }
     .log-row.warning .lm { color: var(--warning); }
     .log-row.error .lm { color: var(--danger); }
     .log-row.critical .lm { color: var(--danger); font-weight: 600; }
@@ -1526,6 +1527,7 @@
           <button type="button" class="log-tab" data-cat="all" aria-selected="true">全部</button>
           <button type="button" class="log-tab" data-cat="auth" aria-selected="false">登录</button>
           <button type="button" class="log-tab" data-cat="monitor" aria-selected="false">监控</button>
+          <button type="button" class="log-tab" data-cat="keepalive" aria-selected="false">保活</button>
           <button type="button" class="log-tab" data-cat="alert" aria-selected="false">告警</button>
         </div>
         <div class="log-list" id="logs-content" role="log" aria-live="polite" data-page-node-id="pJKXyzlbKj3r0h0Jk9yDIx"></div>
