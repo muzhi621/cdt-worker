@@ -492,7 +492,12 @@ export async function control(
       || account.instanceStatus === 'Pending') {
     throw new Error(`instance is currently ${account.instanceStatus}`);
   }
-  if (config.keepAlive && action === 'stop') throw new Error('manual shutdown is disabled while keep-alive is enabled');
+  // 与前端按钮禁用状态(keepAliveBlocked)保持同一语义：账号级保活关闭时手动关机必须放行。
+  // 此前这里只看全局开关，导致「关掉账号保活 → 前端解禁关机按钮 → 点下去被后端拒绝」，
+  // 且错误文案还提示用户去关保活，与他刚刚做过的操作完全相反。
+  if (config.keepAlive && account.keepAlive !== false && action === 'stop') {
+    throw new Error('manual shutdown is disabled while keep-alive is enabled');
+  }
   await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
   const status = action === 'start' ? StatusStarting : StatusStopping;
   await store.updateRuntime(env, account.id, account.trafficUsed, status, new Date().toISOString());
@@ -563,6 +568,11 @@ export async function summary(env: Env) {
       // 保活开启时后端会拒绝手动关机（config.keepAlive && 账号级保活未关），
       // 前端据此禁用按钮并给出原因，避免"点了没反应"的困惑
       keepAliveBlocked: config.keepAlive && account.keepAlive !== false,
+      // 保活对该账号是否真的生效（全局开关 AND 账号级未关）。
+      // 账号级保活是「收窄」开关：全局开着、账号关掉时保活完全不执行，而上一版的跳过
+      // 日志也卡在同一个条件上，于是整个「没保活」路径彻底静默——日志里既看不到保活启动，
+      // 也看不到跳过原因，用户无法分辨「保活没开」还是「保活坏了」。必须在界面上显性化。
+      keepAliveOn: config.keepAlive && account.keepAlive !== false,
       balance,
       cost,
       currency,

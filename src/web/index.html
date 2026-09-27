@@ -374,6 +374,9 @@
     .pill.stopped { color: var(--muted); background: var(--surface-3); border-color: var(--border); }
     .pill.transient { color: var(--warning); background: color-mix(in srgb, var(--warning) 15%, transparent); border-color: color-mix(in srgb, var(--warning) 36%, transparent); }
     .pill.danger { color: var(--danger); background: color-mix(in srgb, var(--danger) 14%, transparent); border-color: color-mix(in srgb, var(--danger) 36%, transparent); }
+    /* 账号级保活徽标：此前该状态不可见，账号保活被关闭时保活静默失效且日志无从察觉 */
+    .pill.kalive-on { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
+    .pill.kalive-off { color: var(--muted); background: var(--surface-3); border-color: var(--border); }
     .meter { height: 10px; border-radius: 999px; background: var(--surface-3); overflow: hidden; }
     .meter > i {
       display: block; height: 100%; border-radius: 999px;
@@ -2026,6 +2029,11 @@
             '<div class="acct-stats"><span><b>' + esc(a.used) + "</b> / " + esc(a.total) + ' GB</span><span style="font-weight:600">' + pct.toFixed(1) + "%</span></div>" +
             billLine +
             '<div class="acct-foot"><span>阈值 ' + esc(a.threshold) + "% · 更新 " + fmtTime(a.updatedAt) + "</span>" +
+            '<span class="pill ' + (a.keepAliveOn ? "kalive-on" : "kalive-off") + '" title="' +
+              (a.keepAliveOn
+                ? "实例保活已开启：实例在允许运行时段意外停止时会自动启动"
+                : "实例保活未开启：实例停止后不会自动启动（账号级开关，可在「配置」里开启）") + '">保活' +
+              (a.keepAliveOn ? "开" : "关") + "</span>" +
             '<span style="display:flex;gap:6px;flex-wrap:wrap">' +
             '<button class="btn btn-ghost btn-sm" type="button" data-refresh="' + esc(a.id) + '">刷新</button>' +
             '<button class="btn btn-ghost btn-sm" type="button" data-start="' + esc(a.id) + '"' + (busy || running ? " disabled" : "") + ">开机</button>" +
