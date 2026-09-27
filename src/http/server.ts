@@ -4,6 +4,7 @@
 
 import * as store from '../store/store';
 import * as engine from '../engine/engine';
+import { masked } from '../engine/engine';
 import { hashPassword, verifyPassword, constantTimeEqual, envPassword, newToken, tokenHash, type Env } from '../security/security';
 import { deliverEvent } from '../notify/service';
 import { driverScript, installScript } from '../engine/selfhost';
@@ -11,6 +12,7 @@ import {
   isSourceStale, normalizeSource, TRIGGER_GAP_THRESHOLD_SEC, TRIGGER_LABELS, TRIGGER_SOURCES,
   type TriggerSource,
 } from '../engine/triggers';
+import { formatWallClock } from '../engine/time';
 import type { Account } from '../provider/aliyun';
 import indexHtml from '../web/index.html';
 
@@ -392,6 +394,15 @@ function mergeNotifySecrets(prev: Record<string, Record<string, unknown>> | unde
     }
     delete incoming[flag]; // configured 标志不落库
   }
+  // 自定义模板同理：前端保存时把正文置空提交，若不继承旧值就会把用户辛苦写的模板清空。
+  const nextTemplate = next.template;
+  if (nextTemplate && typeof nextTemplate === 'object') {
+    const incomingBody = String(nextTemplate.body ?? '');
+    if (incomingBody.trim() === '' && prev?.template && typeof prev.template === 'object') {
+      const oldBody = String(prev.template.body ?? '');
+      if (oldBody) nextTemplate.body = oldBody;
+    }
+  }
   return next;
 }
 
@@ -490,31 +501,20 @@ async function logsHandler(ctx: Context): Promise<Response> {
   const page = parseInt(url.searchParams.get('page') || '1', 10) || 1;
   const pageSize = parseInt(url.searchParams.get('pageSize') || '50', 10) || 50;
   const data = await store.listLogs(ctx.env, category, page, pageSize);
-  // D1 的 created_at 是 UTC（datetime('now')），按配置时区转换为本地时间字符串展示
-  let tz = 'Asia/Shanghai';
-  try {
-    const cfg = await store.getConfig(ctx.env);
-    tz = cfg.timezone || tz;
-  } catch { /* 读配置失败用默认时区 */ }
+  // D1 的 created_at 是 UTC（datetime('now')），按配置时区转换为本地时间字符串展示。
+  // 这里只需一个 timezone 字符串，单行查询即可，不必为了它做全量 getConfig（会解密所有账号 AK/SK）。
+  let tz = (await store.getSetting(ctx.env, 'timezone')) || 'Asia/Shanghai';
   const logs = data.logs.map((l) => ({ ...l, created_at: toZoneString(l.created_at, tz) }));
   return json({ ...data, logs, timezone: tz });
 }
 
-// 把 "YYYY-MM-DD HH:mm:ss"（UTC）转为指定时区的同格式字符串
+// 把 "YYYY-MM-DD HH:mm:ss"（UTC）转为指定时区的同格式字符串。
+// 复用 time.ts 的 formatter 缓存——日志页每页 50 条，原来要 new 50 次 Intl.DateTimeFormat（毫秒级）。
 function toZoneString(utc: string, timezone: string): string {
   if (!utc) return utc;
   const ms = Date.parse(utc.replace(' ', 'T') + 'Z');
   if (isNaN(ms)) return utc;
-  try {
-    const parts = new Intl.DateTimeFormat('sv-SE', {
-      timeZone: timezone, hour12: false,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).format(new Date(ms));
-    return parts; // sv-SE 恰好是 YYYY-MM-DD HH:mm:ss
-  } catch {
-    return utc;
-  }
+  return formatWallClock(new Date(ms), timezone);
 }
 
 // ---------- API Keys（只读展示 / 创建 / 吊销） ----------
@@ -927,11 +927,12 @@ export async function runMonitorCycle(
     return json({ monitored: 0, skipped: true, next_in_seconds: debounceSeconds - sinceLastRun });
   }
 
-  // 断档告警：本轮真正执行时才检查（无需在每次防抖跳过的请求上重复查库）。
-  // 优先复用调用方已读到的状态（/__cron 路径），省一次 D1 读。
-  {
-    const state = triggerState ?? await store.getTriggerState(env);
-    await checkTriggerGaps(env, state.sources, state.seen);
+  // 断档告警门控：只在「整点 / 半点」检查。
+  // 断档阈值本身是 30 分钟量级，半点扫一次即可；否则每轮都要 1 次 getTriggerState + 最多 6 次
+  // 探键（288 轮/天 ≈ 1728 次 D1 读），而其中绝大多数是被防抖跳过的空转请求。
+  if (new Date().getUTCMinutes() % 30 === 0) {
+    const gapState = triggerState ?? await store.getTriggerState(env);
+    await checkTriggerGaps(env, gapState.sources, gapState.seen);
   }
   // 原子抢占监控槽位：并发触发（外部服务 + 原生 Cron + 前台按钮同时打过来）时
   // 只有一个能把 last_monitor_run 写成当前时间，其余在此返回 skipped。
@@ -949,7 +950,8 @@ export async function runMonitorCycle(
     for (let j = 0; j < settled.length; j++) {
       const s = settled[j];
       if (s.status === 'fulfilled') results.push(s.value);
-      else await store.addLog(env, 'error', `监控账号失败 [${batch[j].remark || batch[j].accessKeyId}]: ${s.reason}`);
+      // accessKeyId 是完整 AK，不能进日志；有 remark 时优先用备注，否则只记脱敏后的 AK
+      else await store.addLog(env, 'error', `监控账号失败 [${batch[j].remark || masked(batch[j].accessKeyId)}]: ${s.reason}`);
     }
   }
   // 槽位已在进入时原子抢占（tryAcquireMonitorSlot），无需再写 last_monitor_run
@@ -968,10 +970,15 @@ export async function runMonitorCycle(
       await store.cleanupExpiredData(env, config.logRetentionDays);
     }
   } catch { /* 清理失败不影响监控主流程 */ }
-  // 记录本次监控周期到日志，让前台「日志页」能确认定时触发确实在运行
+  // 记录本次监控周期到日志，让前台「日志页」能确认定时触发确实在运行。
+  // 账号级 heartbeat 只在「有动作 / 状态变化」时写，这里补一条周期级汇总，
+  // 这样日志页既能看到"每轮都在跑"，又不会灌进 5 账号 × 288 轮的重复噪声。
   const elapsed = Date.now() - started;
+  const refreshed = results.filter((r) => r && r.refreshed).length;
+  const changed = results.filter((r) => r && r.statusChanged).length;
   if (results.length > 0) {
-    await store.addLog(env, 'info', `监控周期完成，本次处理 ${results.length} 个账号（耗时 ${elapsed} ms）`);
+    await store.addLog(env, 'info',
+      `监控周期完成：处理 ${results.length} 个账号（${refreshed} 个刷新数据，${changed} 个状态有变化，耗时 ${elapsed} ms）`);
   } else {
     await store.addLog(env, 'info', '监控周期已触发，但尚未配置任何账号（请到「账号」页添加）');
   }

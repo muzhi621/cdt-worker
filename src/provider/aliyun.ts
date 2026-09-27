@@ -43,6 +43,38 @@ export function percentEncode(value: string): string {
     .replace(/%2A/gi, '*');
 }
 
+// 阿里云调用异常：带 retryable 标记，让上层重试逻辑有明确类型可判
+// （原来靠给 Error 实例挂任意属性 + as any 断言，类型不安全且网络错误路径容易漏标）
+export class AliyunError extends Error {
+  readonly retryable: boolean;
+  constructor(message: string, retryable = false) {
+    super(message);
+    this.name = 'AliyunError';
+    this.retryable = retryable;
+  }
+}
+
+// HMAC 密钥缓存：每个监控周期要签十几次 API，importKey 属毫秒级开销。
+// AK Secret 在 isolate 内不变，按 secret 缓存 CryptoKey（最多账号数条，LRU 式清理）。
+const hmacKeyCache = new Map<string, CryptoKey>();
+
+async function getHmacKey(secret: string): Promise<CryptoKey> {
+  const cacheKey = secret + '&';
+  const cached = hmacKeyCache.get(cacheKey);
+  if (cached) return cached;
+  const enc = new TextEncoder();
+  const imported = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(cacheKey),
+    { name: 'HMAC', hash: 'SHA-1' },
+    false,
+    ['sign'],
+  );
+  if (hmacKeyCache.size > 64) hmacKeyCache.clear(); // 防止账号数极多时缓存无限增长
+  hmacKeyCache.set(cacheKey, imported);
+  return imported;
+}
+
 // 阿里云 RPC 签名：HMAC-SHA1，等价原 sign()（导出供单测与 Node crypto 交叉验证）
 export async function sign(params: Record<string, string>, secret: string): Promise<string> {
   const keys = Object.keys(params)
@@ -53,13 +85,7 @@ export async function sign(params: Record<string, string>, secret: string): Prom
     .join('&');
   const stringToSign = `POST&%2F&${percentEncode(canonical)}`;
   const enc = new TextEncoder();
-  const keyData = await crypto.subtle.importKey(
-    'raw',
-    enc.encode(secret + '&'),
-    { name: 'HMAC', hash: 'SHA-1' },
-    false,
-    ['sign'],
-  );
+  const keyData = await getHmacKey(secret);
   const sig = await crypto.subtle.sign('HMAC', keyData, enc.encode(stringToSign));
   return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
@@ -119,34 +145,36 @@ async function callOnce(
   params.Signature = await sign(params, secret);
 
   const body = new URLSearchParams(params).toString();
-  const resp = await fetch(`https://${host}/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`https://${host}/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+  } catch (err) {
+    // 网络层错误（DNS/TLS/超时）一定可重试，否则会退化成"直接失败"而不是退避重试
+    throw new AliyunError(`aliyun ${action} network error: ${err}`, true);
+  }
 
   const text = await resp.text();
   let result: Record<string, unknown>;
   try {
     result = JSON.parse(text);
   } catch {
-    const err: any = new Error(`aliyun ${action} invalid response`);
-    err.retryable = resp.status >= 500;
-    throw err;
+    throw new AliyunError(`aliyun ${action} invalid response`, resp.status >= 500);
   }
 
   if (resp.status >= 400) {
-    const err: any = new Error(
+    throw new AliyunError(
       `aliyun ${action} http ${resp.status}: ${compactMessage(result, text)}`,
+      resp.status >= 500 || resp.status === 429,
     );
-    err.retryable = resp.status >= 500 || resp.status === 429;
-    throw err;
   }
   const code = stringValue(result.Code);
   if (code && !isSuccessCode(code)) {
-    const err: any = new Error(`aliyun ${action} ${code}: ${stringValue(result.Message)}`);
-    err.retryable = code.toLowerCase().includes('throttl');
-    throw err;
+    throw new AliyunError(`aliyun ${action} ${code}: ${stringValue(result.Message)}`,
+      code.toLowerCase().includes('throttl'));
   }
   return result;
 }

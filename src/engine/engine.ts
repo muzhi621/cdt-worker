@@ -19,7 +19,7 @@ const StatusUnknown = 'Unknown';
 // 定时开关机命中窗口（2 小时）：容忍外部 cron 延迟，幂等键保证一天只执行一次
 const SCHEDULE_WINDOW_MS = 2 * 60 * 60 * 1000;
 
-function masked(accessKeyId: string): string {
+export function masked(accessKeyId: string): string {
   return accessKeyId.length <= 7 ? accessKeyId + '***' : accessKeyId.slice(0, 7) + '***';
 }
 
@@ -101,6 +101,10 @@ export interface MonitorResult {
   accountId: number;
   message: string;
   actions: string[];
+  // 本轮是否真的刷新了阿里云数据（用于周期级心跳汇总，区分"空转"与"有效监控"）
+  refreshed: boolean;
+  status: string;
+  statusChanged: boolean;
 }
 
 // 处理单个账号的监控，等价 processAccount()
@@ -252,8 +256,9 @@ export async function processAccount(
     }
   }
 
-  // 保活
-  if (config.keepAlive && !overThreshold && !statusChangedBySchedule && status === StatusStopped &&
+  // 保活：全局开关 AND 账号级开关（accounts.keep_alive 此前只写不读，属死字段）
+  if (config.keepAlive && account.keepAlive !== false
+      && !overThreshold && !statusChangedBySchedule && status === StatusStopped &&
       (!account.scheduleEnabled || inTimeRange(hhmm, account.startTime, account.stopTime))) {
     const key = `keepalive:${account.id}:${localFields.year}${String(localFields.month).padStart(2, '0')}${String(localFields.day).padStart(2, '0')}${String(localFields.hour).padStart(2, '0')}${String(localFields.minute).padStart(2, '0')}`;
     const fresh = await store.recordActionEvent(env, key, account.id, 'keepalive', 'attempting', '');
@@ -340,12 +345,12 @@ export async function processAccount(
     await store.addLog(env, 'info', summary);
   }
 
-  // heartbeat：每个监控周期都记录，确保用户在日志页能看到「每 5 分钟仍在监控」。
-  // 只有状态/动作完全未变且未刷新数据时，才不重复写——避免在「空转周期」刷屏。
-  if (due || actions.length > 0 || statusChanged) {
+  // heartbeat：这里只记「本轮真的做了事」的情况，避免 5 账号 × 288 轮 ≈ 1440 条/天的重复噪声。
+  // 「每周期仍在监控」的心跳由 runMonitorCycle 在末尾汇总成一条写。
+  if (actions.length > 0 || statusChanged) {
     await store.addLog(env, 'heartbeat', message);
   }
-  return { accountId: account.id, message, actions };
+  return { accountId: account.id, message, actions, refreshed: due, status, statusChanged };
 }
 
 async function executeScheduledAction(

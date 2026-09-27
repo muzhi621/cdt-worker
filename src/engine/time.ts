@@ -50,6 +50,18 @@ export function toZone(date: Date, timezone: string): Date {
   }
 }
 
+// 以目标时区的“墙钟字符串”形式输出（YYYY-MM-DD HH:mm:ss）。
+// 日志列表/API 展示专用：复用上面同一个 formatter 缓存，避免每条日志 new Intl.DateTimeFormat。
+export function formatWallClock(date: Date, timezone: string): string {
+  try {
+    const f = partsToFields(formatter(timezone).formatToParts(date), date);
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `${f.year}-${p(f.month)}-${p(f.day)} ${p(f.hour)}:${p(f.minute)}:${p(f.second)}`;
+  } catch {
+    return date.toISOString().slice(0, 19).replace('T', ' ');
+  }
+}
+
 // 以目标时区的“墙钟字符串”形式获取当前时间字段（YYYY-MM-DD HH:mm:ss）
 export function zoneFields(date: Date, timezone: string): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
   try {

@@ -29,8 +29,17 @@ function base64UrlDecode(s: string): Uint8Array {
   return bytes;
 }
 
+// CryptoKey 缓存：一轮监控要解密 N 个账号凭据 + 加密，每个都 importKey 属毫秒级开销，
+// 是 CPU 热点之一。主密钥在 isolate 内不变，按密钥字节缓存 CryptoKey 即可（最多 1 条）。
+const keyCache = new Map<string, CryptoKey>();
+
 async function importAesKey(key: Uint8Array): Promise<CryptoKey> {
-  return crypto.subtle.importKey('raw', key, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  const cacheKey = base64UrlEncode(key); // 仅作缓存键，不落盘、不出 isolate
+  const cached = keyCache.get(cacheKey);
+  if (cached) return cached;
+  const imported = await crypto.subtle.importKey('raw', key, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  keyCache.set(cacheKey, imported);
+  return imported;
 }
 
 export async function encrypt(env: Env, plaintext: string): Promise<string> {
@@ -73,9 +82,12 @@ export async function tokenHash(token: string): Promise<string> {
   return base64UrlEncode(new Uint8Array(digest));
 }
 
-// 密码哈希：Worker 无原生 Argon2，用 PBKDF2（SHA-256, 60k 迭代）替代
-// 与原 Go 项目的 Argon2id 语义等价（都用于管理员密码的单向哈希）
-const PBKDF2_ITERATIONS = 60000;
+// 密码哈希：Worker 无原生 Argon2，用 PBKDF2（SHA-256）替代
+// 与原 Go 项目的 Argon2id 语义等价（都用于管理员密码的单向哈希）。
+// 迭代数从 60000 降到 12000：60k 单次登录耗时数十毫秒，很可能撞 Free 计划 10ms/请求上限，
+// 表现为"偶尔登录失败/超时"（请求被 Workers 直接终止）。盐仍是 16 字节随机、哈希 SHA-256，
+// 强度对单管理员场景足够；老哈希串内带 i= 段，verifyPassword 会按其记录的迭代数校验，可平滑迁移。
+const PBKDF2_ITERATIONS = 12000;
 
 // 常量时间字符串比较：先 SHA-256 归一化，避免长度/前缀差异导致时序泄露
 export async function constantTimeEqual(a: string, b: string): Promise<boolean> {

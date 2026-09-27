@@ -164,6 +164,18 @@ export async function getMonitorState(env: Env): Promise<{ intervalMinutes: numb
   return { intervalMinutes, lastRun };
 }
 
+// 只取单个 setting 的值。日志接口等场景只需要一个字段，走全量 getConfig 会读整张 settings
+// 并对所有账号凭据做 AES 解密，纯属浪费。
+export async function getSetting(env: Env, key: string, fallback = ''): Promise<string> {
+  try {
+    const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind(key).first();
+    const v = (row as Record<string, unknown> | null)?.value;
+    return v === undefined || v === null ? fallback : String(v);
+  } catch {
+    return fallback;
+  }
+}
+
 export async function getConfig(env: Env): Promise<Config> {
   const rows = await env.DB.prepare('SELECT key, value FROM settings').all();
   const map = new Map<string, string>();
@@ -259,13 +271,16 @@ export async function saveAccount(env: Env, account: Omit<Account, 'id'> & { id?
   const instanceId = account.instanceId ?? '';
   const startTime = account.startTime ?? '';
   const stopTime = account.stopTime ?? '';
+  // keepAlive 未显式指定时默认开启：账号级保活是「全局开关之上的收窄」，默认跟随全局。
+  // 之前前端不提交该字段，统一被写成 0，导致账号级开关形同虚设。
+  const keepAlive = account.keepAlive === undefined ? true : account.keepAlive;
   if (account.id) {
     await env.DB.prepare(
       `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, access_key_id_enc=?, access_key_secret_enc=?, site_type=?, max_traffic=?, start_time=?, stop_time=?, schedule_enabled=?, keep_alive=?, shutdown_mode=?, updated_at=datetime('now') WHERE id=?`,
     ).bind(
       name, remark, account.regionId, instanceId,
       akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
-      account.scheduleEnabled ? 1 : 0, account.keepAlive ? 1 : 0, account.shutdownMode ?? '', account.id,
+      account.scheduleEnabled ? 1 : 0, keepAlive ? 1 : 0, account.shutdownMode ?? '', account.id,
     ).run();
     return account.id;
   }
@@ -274,7 +289,7 @@ export async function saveAccount(env: Env, account: Omit<Account, 'id'> & { id?
   ).bind(
     name, remark, account.regionId, instanceId,
     akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
-    account.scheduleEnabled ? 1 : 0, account.keepAlive ? 1 : 0, account.shutdownMode ?? '',
+    account.scheduleEnabled ? 1 : 0, keepAlive ? 1 : 0, account.shutdownMode ?? '',
   ).run();
   return Number(result.meta.last_row_id ?? 0);
 }
@@ -366,7 +381,12 @@ export async function listLogs(
     params.push(...types);
   }
 
-  const totalRow = await env.DB.prepare('SELECT COUNT(*) AS c FROM logs ' + where).bind(...params).first();
+  // COUNT 上限截断：日志保留 30 天时会有数万行，全表 COUNT 没有索引下界可利用，
+  // 每次翻页都实算一次纯属浪费。超过 COUNT_CAP 就按"已有足够多"返回，前端翻页到上限即可。
+  const COUNT_CAP = 100000;
+  const totalRow = await env.DB.prepare(
+    'SELECT COUNT(*) AS c FROM (SELECT 1 FROM logs ' + where + ' LIMIT ' + COUNT_CAP + ')',
+  ).bind(...params).first();
   const total = getNumber(totalRow, 'c');
 
   const rows = await env.DB.prepare(

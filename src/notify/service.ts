@@ -4,6 +4,10 @@
 
 import { sendSmtpMail } from './smtp';
 
+// 单通道投递超时。通知队列是在监控周期末尾同步消费的：若某个通道网络抖动一直挂住，
+// 整个周期就被拖长，外部触发方（GitHub Actions / cron-job.org）可能超时重试 → 重复执行。
+const NOTIFY_TIMEOUT_MS = 8000;
+
 export interface NotificationEvent {
   id: string;
   type: string;
@@ -62,6 +66,7 @@ async function sendTelegram(config: NotifyConfig['telegram'], event: Notificatio
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ chat_id: config.chatId, text }),
+    signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
   });
   if (resp.status !== 200) {
     throw new Error(`telegram HTTP ${resp.status}: ${await resp.text()}`);
@@ -97,7 +102,7 @@ async function sendWebhook(config: NotifyConfig['webhook'], event: NotificationE
       Object.assign(headers, JSON.parse(config.headers));
     } catch { /* 忽略无效 headers */ }
   }
-  const resp = await fetch(endpoint, { method, headers, body });
+  const resp = await fetch(endpoint, { method, headers, body, signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS) });
   if (resp.status >= 400) {
     throw new Error(`webhook HTTP ${resp.status}: ${await resp.text()}`);
   }
@@ -108,6 +113,7 @@ async function sendServerChan(config: NotifyConfig['serverchan'], event: Notific
   const resp = await fetch(`https://sctapi.ftqq.com/${encodeURIComponent(config.sendKey)}.send`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
     body: new URLSearchParams({
       title: `[CDT] ${event.title}`,
       desp: text,
@@ -123,6 +129,7 @@ async function sendPushPlus(config: NotifyConfig['pushplus'], event: Notificatio
   const resp = await fetch('https://www.pushplus.plus/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS),
     body: JSON.stringify({
       token: config.token,
       title: `[CDT] ${event.title}`,

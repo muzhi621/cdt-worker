@@ -1296,7 +1296,7 @@
           <label for="nt-template">通知内容模板</label>
           <textarea id="nt-template" class="control" rows="8" spellcheck="false"
                     placeholder="例如：{{机器名}} 流量告警&#10;已用 {{已用流量}} / {{流量上限}}（{{使用率}}）&#10;剩余 {{剩余流量}}，实例状态 {{实例状态}}&#10;时间 {{时间}}"></textarea>
-          <p class="hint">这个内容会用于下方所有启用的通知渠道（Telegram / Webhook / Server酱 / PushPlus / 邮件）。</p>
+          <p class="hint">这个内容会用于下方所有启用的通知渠道（Telegram / Webhook / Server酱 / PushPlus / 邮件）。留空保存会保留原模板，需恢复默认请点「恢复默认」。</p>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
           <button class="btn btn-primary" type="button" id="save-template" style="width:auto">保存通知内容</button>
@@ -1567,6 +1567,13 @@
             <div class="field" id="ed-stop-field">
               <label for="ed-stop">定时关机时间</label>
               <input id="ed-stop" class="control" type="time" value="23:00" />
+            </div>
+            <div class="field">
+              <label>实例保活</label>
+              <label class="check" for="ed-keepalive">
+                <input type="checkbox" id="ed-keepalive" />
+                意外停机时自动开机（关掉后该账号允许手动关机）
+              </label>
             </div>
           <div class="field full">
             <label for="ed-akid">AccessKey ID（留空保持不变）</label>
@@ -2207,6 +2214,8 @@
         $("ed-shutdown").value = a.shutdownMode || "";
         $("ed-instance").value = a.instanceId || "";
         $("ed-schedule").checked = !!a.scheduleEnabled;
+        // 老数据可能没有该字段：跟随全局保活策略视为开启，避免升级后某账号被静默关掉保活
+        $("ed-keepalive").checked = a.keepAlive !== false;
         $("ed-start").value = a.startTime || "08:00";
         $("ed-stop").value = a.stopTime || "23:00";
         syncEditScheduleFields();
@@ -2233,6 +2242,7 @@
           siteType: $("ed-site").value,
           shutdownMode: $("ed-shutdown").value,
           scheduleEnabled: $("ed-schedule").checked,
+          keepAlive: $("ed-keepalive").checked,
           startTime: $("ed-start").value || "08:00",
           stopTime: $("ed-stop").value || "23:00",
           // AK/SK 留空 → 后端保留旧值
@@ -2581,6 +2591,9 @@
 
       $("save-template").addEventListener("click", async () => {
         const body = $("nt-template").value;
+        // 模板不允许留空：留空保存会被后端按"未修改"继承旧值，行为反直觉；
+        // 想恢复默认请点上方「恢复默认」按钮后保存。
+        if (!body.trim()) { toast("模板不能为空，如需恢复默认请点「恢复默认」", "err"); return; }
         const r = await apiJson("/api/v1/config", { method: "PUT", body: JSON.stringify({ notifications: { template: { body } } }) });
         toast(r.ok ? "通知内容已保存" : errText(r.data), r.ok ? "ok" : "err");
         if (r.ok) loadConfig();
