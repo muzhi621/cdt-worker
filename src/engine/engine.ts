@@ -177,10 +177,12 @@ export async function processAccount(
       if (actions.includes('scheduled_start')) status = StatusStarting;
       else if (actions.includes('scheduled_stop')) status = StatusStopping;
     }
-    await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
-    if (trafficResult.status === 'fulfilled') {
-      await store.addTrafficStat(env, account.id, traffic, now.toISOString());
-    }
+    // 合并成一个 batch 写入：updateRuntime + addTrafficStat 原为两次独立 run()（2 个 subrequest），
+    // 现在合成 writeRuntimeBatch（1 个 subrequest）。仅当流量查询成功才落流量采样。
+    await store.writeRuntimeBatch(
+      env, account.id, traffic, status, new Date().toISOString(),
+      trafficResult.status === 'fulfilled', now.toISOString(),
+    );
   }
 
   // 阈值判断
@@ -309,7 +311,10 @@ export async function processAccount(
 
   // 账单：余额 + 本月消费，随监控周期刷新（缓存 10 分钟，近似实时）
   if (config.enableBilling) {
-    const BILL_TTL_HOURS = 10 / 60; // 10 分钟
+    // 账单 TTL 抖动：基础 10 分钟 + 每账号偏移（accountId % 7 分钟）。
+    // 5 个账号若都用同一个 TTL，会在同一轮同时 miss 并各自发起 2 次阿里云 fetch + 2 次写缓存，
+    // 形成尖峰（+10 subrequest）直接撞 Free 计划的 50 上限；抖动后 miss 被分散到不同轮次。
+    const BILL_TTL_HOURS = (10 + (account.id % 7)) / 60;
     const cycle = localCycle(now, config.timezone); // 配置时区月份 YYYY-MM
     try {
       const balanceCache = await store.billingCache(env, account.id, 'balance', '', BILL_TTL_HOURS);

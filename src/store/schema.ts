@@ -50,25 +50,12 @@ const SCHEMA_STATEMENTS: string[] = [
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (account_id, kind, cycle)
   )`,
-  // ── jobs 表（已废弃，仅保留建表语句防旧库报错）──
+  // ── jobs 表（已废弃，仅保留 DROP 迁移防旧库报错）──
   // 历史遗留：早期设计曾把通知/账单查询做成 jobs 队列，现已被
   // notification_outbox（通知）+ billing_cache（账单）+ 监控内联执行取代。
-  // 全代码库无任何读写（已核对），不要在此表上新增功能；
-  // 留着的原因：删除表需要写迁移且无收益，空表几乎不占存储。
-  `CREATE TABLE IF NOT EXISTS jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT NOT NULL,
-    account_id INTEGER NOT NULL,
-    payload TEXT NOT NULL,
-    unique_key TEXT,
-    status TEXT NOT NULL DEFAULT 'queued',
-    result TEXT,
-    locked_at INTEGER NOT NULL DEFAULT 0,
-    available_at INTEGER NOT NULL DEFAULT 0,
-    updated_at INTEGER NOT NULL DEFAULT 0
-  )`,
-  `CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, available_at)`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_unique ON jobs(unique_key) WHERE unique_key IS NOT NULL`,
+  // 全代码库无任何读写（已核对）。建表语句已移除：此前每次冷启动
+  // CREATE TABLE IF NOT EXISTS jobs 完又立刻 DROP TABLE IF EXISTS jobs，
+  // 白白多一次 DDL 往返；保留 MIGRATIONS 里的 DROP 即可回收旧库残留。
   `CREATE TABLE IF NOT EXISTS action_events (
     key TEXT PRIMARY KEY,
     account_id INTEGER NOT NULL,
@@ -101,8 +88,7 @@ const SCHEMA_STATEMENTS: string[] = [
     scopes TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_used_at TEXT,
-    expires_at TEXT,
-    revoked_at TEXT
+    expires_at TEXT
   )`,
   `CREATE TABLE IF NOT EXISTS login_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

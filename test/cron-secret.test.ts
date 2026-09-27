@@ -1,7 +1,7 @@
 // 触发密钥托管（D1 加密存储）的优先级单测（最小 D1 桩）
 // 关键语义：托管值优先于 env.CRON_SECRET；托管值损坏时回退 env 而非抛错（监控不能断）。
-import { describe, it, expect } from 'vitest';
-import { resolveCronSecret } from '../src/store/store';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { resolveCronSecret, resetCronSecretCache } from '../src/store/store';
 import { encrypt, type Env } from '../src/security/security';
 
 const MASTER = Buffer.from(new Uint8Array(32).map((_, i) => i + 1)).toString('base64');
@@ -22,6 +22,8 @@ function envWith(row: Record<string, unknown> | null, cronSecret?: string): Env 
 }
 
 describe('resolveCronSecret（触发密钥托管优先级）', () => {
+  beforeEach(() => resetCronSecretCache());
+
   it('无托管值 → 回退 env.CRON_SECRET（既有部署行为不变）', async () => {
     expect(await resolveCronSecret(envWith(null, 'env-secret-value'))).toBe('env-secret-value');
   });

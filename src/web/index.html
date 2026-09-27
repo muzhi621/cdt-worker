@@ -2495,9 +2495,10 @@
         const p = new URLSearchParams({
           type: type,
           url: v.url("selfhost"),
-          secret: v.secret,
           interval: String(Math.max(30, v.minutes * 60)),
         });
+        // 密钥不再放进链接：链接里的 secret= 会进浏览器历史与 CF 日志，等于泄露触发密钥。
+        // 服务端自会用已配置的 CRON_SECRET 回填脚本内容；下载鉴权走管理员会话（浏览器）或 X-Cron-Secret 头（CLI）。
         return location.origin + "/api/v1/system/selfhost/driver?" + p.toString();
       }
 
@@ -2513,13 +2514,11 @@
         const cmd = 'curl -fsSL -o cdt-driver.mjs "' + d + '" && curl -fsSL -o install.sh "' + i + '" && sudo bash install.sh';
         const uninstallCmd = 'curl -fsSL -o cdt-uninstall.sh "' + u + '" && sudo bash cdt-uninstall.sh';
         const copyIcon = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-        // 下载链接里的 secret= 同时用作下载鉴权（服务端与 CRON_SECRET 比对）：
-        // 留空时服务器上的 curl 不带任何凭证，必然 401，所以空密钥时直接不给命令，
-        // 只给拦截提示——否则用户复制一条注定失败的命令，只会看到没指向的 curl: (22)。
-        const noSecret = '<div class="hint danger" style="margin-bottom:8px">必须先在上方「密钥」框填入 CRON_SECRET，下面的命令才能用：链接里的 secret= 就是下载凭证，留空时服务器上的 curl 必返 401。</div>';
+        // 下载链接不再携带 secret=；浏览器点击走管理员会话鉴权，服务端用已配置的 CRON_SECRET 回填脚本。
+        // 服务端未配置密钥时下载与触发都无法工作，直接给拦截提示。
         const noServerSecret = '<div class="hint danger" style="margin-bottom:8px">服务端尚未配置 CRON_SECRET，下载与触发都无法工作。请先执行 wrangler secret put CRON_SECRET（内容自定）并重新部署。</div>';
         const block = triggerState.secretConfigured
-          ? (v.secret ? "" : noSecret)
+          ? ""
           : noServerSecret;
         const cmdBlock = block
           ? block
@@ -2856,25 +2855,23 @@
           return;
         }
         box.innerHTML = keys.map(function (k) {
-          const revoked = !!k.revoked_at;
           const expired = k.expires_at && Date.parse(k.expires_at) < Date.now();
-          const dead = revoked || expired;
           return '<div class="trigger-row">' +
             '<div class="trigger-main">' +
-            '<div class="trigger-name">' + escHtml(k.name) + (dead && revoked ? ' <span class="badge">已吊销</span>' : "") + (dead && !revoked ? ' <span class="badge danger">已过期</span>' : "") + "</div>" +
+            '<div class="trigger-name">' + escHtml(k.name) + (expired ? ' <span class="badge danger">已过期</span>' : "") + "</div>" +
             '<div class="trigger-meta">权限：' + escHtml((k.scopes || []).join(", ")) +
             " · 创建 " + relFromNow(k.created_at) +
             " · 最近使用 " + relFromNow(k.last_used_at) +
             (k.expires_at ? " · 到期 " + relFromNow(k.expires_at) : "") + "</div>" +
             "</div>" +
-            (dead ? "" : '<button class="btn btn-danger btn-sm" type="button" data-apikey-del="' + k.id + '">吊销</button>') +
+            (expired ? "" : '<button class="btn btn-danger btn-sm" type="button" data-apikey-del="' + k.id + '">删除</button>') +
             "</div>";
         }).join("");
         box.querySelectorAll("[data-apikey-del]").forEach(function (b) {
           b.onclick = async function () {
-            if (!confirm("确定吊销该密钥？使用该密钥的程序会立即失去访问权限。")) return;
+            if (!confirm("确定删除该密钥？使用该密钥的程序会立即失去访问权限。")) return;
             const d = await apiJson("/api/v1/system/api-keys/" + b.dataset.apikeyDel, { method: "DELETE" });
-            toast(d.ok ? "密钥已吊销" : errText(d.data), d.ok ? "ok" : "err");
+            toast(d.ok ? "密钥已删除" : errText(d.data), d.ok ? "ok" : "err");
             if (d.ok) loadApiKeys();
           };
         });

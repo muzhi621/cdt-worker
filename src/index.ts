@@ -38,6 +38,7 @@ export default {
     if (!shouldNativeRun(ms.lastRun, ms.intervalMinutes, nowSec)) return;
     // 本轮确实要跑，才记录「原生 Cron 上次触发时间」（供前端展示与断档判定）
     await store.touchTriggerSource(env, 'native', nowSec, state.seen);
-    await runMonitorCycle(env, false, state, 'native');
+    // 把已读到的 monitor state 透传进去，避免 runMonitorCycle 内部重复查询（省 1 subrequest/轮）
+    await runMonitorCycle(env, false, state, 'native', false, ms);
   },
 };

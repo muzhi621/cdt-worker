@@ -88,11 +88,10 @@ async function authenticate(env: Env, request: Request): Promise<Principal | nul
   if (token) {
     const hash = await tokenHash(token);
     const row = await env.DB.prepare(
-      'SELECT scopes, expires_at, revoked_at FROM api_keys WHERE token_hash = ?',
+      'SELECT scopes, expires_at FROM api_keys WHERE token_hash = ?',
     ).bind(hash).first();
     if (!row) return null;
     const r = row as Record<string, unknown>;
-    if (r.revoked_at) return null;
     if (r.expires_at && new Date(String(r.expires_at)).getTime() < Date.now()) return null;
     let scopes: string[] = [];
     try { scopes = JSON.parse(String(r.scopes)); } catch { /* empty */ }
@@ -412,13 +411,35 @@ async function saveConfig(ctx: Context): Promise<Response> {
   const body = await ctx.request.json().catch(() => null);
   if (!body || typeof body !== 'object') return error('invalid_request', 'invalid JSON', 400);
   const b = body as Record<string, unknown>;
+
+  // 数值白名单校验：直接 `parseInt(x) || default` 会被 "-50"/"1e9" 之类的脏值穿透
+  // （parseInt('1e9') === 1，parseInt('-50') === -50），threshold=-50 会让
+  // `percentage >= threshold` 恒真，触发 stop_and_notify 批量停掉所有在线实例。
+  // 这里在写库前统一校验并夹取，越界直接拒绝，不给脏值落库的机会。
+  const clampNum = (raw: unknown, min: number, max: number, fallback: number): number | null => {
+    if (raw === undefined || raw === null || raw === '') return fallback;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return null; // 无法解析 → 拒绝
+    if (n < min || n > max) return null;  // 越界 → 拒绝
+    return Math.round(n);
+  };
+  const trafficThreshold = clampNum(b.trafficThreshold, 1, 100, 90);
+  if (trafficThreshold === null) return error('invalid_input', '流量阈值必须在 1~100 之间', 400);
+  const apiInterval = clampNum(b.apiInterval, 60, 86400, 600);
+  if (apiInterval === null) return error('invalid_input', 'API 刷新间隔必须在 60~86400 秒之间', 400);
+  const monitorInterval = clampNum(b.monitorInterval, 1, 1440, 5);
+  if (monitorInterval === null) return error('invalid_input', '监控间隔必须在 1~1440 分钟之间', 400);
+  const logRetentionDays = b.logRetentionDays === undefined
+    ? null : clampNum(b.logRetentionDays, 1, 365, 30);
+  if (logRetentionDays === null) return error('invalid_input', '日志保留天数必须在 1~365 之间', 400);
+
   // 仅写入请求中显式传入的设置项：添加账号只传 accounts 时不会重置其他参数
   const optionalSettings: [string, unknown, string][] = [
-    ['traffic_threshold', b.trafficThreshold, String(b.trafficThreshold ?? 90)],
+    ['traffic_threshold', b.trafficThreshold, String(trafficThreshold)],
     ['shutdown_mode', b.shutdownMode, String(b.shutdownMode ?? 'StopCharging')],
     ['threshold_action', b.thresholdAction, String(b.thresholdAction ?? 'stop_and_notify')],
-    ['api_interval', b.apiInterval, String(b.apiInterval ?? 600)],
-    ['monitor_interval', b.monitorInterval, String(b.monitorInterval ?? 5)],
+    ['api_interval', b.apiInterval, String(apiInterval)],
+    ['monitor_interval', b.monitorInterval, String(monitorInterval)],
     ['timezone', b.timezone, String(b.timezone ?? 'Asia/Shanghai')],
     ['keep_alive', b.keepAlive, b.keepAlive ? '1' : '0'],
     ['enable_billing', b.enableBilling, b.enableBilling ? '1' : '0'],
@@ -431,7 +452,7 @@ async function saveConfig(ctx: Context): Promise<Response> {
   }
   // logRetentionDays 仅在显式传入时才写入，避免设置页保存时误重置
   if (b.logRetentionDays !== undefined) {
-    settings.push(['log_retention_days', String(b.logRetentionDays ?? 30)]);
+    settings.push(['log_retention_days', String(logRetentionDays)]);
   }
   for (const [k, v] of settings) {
     await ctx.env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind(k, v).run();
@@ -446,6 +467,10 @@ async function saveConfig(ctx: Context): Promise<Response> {
     } catch {
       merged = mergeNotifySecrets(undefined, merged);
     }
+    // 敏感字段（telegram token / smtp password / webhook secret 等）落库前 AES-GCM 加密，
+    // 与 AK/SK 同等强度，避免 D1 备份/导出泄露通知渠道凭据。encryptNotifyConfig 幂等，
+    // 已加密值跳过；旧库明文在本次保存时自动升级为密文。
+    merged = await store.encryptNotifyConfig(ctx.env, merged as unknown as Record<string, unknown>) as Record<string, Record<string, unknown>>;
     await ctx.env.DB.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?,?,datetime('now'))")
       .bind('notifications', JSON.stringify(merged)).run();
   }
@@ -491,9 +516,14 @@ function minuteStamp(now = new Date()): string {
 }
 
 async function controlHandler(ctx: Context): Promise<Response> {
+  // 限流：control 会真实调用阿里云启停 API，连点等于把实例反复启停 + 打爆 RPC。
+  // 与 refresh 同口径按账号做分钟级节流。
   const id = parseInt(ctx.params.id, 10);
   const action = ctx.params.action as 'start' | 'stop';
   if (action !== 'start' && action !== 'stop') return error('invalid_action', 'action must be start or stop', 400);
+  if (!allowRate('control:' + clientIP(ctx.request), 10, 60_000)) {
+    return error('rate_limited', '操作过于频繁，请 1 分钟后再试', 429);
+  }
   const message = await engine.control(ctx.env, id, action, '手动');
   return json({ success: true, message }, 202);
 }
@@ -586,6 +616,11 @@ async function clearLogsHandler(ctx: Context): Promise<Response> {
 
 // 测试通知：向所有已启用通道发送一条测试消息
 async function notifyTestHandler(ctx: Context): Promise<Response> {
+  // 限流：测试会真实调用所有已启用的通知通道（telegram/webhook/smtp 等），
+  // 连点等于给第三方通道刷消息、甚至触发其限流封禁。
+  if (!allowRate('notify-test:' + clientIP(ctx.request), 5, 60_000)) {
+    return error('rate_limited', '测试过于频繁，请 1 分钟后再试', 429);
+  }
   const config = await store.getConfig(ctx.env);
   let channel = '';
   let accountId = 0;
@@ -648,6 +683,10 @@ async function notifyTestHandler(ctx: Context): Promise<Response> {
 }
 
 async function deleteAccountHandler(ctx: Context): Promise<Response> {
+  // 限流：删除账号是破坏性操作，防误触连点。
+  if (!allowRate('delete-account:' + clientIP(ctx.request), 10, 60_000)) {
+    return error('rate_limited', '操作过于频繁，请 1 分钟后再试', 429);
+  }
   const id = parseInt(ctx.params.id, 10);
   await store.deleteAccount(ctx.env, id);
   await store.addLog(ctx.env, 'audit', '删除账号 #' + id);
@@ -724,18 +763,17 @@ async function route(env: Env, request: Request): Promise<Response> {
   const pathname = url.pathname;
 
   // Cron 触发器（监控循环）
-  // 双通道鉴权：外部定时服务用 CRON_SECRET（X-Cron-Secret 头或 ?key= 参数）；
+  // 双通道鉴权：外部定时服务用 CRON_SECRET（仅认 X-Cron-Secret 请求头）；
   // 管理台「立即监控」按钮走管理员会话 cookie。未配置 CRON_SECRET 时仅放行管理员会话，
   // 避免 /__cron 回归公开可刷（放大阿里云 API 调用与 D1 写入）。
+  // 安全：不再接受 ?key= 查询参数——查询串会被 CF 日志/Logpush 原样留存，等于泄露密钥。
   if (request.headers.get('X-Cron-Trigger') === 'true' || url.pathname === '/__cron') {
     // 密钥支持 D1 托管（管理台可查看/修改）与 Worker Secret 两个来源
     const expected = await store.resolveCronSecret(env);
     let authorized = false;
     let viaSecret = false;
     if (expected) {
-      const provided = request.headers.get('X-Cron-Secret')
-        || url.searchParams.get('key')
-        || '';
+      const provided = request.headers.get('X-Cron-Secret') || '';
       authorized = !!provided && (await constantTimeEqual(expected, provided));
       viaSecret = authorized;
     }
@@ -841,17 +879,19 @@ async function selfhostDownload(ctx: Context): Promise<Response> {
   const type = sp.get('type');
   const kind = type === 'install' ? 'install' : type === 'uninstall' ? 'uninstall' : 'driver';
   const url = (sp.get('url') || 'https://你的域名/__cron?source=selfhost').trim();
-  const secret = (sp.get('secret') || '').trim();
   const interval = parseInt(sp.get('interval') || '300', 10) || 300;
 
-  const presented = ctx.request.headers.get('X-Cron-Secret') || sp.get('key') || secret;
+  // 鉴权只认 X-Cron-Secret 头或管理员会话，不再接受 ?key= / ?secret= 查询参数。
+  // 原因：查询串会被 Cloudflare Observability / Logpush 的 ClientRequestURI 原样留存，
+  // 还会进浏览器历史与 Referer，等于把触发密钥写在 URL 里到处泄露。密钥应始终走请求头。
+  const presented = ctx.request.headers.get('X-Cron-Secret') || '';
   const viaSecret = !!cronSecret && !!presented && await constantTimeEqual(cronSecret, presented);
   if (!viaSecret) {
     const principal = await authenticate(ctx.env, ctx.request);
     if (!principal?.admin) {
       // 两种情况差别很大，必须分开说，否则用户只能看到一句没用的「请登录」：
       //  - 站点没配 CRON_SECRET：自建驱动根本不可能工作，得先去配；
-      //  - 站点配了但请求没带：补上头或 ?key= 即可。
+      //  - 站点配了但请求没带：补上头即可。
       return downloadError(401, cronSecret
         ? '未通过鉴权。请登录管理台后重新复制下载链接，或在服务器上带上门槛密钥再取：'
           + 'curl -H "X-Cron-Secret: <CRON_SECRET>" -o cdt-driver.mjs "<本链接>"'
@@ -860,14 +900,13 @@ async function selfhostDownload(ctx: Context): Promise<Response> {
     }
   }
 
-  // 脚本必须带密钥，否则驱动启动即退出。
-  // 链接里没填时，用服务端已配置的 CRON_SECRET 回填（能走到这里的人本就知道该密钥）；
-  // 两边都没有则给不出可用脚本，直接拒绝并说明怎么配。
-  // 例外：卸载脚本不含任何密钥与站点配置，不受此限——用户可能正是丢了密钥才要卸载。
-  const effectiveSecret = secret || cronSecret;
+  // 脚本内嵌的密钥直接取服务端已托管/配置的 CRON_SECRET（resolveCronSecret 的返回值），
+  // 不再依赖查询参数传入——查询参数传递等于把密钥放进 URL，会进日志与历史。
+  // 能走到这里的人（管理员会话 / 持有正确头）本就知道该密钥，直接用服务端值即可。
+  const effectiveSecret = cronSecret;
   if (!effectiveSecret && kind !== 'uninstall') {
     return downloadError(400, '未取得触发密钥：请先在 Worker 侧配置 CRON_SECRET（wrangler secret put CRON_SECRET），'
-      + '然后回到本页填写教程变量中的 CRON_SECRET，再重新复制下载链接。');
+      + '然后回到本页重新生成下载链接。');
   }
 
   const isInstall = kind === 'install';
@@ -957,8 +996,7 @@ async function triggerStatus(ctx: Context): Promise<Response> {
   const expected = await store.resolveCronSecret(env);
   let ok = false;
   if (expected) {
-    const provided = ctx.request.headers.get('X-Cron-Secret')
-      || new URL(ctx.request.url).searchParams.get('key') || '';
+    const provided = ctx.request.headers.get('X-Cron-Secret') || '';
     ok = !!provided && (await constantTimeEqual(expected, provided));
   }
   if (!ok) {
@@ -1050,11 +1088,13 @@ export async function runMonitorCycle(
   triggerState?: { sources: Record<TriggerSource, boolean>; seen: Partial<Record<TriggerSource, number>> },
   source?: TriggerSource,
   isTest = false,
+  preloadedMonitorState?: { intervalMinutes: number; lastRun: number },
 ): Promise<Response> {
   // 防抖前置：先做轻量判断（单条 settings 查询），命中跳过则直接返回，
   // 不再全量 getConfig（读全量 settings + 解密所有账号 AK/SK），省 CPU 与 D1 读。
   // force=true 用于前台「测试渠道」按钮：绕过防抖真实跑一轮，验证链路是否可用。
-  const state = await store.getMonitorState(env);
+  // 原生 Cron 入口（index.ts scheduled）已经读过一次 monitor state，透传进来省掉重复查询（省 1 subrequest/轮）。
+  const state = preloadedMonitorState ?? await store.getMonitorState(env);
   const debounceSeconds = Math.max(0, state.intervalMinutes * 60 - 45);
   const nowSec = Math.floor(Date.now() / 1000);
   const sinceLastRun = state.lastRun > 0 ? nowSec - state.lastRun : Infinity;
@@ -1076,9 +1116,10 @@ export async function runMonitorCycle(
   }
   const config = await store.getConfig(env);
   const started = Date.now();
-  // 账号并行处理（并发上限 5）：串行时 5 个账号需 18s+，易触发外部触发的 curl 超时
+  // 账号并行处理（并发上限 3）：Free 计划同时出站连接上限是 6，每账号并发 2 个阿里云 fetch，
+  // 5 个账号同轮并发会开到 10 个连接、超出上限触发 1101/超时；降到 3 后峰值 6 个连接，贴合上限。
   const results: Awaited<ReturnType<typeof engine.processAccount>>[] = [];
-  const CONCURRENCY = 5;
+  const CONCURRENCY = 3;
   for (let i = 0; i < config.accounts.length; i += CONCURRENCY) {
     const batch = config.accounts.slice(i, i + CONCURRENCY);
     const settled = await Promise.allSettled(batch.map((a) => engine.processAccount(env, a, false, config)));

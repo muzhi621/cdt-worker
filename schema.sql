@@ -113,8 +113,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   scopes TEXT NOT NULL,  -- JSON 数组
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   last_used_at TEXT,
-  expires_at TEXT,
-  revoked_at TEXT
+  expires_at TEXT
 );
 
 -- 登录失败记录

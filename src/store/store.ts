@@ -1,11 +1,53 @@
 // 数据访问层：D1 绑定，对应原 Go 项目 internal/store/
 // 所有账号凭据字段在存取时做 AES-GCM 加密/解密
 
-import { encrypt, decrypt, type Env } from '../security/security';
+import { encrypt, decrypt, isEncrypted, type Env } from '../security/security';
 import type { Account } from '../provider/aliyun';
 import {
   parseTriggerSeen, parseTriggerSources, type TriggerSource,
 } from '../engine/triggers';
+
+// 通知通道里的敏感字段：与 AK/SK 同等对待，落库前 AES-GCM 加密、读库后解密。
+// 此前这些字段（telegram token / smtp password / webhook secret 等）在 D1 里是明文，
+// 与 AK/SK 的加密存储不一致——一旦 D1 备份/导出泄露，等于把通知渠道的凭据也一并交出去。
+const NOTIFY_SECRET_PATHS: [string, string][] = [
+  ['telegram', 'token'],
+  ['webhook', 'secret'],
+  ['serverchan', 'sendKey'],
+  ['pushplus', 'token'],
+  ['smtp', 'password'],
+];
+
+// 把通知配置里的敏感字段逐个加密（仅加密非空、且尚未加密的明文值）。
+// 已带 enc:v1: 前缀的值跳过（幂等，避免重复加密），保证旧库明文可平滑迁移：
+// 首次保存即加密，读侧 decrypt 对非 enc 前缀原样透传，读旧数据也不会崩。
+export async function encryptNotifyConfig(env: Env, cfg: Record<string, unknown>): Promise<Record<string, unknown>> {
+  for (const [chan, field] of NOTIFY_SECRET_PATHS) {
+    const obj = cfg[chan];
+    if (!obj || typeof obj !== 'object') continue;
+    const o = obj as Record<string, unknown>;
+    const v = o[field];
+    if (typeof v !== 'string' || v === '' || isEncrypted(v)) continue;
+    o[field] = await encrypt(env, v);
+  }
+  return cfg;
+}
+
+// 读取侧：把加密的敏感字段还原为明文供投递使用。非 enc 前缀（旧库明文）原样透传，
+// 解密失败（主密钥更换等）时回退为空串，避免一条坏数据让整个通知配置不可用。
+export async function decryptNotifyConfig(env: Env, cfg: Record<string, unknown>): Promise<Record<string, unknown>> {
+  for (const [chan, field] of NOTIFY_SECRET_PATHS) {
+    const obj = cfg[chan];
+    if (!obj || typeof obj !== 'object') continue;
+    const o = obj as Record<string, unknown>;
+    const v = o[field];
+    if (typeof v !== 'string' || v === '') continue;
+    try {
+      o[field] = await decrypt(env, v);
+    } catch { o[field] = ''; }
+  }
+  return cfg;
+}
 
 export interface Config {
   adminPasswordHash: string;
@@ -69,6 +111,17 @@ function getBool(row: Record<string, unknown> | null, key: string): boolean {
   return row != null && !!row[key];
 }
 
+// 解析 settings 里的整数并夹取到 [min, max]。核心目的：抵御 `parseInt || 默认` 的假值陷阱
+// （"-50"/"1e9" 会穿透成 -50/1，而非回退默认值），把超出合理范围的脏值钳制到最近边界，
+// 避免 threshold=-50 之类让 `percentage >= threshold` 恒真、进而触发全量停机。
+// 无法解析（NaN / 空串 / 非数字前缀）时返回 fallback。
+export function clampInt(raw: string | undefined, min: number, max: number, fallback: number): number {
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
+
 export async function getPasswordHash(env: Env): Promise<string> {
   const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?')
     .bind('admin_password_hash')
@@ -112,27 +165,49 @@ export async function tryAcquireMonitorSlot(env: Env, debounceSeconds: number): 
 // ─────────────────────────────────────────────────────────────
 const CRON_SECRET_KEY = 'cron_secret';
 
+// isolate 级缓存：resolveCronSecret 每轮监控 + 每次 /__cron 请求都会调一次，
+// 而 D1 托管密钥极少变动，缓存后可省掉每轮 1 次 D1 读 + 1 次 AES 解密（CPU 热点）。
+// 缓存的是「解密后的明文」——仅存活于当前 isolate 内存，不落盘、不出 isolate。
+// 失效时机：setCronSecret（管理台修改/清除）时主动清空；isolate 回收自然重置。
+let cronSecretCache: string | null | undefined; // undefined=未加载，null=无托管值，string=明文
+
+// 仅供测试/诊断重置缓存（正常运行时缓存由 setCronSecret 主动失效、isolate 回收自然重置）
+export function resetCronSecretCache(): void {
+  cronSecretCache = undefined;
+}
+
 export async function resolveCronSecret(env: Env): Promise<string> {
+  if (cronSecretCache !== undefined) return cronSecretCache ?? '';
   const row = await env.DB.prepare(`SELECT value FROM settings WHERE key = '${CRON_SECRET_KEY}'`).first();
   const stored = String((row as Record<string, unknown> | null)?.value ?? '');
   if (stored) {
     try {
-      return await decrypt(env, stored);
-    } catch { /* 解密失败（主密钥更换等）时回退 env，保证监控不断 */ }
+      cronSecretCache = await decrypt(env, stored);
+    } catch {
+      // 解密失败（主密钥更换等）时回退 env，且不缓存（下次仍重试解密，可能主密钥已恢复）
+      return (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
+    }
+  } else {
+    // 无托管值：回退 env.CRON_SECRET。这里缓存的是「最终生效值」（即 env 值），
+    // 因为 env 在 isolate 内固定，缓存后每轮省一次 D1 读仍安全。
+    cronSecretCache = (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
   }
-  return (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
+  return cronSecretCache;
 }
 
 // value 传空串 = 清除托管，鉴权回退到 Worker Secret
 export async function setCronSecret(env: Env, value: string): Promise<void> {
   if (!value) {
     await env.DB.prepare(`DELETE FROM settings WHERE key = '${CRON_SECRET_KEY}'`).run();
+    // 清除托管后回退 env：缓存 env 值（isolate 内固定），下次 resolve 省一次 D1 读
+    cronSecretCache = (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
     return;
   }
   await env.DB
     .prepare(`INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('${CRON_SECRET_KEY}', ?, datetime('now'))`)
     .bind(await encrypt(env, value))
     .run();
+  cronSecretCache = value; // 直接以明文更新缓存，省一次解密
 }
 
 // 是否已托管（只回布尔语义，不返回明文）：用于前端区分「托管值」与「Worker Secret」
@@ -226,15 +301,15 @@ export async function getConfig(env: Env): Promise<Config> {
   // 此前写死 '95'/'KeepCharging'/false/false 与 DEFAULT_CONFIG(90/StopCharging/true/true) 冲突，
   // 在 ensureSchema 默认键写入失败或旧库缺键时会静默回退到错误默认值。
   cfg.trafficThreshold = map.has('traffic_threshold')
-    ? parseInt(map.get('traffic_threshold') ?? '', 10) || DEFAULT_CONFIG.trafficThreshold
+    ? clampInt(map.get('traffic_threshold'), 1, 100, DEFAULT_CONFIG.trafficThreshold)
     : DEFAULT_CONFIG.trafficThreshold;
   cfg.shutdownMode = map.get('shutdown_mode') || DEFAULT_CONFIG.shutdownMode;
   cfg.thresholdAction = map.get('threshold_action') || DEFAULT_CONFIG.thresholdAction;
   cfg.apiInterval = map.has('api_interval')
-    ? parseInt(map.get('api_interval') ?? '', 10) || DEFAULT_CONFIG.apiInterval
+    ? clampInt(map.get('api_interval'), 60, 86400, DEFAULT_CONFIG.apiInterval)
     : DEFAULT_CONFIG.apiInterval;
   cfg.monitorInterval = map.has('monitor_interval')
-    ? parseInt(map.get('monitor_interval') ?? '', 10) || DEFAULT_CONFIG.monitorInterval
+    ? clampInt(map.get('monitor_interval'), 1, 1440, DEFAULT_CONFIG.monitorInterval)
     : DEFAULT_CONFIG.monitorInterval;
   cfg.timezone = map.get('timezone') || DEFAULT_CONFIG.timezone;
   cfg.keepAlive = map.has('keep_alive') ? map.get('keep_alive') === '1' : DEFAULT_CONFIG.keepAlive;
@@ -244,7 +319,7 @@ export async function getConfig(env: Env): Promise<Config> {
     ? map.get('enable_status_change_notify') === '1'
     : DEFAULT_CONFIG.enableStatusChangeNotify;
   cfg.logRetentionDays = map.has('log_retention_days')
-    ? parseInt(map.get('log_retention_days') ?? '', 10) || DEFAULT_CONFIG.logRetentionDays
+    ? clampInt(map.get('log_retention_days'), 1, 365, DEFAULT_CONFIG.logRetentionDays)
     : DEFAULT_CONFIG.logRetentionDays;
   // 通知配置从 JSON 字段读取：与默认值逐通道深合并。
   // 旧版本写入的配置可能缺少新通道键（smtp/serverchan/pushplus/template），
@@ -253,15 +328,18 @@ export async function getConfig(env: Env): Promise<Config> {
   if (notifRaw) {
     try {
       const stored = JSON.parse(notifRaw) as Record<string, unknown>;
+      // 敏感字段（telegram token / smtp password / webhook secret 等）解密回明文，
+      // 供下游 deliverEvent 投递。旧库明文值经 decrypt 原样透传，平滑兼容。
+      const decrypted = await decryptNotifyConfig(env, stored);
       const merged: Record<string, unknown> = {};
       for (const [chan, def] of Object.entries(cfg.notifications)) {
-        const cur = stored[chan];
+        const cur = decrypted[chan];
         merged[chan] = cur && typeof cur === 'object'
           ? { ...(def as Record<string, unknown>), ...(cur as Record<string, unknown>) }
           : def;
       }
       // 兼容最早的三通道版本：email → smtp（字段名不同，按需映射）
-      const legacy = stored.email as Record<string, unknown> | undefined;
+      const legacy = decrypted.email as Record<string, unknown> | undefined;
       if (legacy && typeof legacy === 'object') {
         merged.smtp = { ...(merged.smtp as Record<string, unknown>), ...legacy };
       }
@@ -342,14 +420,18 @@ export async function updateAccountConfig(env: Env, a: Partial<Account> & { id: 
   const name = a.name || remark || 'account';
   const akEnc = a.accessKeyId ? await encrypt(env, a.accessKeyId) : null;
   const skEnc = a.accessKeySecret ? await encrypt(env, a.accessKeySecret) : null;
+  // keep_alive 列此前在 UPDATE 里遗漏（saveAccount 有它），导致编辑已有账号时
+  // 「账号级保活」开关关不掉——UI 提示保存成功但列值不变。这里补上，未显式传入时沿用 true（跟随全局）。
+  const keepAlive = a.keepAlive === undefined ? true : a.keepAlive;
   const sql =
-    `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, site_type=?, max_traffic=?, schedule_enabled=?, start_time=?, stop_time=?, shutdown_mode=?` +
+    `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, site_type=?, max_traffic=?, schedule_enabled=?, start_time=?, stop_time=?, shutdown_mode=?, keep_alive=?` +
     (akEnc ? ', access_key_id_enc=?' : '') +
     (skEnc ? ', access_key_secret_enc=?' : '') +
     `, updated_at=datetime('now') WHERE id=?`;
   const vals: unknown[] = [
     name, remark, a.regionId ?? '', a.instanceId ?? '', a.siteType ?? 'china',
     a.maxTraffic ?? 0, a.scheduleEnabled ? 1 : 0, a.startTime ?? '', a.stopTime ?? '', a.shutdownMode ?? '',
+    keepAlive ? 1 : 0,
   ];
   if (akEnc) vals.push(akEnc);
   if (skEnc) vals.push(skEnc);
@@ -373,6 +455,33 @@ export async function addTrafficStat(env: Env, accountId: number, traffic: numbe
   await env.DB.prepare(
     'INSERT INTO traffic_stats (account_id, traffic, recorded_at) VALUES (?,?,?)',
   ).bind(accountId, traffic, recordedAt).run();
+}
+
+// 一次监控刷新后的「状态落库 + 流量采样」合并成一个 batch 写入。
+// D1 的 DB.batch() 只计 1 个 subrequest，而分开写 updateRuntime + addTrafficStat 是 2 个；
+// 每账号每轮省 1 个，5 账号 × 288 轮/天 ≈ 省 1440 个/天，是压到 Free 计划 50 上限内的关键杠杆。
+// 语义不变：两条语句互不依赖，合并后原子性反而更强。
+export async function writeRuntimeBatch(
+  env: Env,
+  id: number,
+  traffic: number,
+  status: string,
+  updatedAt: string,
+  recordStat: boolean,
+  recordedAt: string,
+): Promise<void> {
+  const stmts = [
+    env.DB.prepare(
+      'UPDATE accounts SET traffic_used=?, instance_status=?, updated_at=? WHERE id=?',
+    ).bind(traffic, status, updatedAt, id),
+  ];
+  if (recordStat) {
+    stmts.push(
+      env.DB.prepare('INSERT INTO traffic_stats (account_id, traffic, recorded_at) VALUES (?,?,?)')
+        .bind(id, traffic, recordedAt),
+    );
+  }
+  await env.DB.batch(stmts);
 }
 
 export async function history(env: Env, accountId: number): Promise<{ traffic: number; recorded_at: string }[]> {
@@ -421,7 +530,10 @@ export async function listLogs(
 
   // COUNT 上限截断：日志保留 30 天时会有数万行，全表 COUNT 没有索引下界可利用，
   // 每次翻页都实算一次纯属浪费。超过 COUNT_CAP 就按"已有足够多"返回，前端翻页到上限即可。
-  const COUNT_CAP = 100000;
+  // 注意 COUNT_CAP 不能太大：日志页前端每 10 秒自动刷新一次，5 个管理员同时开着页面，
+  // 每分钟就是 30 次全量 COUNT 扫描，直接撞 D1 免费 5M 行/天读取配额。10000 已经够展示
+  // 「总页数」的观感，也把单次扫描行数压到可控范围。
+  const COUNT_CAP = 10000;
   const totalRow = await env.DB.prepare(
     'SELECT COUNT(*) AS c FROM (SELECT 1 FROM logs ' + where + ' LIMIT ' + COUNT_CAP + ')',
   ).bind(...params).first();
@@ -613,12 +725,11 @@ export interface ApiKeyRow {
   created_at: string;
   last_used_at: string | null;
   expires_at: string | null;
-  revoked_at: string | null;
 }
 
 export async function listApiKeys(env: Env): Promise<ApiKeyRow[]> {
   const rows = await env.DB.prepare(
-    'SELECT id, name, scopes, created_at, last_used_at, expires_at, revoked_at FROM api_keys ORDER BY id DESC',
+    'SELECT id, name, scopes, created_at, last_used_at, expires_at FROM api_keys ORDER BY id DESC',
   ).all();
   return (rows.results ?? []).map((r) => {
     const row = r as Record<string, unknown>;
@@ -631,7 +742,6 @@ export async function listApiKeys(env: Env): Promise<ApiKeyRow[]> {
       created_at: String(row.created_at ?? ''),
       last_used_at: row.last_used_at ? String(row.last_used_at) : null,
       expires_at: row.expires_at ? String(row.expires_at) : null,
-      revoked_at: row.revoked_at ? String(row.revoked_at) : null,
     };
   });
 }
