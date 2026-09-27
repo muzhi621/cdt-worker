@@ -320,15 +320,16 @@ export async function processAccount(
   let message = `[${masked(account.accessKeyId)}] 流量 ${traffic.toFixed(2)}GB / ${account.maxTraffic.toFixed(2)}GB (${percentage.toFixed(2)}%) · 状态 ${status}`;
   if (actions.length > 0) message += ' · 动作 ' + actions.join(',');
 
-  // 状态变化通知：仅在「稳定状态」Running <-> Stopped 之间切换时触发，
-  // 避免 Starting/Stopping 等过渡态刷屏；且不与定时/阈值/保活等专项通知重复。
+  // 状态变化通知：当实例到达稳定状态 Running/Stopped 时触发。
+  // 包含自然变化（Running<->Stopped），也包含从过渡态/Unknown 恢复到稳定态的情况，
+  // 这样手动/定时控制后 Starting/Stoppings -> Running/Stopped 也能通知到用户。
+  // 去重：与定时/阈值/保活等已发专项通知的场景不再重复发送。
   const statusChanged = status !== previousStatus;
   const hasActionNotification = actions.some((a) =>
     a === 'scheduled_start' || a === 'scheduled_stop' || a === 'threshold_stop' || a === 'keepalive_start',
   );
   const stableChanged = statusChanged &&
     (status === StatusRunning || status === StatusStopped) &&
-    (previousStatus === StatusRunning || previousStatus === StatusStopped) &&
     !hasActionNotification;
   if (stableChanged && config.enableStatusChangeNotify) {
     const title = status === StatusRunning ? '实例已启动' : '实例已停止';
@@ -338,11 +339,16 @@ export async function processAccount(
         traffic, status, percentage, now,
         timezone: config.timezone, balance: balanceText, cost: costText,
       }),
-      '变化前状态': previousStatus,
+      '变化前状态': previousStatus || 'Unknown',
       '变化后状态': status,
     });
     await store.addOutbox(env, 'notify', event);
     await store.addLog(env, 'info', summary);
+  }
+
+  // 状态变化在「告警」标签也留一条，避免用户只在 heartbeat（监控标签）里找。
+  if (statusChanged && (status === StatusRunning || status === StatusStopped)) {
+    await store.addLog(env, 'warning', `实例状态变化 [${masked(account.accessKeyId)}]: ${previousStatus || 'Unknown'} → ${status}`);
   }
 
   // heartbeat：这里只记「本轮真的做了事」的情况，避免 5 账号 × 288 轮 ≈ 1440 条/天的重复噪声。
@@ -431,6 +437,28 @@ export async function control(
   await store.updateRuntime(env, account.id, account.trafficUsed, status, new Date().toISOString());
   const message = `${source}控制实例 [${masked(account.accessKeyId)}]：${action}`;
   await store.addLog(env, 'audit', message);
+
+  // 手动控制通知：用户在前台或 API 触发开关机后，立即收到一条确认通知。
+  // 复用 enableStatusChangeNotify 开关；未开启时仅保留 audit 日志。
+  if (config.enableStatusChangeNotify) {
+    const title = action === 'start' ? '手动开机已执行' : '手动关机已执行';
+    const summary = `账号 ${masked(account.accessKeyId)} 的${source}控制指令已发送：${action === 'start' ? '开机' : '关机'}。`;
+    const event = newEvent('manual_control', title, summary, account.id, {
+      ...accountVars(account, config, {
+        traffic: account.trafficUsed,
+        status,
+        percentage: usagePercent(account.trafficUsed, account.maxTraffic),
+        now: new Date(),
+        timezone: config.timezone,
+        balance: '',
+        cost: '',
+      }),
+      '操作前状态': account.instanceStatus,
+      '目标操作': action === 'start' ? '开机' : '关机',
+      '控制来源': source,
+    });
+    await store.addOutbox(env, 'notify', event);
+  }
   return message;
 }
 
