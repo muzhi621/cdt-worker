@@ -119,12 +119,20 @@ Cloudflare 会开始构建。构建完成后，会显示一个部署地址：
 
 ## 定时触发说明
 
-本项目**不使用** Cloudflare 原生 Cron Trigger（`wrangler.toml` 不含 `[triggers]` 段，
-`src/index.ts` 也没有 `scheduled` 出口）。原因：免费版 Cron Trigger 额度是账号级 5 个，
-本项目用不上；且配置后会报 `The script has no scheduled handler` 或直接 `error 10072`。
+本项目**同时使用**两条链路，共用防抖与原子槽位抢占：
 
-自动监控由**外部定时服务**请求 `/__cron` 驱动，开关与配置见管理台「监控触发源」标签页。
-若 Dashboard → Worker → Triggers 页看到残留的 cron 条目，请在该页面手动删除。
+1. **Cloudflare 原生 Cron**：`wrangler.toml` 的 `[triggers] crons = ["*/5 * * * *"]` 每 5 分钟调用
+   `scheduled()`，不经过 HTTP 层，无需 `CRON_SECRET`。
+2. **外部定时服务**请求 `/__cron`（需携带 `CRON_SECRET`）。
+
+真实执行频率由管理台「监控触发源」的开关 + 「设置」页的**监控间隔**共同决定。
+注意 CF 的 cron 表达式无法运行时修改，而监控间隔是即时生效的——调频率优先改间隔。
+
+免费版 Cron Trigger 额度是账号级 5 个，本项目占用 1 个；报 `error 10072` 说明额度用尽，
+需删除 `wrangler.toml` 的 `[triggers]` 段或腾出其他 Worker 的额度。
+
+若 Dashboard → Worker → Triggers 页看到**手工创建**的残留 cron 条目（wrangler 删不掉），
+请在该页面手动删除。
 
 ---
 

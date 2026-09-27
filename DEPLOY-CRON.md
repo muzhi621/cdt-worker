@@ -26,9 +26,10 @@ curl -H "X-Trigger-Source: selfhost" -H "X-Cron-Secret: <密钥>" https://你的
 > 两条链路共用 Worker 内部防抖（前台「监控间隔」分钟数）+ 原子槽位抢占，
 > 无论多少个触发源同时打过来，同一防抖窗口内只有一轮监控真正执行。
 >
-> ⚠️ **为什么原生 Cron 默认关闭**：Cloudflare 免费版每个账号只有 **5 个 Cron Trigger**
-> 额度。若账号额度已用尽，`wrangler deploy` 会在注册 cron 时直接失败并报
+> ⚠️ **额度提醒**：Cloudflare 免费版每个账号只有 **5 个 Cron Trigger** 额度，本项目占用 1 个。
+> 若账号额度已用尽，`wrangler deploy` 会在注册 cron 时直接失败并报
 > `error 10072`，导致整个部署中断（代码已上传但触发器配置回滚失败）。
+> 删掉 `wrangler.toml` 的 `[triggers]` 段或腾出其他 Worker 的额度即可恢复。
 
 ---
 
@@ -47,9 +48,9 @@ curl -H "X-Trigger-Source: selfhost" -H "X-Cron-Secret: <密钥>" https://你的
 
 ---
 
-## 主链路：外部触发 `/__cron`（已默认启用）
+## 外部触发链路：`/__cron`
 
-`wrangler.toml` **不包含** `[triggers]` 段，外部服务定时请求 `/__cron` 即可：
+外部服务定时请求 `/__cron` 即可（原生 Cron 链路见下方「Cloudflare 原生 Cron Trigger：现已启用」）：
 
 ```
 https://你的worker地址/__cron   （带 X-Cron-Secret 头）
@@ -73,25 +74,42 @@ https://你的worker地址/__cron   （带 X-Cron-Secret 头）
 
 ---
 
-## 关于 Cloudflare 原生 Cron Trigger：本项目的现状
+## Cloudflare 原生 Cron Trigger：现已启用
 
-**已彻底移除，无需任何操作。** 本项目从一开始就不使用原生 Cron Trigger：
+`wrangler.toml` 含 `[triggers] crons = ["*/5 * * * *"]`，`src/index.ts` 导出了 `scheduled()`。
+CF 每 5 分钟调用一次，**不经过 HTTP 层、无需 `CRON_SECRET`**。
 
 | 项目 | 说明 |
 | --- | --- |
-| 额度 | 免费版 Cron Trigger 是**账号级 5 个**（Paid 250 个），本项目不占用，留给账号上其他 Worker |
+| 频率 | 固定每 5 分钟，**cron 表达式不能运行时修改**，改一次要改 `wrangler.toml` 并重新部署 |
+| 实际执行频率 | 由管理台「监控触发源」的渠道开关 + 「设置」页的**监控间隔**共同决定，改间隔即时生效 |
+| 额度 | 免费版 Cron Trigger 是**账号级 5 个**（Paid 250 个），本项目占用 1 个 |
 | 部署失败 | 账号额度用尽时 `wrangler deploy` 会报 `error 10072`（`has reached the Workers Free limit of 5 cron triggers per account`），整个部署会失败 |
-| 代码 | `src/index.ts` 的 `scheduled()` 出口已删除，`wrangler.toml` 不含 `[triggers]` 段 |
-| CPU | Free 计划 10ms/请求，`scheduled` 事件同样计费；外部触发只在被调用时才计费 |
+| CPU | Free 计划 10ms/请求，`scheduled` 事件同样计费；只在被调用时计费，不空转 |
 
 因此：
 
-- `wrangler.toml` **不要**添加 `[triggers]` 段。Cloudflare 会在部署时校验，
-  若 Worker 没有 `scheduled` 导出会直接报错 `The script has no scheduled handler`。
-- Dashboard → Worker → Triggers 页里若看到该 Worker 有残留的 cron 条目
-  （wrangler 无法删除手工创建的条目），请在该页面手动删除。
-- 调度全部交给外部服务，开关见管理台「监控触发源」的五个渠道：
-  GitHub Actions / 外部定时服务 / 自建驱动 / 腾讯云 SCF / 阿里云 FC。
+- 若 `wrangler deploy` 报 `error 10072`：删掉 `wrangler.toml` 的 `[triggers]` 段再部署（监控会退回纯外部触发），
+  或删除账号上其他 Worker 的 cron 触发器腾额度。
+- Dashboard → Worker → Triggers 页里若看到**手工创建**的残留 cron 条目
+  （wrangler 无法删除手工创建的条目），请在该页面手动删除，否则残留条目的调用会因缺少
+  `scheduled` 处理函数而进入失败状态。
+- 渠道开关见管理台「监控触发源」的六个渠道：
+  GitHub Actions / 外部定时服务 / 自建驱动 / **Cloudflare 原生 Cron** / 腾讯云 SCF / 阿里云 FC。
+
+### 监控间隔如何影响原生 Cron
+
+CF 固定每 5 分钟叫一次，但「设置」页的**监控间隔**决定真实执行频率：
+
+- 间隔 = 5 分钟 → 每 5 分钟真跑一次
+- 间隔 = 15 分钟 → CF 叫 3 次，第 1 次真跑，后 2 次直接跳过（不调阿里云 API）
+- 间隔 = 0 → 视为不限制，由 CF 的 5 分钟频率兜底
+
+**跳过的轮次不会写「上次触发时间」。** 这是刻意的：否则触发时间被自己不断刷新，
+30 分钟断档阈值永远不会命中，告警形同虚设，而实际上监控在空转。
+
+> ⚠️ 如果你把某个渠道的开关关掉，它的「上次触发」会停止更新，
+> 超过 30 分钟就会在日志里出现断档告警——这是预期行为，提醒你该渠道没在工作。
 
 ---
 
@@ -130,9 +148,10 @@ https://你的worker地址/__cron   （带 X-Cron-Secret 头）
    curl -H "X-Cron-Secret: 你的密钥" https://你的地址/__cron
    ```
    应返回 `{"monitored": N, "interval_minutes": 5}`（N 是账号数；`skipped: true` 表示刚运行过、被防抖跳过）。
-2. **原生 Cron**（仅开启时）：到 Dashboard → Worker → Logs（或 observability）看 `scheduled` 事件；也可回管理台「日志」页看 `heartbeat` 监控日志。
+2. **原生 Cron**：到 Dashboard → Worker → Logs（或 observability）看 `scheduled` 事件；也可回管理台「监控触发源」看「Cloudflare 原生 Cron」那行的「上次触发」时间戳是否在走动。
+   若时间戳不动，先确认该渠道开关是否为「开」，以及「设置」页的监控间隔是否把执行频率降到了低于 5 分钟（那属于正常节流）。
 3. **部署失败报 error 10072**：说明账号 Cron 额度用尽（`This account has reached the Workers Free limit of 5 cron triggers per account`）。
-   确认 `wrangler.toml` 中 `[triggers]` 段已注释掉后重新部署；或在 Dashboard 删除其他 Worker 的 cron 触发器、升级 Workers Paid。
+   删掉 `wrangler.toml` 中 `[triggers]` 段后重新部署（退回纯外部触发），或在 Dashboard 删除其他 Worker 的 cron 触发器腾额度、升级 Workers Paid。
 4. 管理台「立即监控」按钮：已登录状态下点击即可，无需密钥。
    ```bash
    curl -H "X-Cron-Secret: 你的密钥" https://你的地址/__cron

@@ -23,19 +23,24 @@ binding = "DB"
 database_name = "cdt-monitor-db"
 
 # ─────────────────────────────────────────────────────────────
-# 监控调度：仅使用「外部 HTTP 触发」GET /__cron（携带 CRON_SECRET）
+# 监控调度：Cloudflare 原生 Cron Trigger + 外部 HTTP 触发（GET /__cron，携带 CRON_SECRET）
 #
-# ⚠️ 原生 Cron Trigger 已【彻底移除】，本文件不含 [triggers] 段，请勿添加。原因：
-#    1) Cloudflare 免费版的 Cron Trigger 额度是【账号级 5 个】，本项目用不上它，
-#       留给账号上其他 Worker，也避免 error 10072（额度用尽）导致 deploy 整体失败；
-#    2) Free 计划 CPU 仅 10ms/请求，scheduled 事件同样计费，外部触发更省；
-#    3) src/index.ts 的 scheduled() 出口已删除，重新加 [triggers] 会报错
-#       "The script has no scheduled handler"。
+# crons 固定每 5 分钟调用一次 scheduled()。注意 Cloudflare 的 cron 表达式【不能运行时修改】，
+# 想改触发频率必须改这里并重新部署。
 #
-# 调度请交给外部服务：GitHub Actions、自建驱动（selfhost）、cron-job.org、
-# 腾讯云 SCF / 阿里云 FC 等，开关见管理台「监控触发源」。
-# 详见 DEPLOY-CRON.md。
+# 「实际多久跑一次监控」由管理台「监控触发源 → 监控间隔」控制：CF 每 5 分钟叫一次，
+# 不足间隔的轮次在 scheduled() 内直接跳过（不跑阿里云 API，也不写 trigger_seen，
+# 以免掩盖断档告警）。改间隔即时生效，无需重新部署。
+#
+# 额度：Free 计划的 Cron Trigger 是【账号级 5 个】（Paid 为 250），本项目占用 1 个。
+# 若 deploy 报 error 10072，说明账号额度用尽，需删掉本段与其他 Worker 的 cron。
+#
+# 若 Dashboard → Worker → Triggers 页存在【手工创建】的 cron 条目，wrangler 无法管理它，
+# 请在 Dashboard 删除后再 deploy，避免残留条目因缺少 scheduled 处理函数而失败。
 # ─────────────────────────────────────────────────────────────
+
+[triggers]
+crons = ["*/5 * * * *"]
 
 [observability]
 enabled = true

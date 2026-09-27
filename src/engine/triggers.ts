@@ -3,28 +3,32 @@
 // 一旦断档，实例会错过整天的开关机窗口持续产生费用却无人察觉。
 // 因此每个渠道独立开关 + 记录「上次触发时间」+ 断档告警。
 
-// 注意：Cloudflare 原生 Cron Trigger 已彻底移除（含 src/index.ts 的 scheduled() 出口与
-// wrangler.toml 的 [triggers]）。原因：免费版 Cron Trigger 额度是【账号级 5 个】，本项目
-// 改用外部触发后不需要占用它；且 scheduled 事件会额外消耗 CPU 计费时长。
-// 存量数据兼容：老 settings 里可能残留 "native" 键，parseTriggerSources / parseTriggerSeen
-// 都按 TRIGGER_SOURCES 白名单遍历，会被自然忽略，不会报错也不会被读到。
-export type TriggerSource = 'github' | 'http' | 'selfhost' | 'tencent' | 'aliyun';
+// Cloudflare 原生 Cron Trigger：wrangler.toml 的 [triggers] crons 固定每 5 分钟触发
+// scheduled()（CF 的 cron 表达式无法运行时修改，改一次要重新部署）。
+// 「实际多久跑一次」由管理台的「监控间隔」控制：CF 每 5 分钟叫一次，不足间隔的轮次
+// 在 scheduled() 内部直接跳过，不跑阿里云 API、也不写 trigger_seen（保持"上次真实执行"
+// 语义，否则断档告警会被自己刷新的时间戳掩盖）。
+export type TriggerSource = 'github' | 'http' | 'selfhost' | 'native' | 'tencent' | 'aliyun';
 
-export const TRIGGER_SOURCES: TriggerSource[] = ['github', 'http', 'selfhost', 'tencent', 'aliyun'];
+export const TRIGGER_SOURCES: TriggerSource[] = ['github', 'http', 'selfhost', 'native', 'tencent', 'aliyun'];
 
 export const TRIGGER_LABELS: Record<TriggerSource, string> = {
   github: 'GitHub Actions',
   http: '外部定时服务（cron-job.org 等）',
   selfhost: '自建驱动（self-hosted）',
+  native: 'Cloudflare 原生 Cron',
   tencent: '腾讯云云函数 SCF',
   aliyun: '阿里云函数计算 FC',
 };
 
-// 默认开关：三个外部渠道全开，两个云函数默认关（按需启用）
+// 默认开关：CF 原生 Cron 默认开（调度最稳，不依赖任何外部服务）；
+// 自建驱动默认开；GitHub Actions 与外部定时默认关——避免同一 5 分钟窗口内
+// 多来源重复触发，也免得 GitHub 因长期不活跃自动禁用 schedule 后无人察觉。
 export const DEFAULT_TRIGGER_SOURCES: Record<TriggerSource, boolean> = {
-  github: true,
-  http: true,
+  github: false,
+  http: false,
   selfhost: true,
+  native: true,
   tencent: false,
   aliyun: false,
 };
@@ -38,8 +42,7 @@ export function normalizeSource(raw: string | null | undefined): TriggerSource {
   const v = (raw || '').trim().toLowerCase();
   if (v === 'github' || v === 'github_actions' || v === 'actions') return 'github';
   if (v === 'selfhost' || v === 'self-host' || v === 'self_host' || v === 'driver') return 'selfhost';
-  // 'cron' / 'scheduled' 这两个历史别名不再映射到 native（该渠道已移除），
-  // 按下方兜底归入 http，行为与移除前一致。
+  if (v === 'native' || v === 'cron' || v === 'scheduled') return 'native';
   if (v === 'tencent' || v === 'scf' || v === 'tencent_cloud' || v === 'tencentcloud') return 'tencent';
   if (v === 'aliyun' || v === 'fc' || v === 'alicloud' || v === 'aliyun_fc') return 'aliyun';
   return 'http';
@@ -68,6 +71,20 @@ export function parseTriggerSeen(raw: string | null | undefined): Partial<Record
     }
   } catch { /* 同上 */ }
   return out;
+}
+
+// 原生 Cron 的节流判定（纯函数，便于单测）：
+// CF 固定每 5 分钟调用一次 scheduled()，而用户可以在管理台把「监控间隔」设得更长
+// （省阿里云 API 调用与 CF 额度）。间隔为 0 或从未跑过 → 直接执行；否则距上次真实执行
+// 不足一个间隔就跳过。
+// 注意这里用 lastRun（last_monitor_run，真正抢到槽位的时刻）而不是"触发时刻"——
+// 调用方据此决定要不要写 trigger_seen：跳过的轮次绝不能写，否则上次触发时间被自己
+// 不断刷新，断档告警（阈值 30 分钟）会被永久掩盖，用户以为监控很勤其实在空转。
+export function shouldNativeRun(lastRun: number, intervalMinutes: number, nowSec: number): boolean {
+  const minGapSec = Math.max(0, intervalMinutes) * 60;
+  if (minGapSec <= 0) return true;
+  if (lastRun <= 0) return true;
+  return nowSec - lastRun >= minGapSec;
 }
 
 // 断档判定：渠道已启用、有过触发记录、且距上次触发超过阈值 → true（需要告警）。

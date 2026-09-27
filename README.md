@@ -131,11 +131,16 @@ RAM → 权限策略 → 创建自定义策略（脚本编辑），粘贴以下 
 不启用账单功能时，可删去两条 `bss:` 权限进一步收窄。
 管理台「账号」页底部也提供同一份策略与一键复制。
 
-## 定时监控（仅外部触发）
+## 定时监控（原生 Cron + 外部触发双链路）
 
-调度由**外部定时服务请求 `/__cron`**（携带 `CRON_SECRET`，见下）。Cloudflare 原生 Cron Trigger 已彻底移除，`wrangler.toml` 不含 `[triggers]` 段，`src/index.ts` 无 `scheduled()` 出口——免费版 Cron Trigger 额度是账号级 5 个，本项目用不上；且 `[triggers]` 段会触发 `error 10072` 导致部署失败，或报 `The script has no scheduled handler`。详见 [DEPLOY-CRON.md](./DEPLOY-CRON.md)。
+调度有两条链路，共用同一套防抖与原子槽位抢占，同一防抖窗口内只有一轮真正执行：
 
-若 Dashboard → Worker → Triggers 页看到该 Worker 有残留 cron 条目，需在该页面手动删除（wrangler 删不掉手工创建的条目）。
+1. **Cloudflare 原生 Cron**：`wrangler.toml` 的 `[triggers] crons = ["*/5 * * * *"]` 每 5 分钟调用 `scheduled()`，直调内部监控函数、**不经过 HTTP 层、无需 `CRON_SECRET`**。
+2. **外部触发** `GET /__cron`：由 cron-job.org / GitHub Actions / 自建驱动等请求，需携带 `CRON_SECRET`。
+
+**「实际多久跑一次」由管理台「监控触发源」里的开关 + 「设置」页的监控间隔决定。** 注意 Cloudflare 的 cron 表达式无法运行时修改（改一次要重新部署），而监控间隔是即时生效的——想调频率优先改间隔。详见 [DEPLOY-CRON.md](./DEPLOY-CRON.md)。
+
+免费版 Cron Trigger 额度是账号级 **5 个**，本项目占用 1 个；若 `wrangler deploy` 报 `error 10072` 说明额度用尽，需删除本段或其他 Worker 的 cron。若 Dashboard → Worker → Triggers 页有**手工创建**的残留条目，wrangler 删不掉它，需在该页面手动删除。
 
 ```
 curl -H "X-Cron-Secret: 你的密钥" https://你的worker地址/__cron

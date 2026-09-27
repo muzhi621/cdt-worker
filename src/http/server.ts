@@ -898,7 +898,7 @@ async function saveTriggers(ctx: Context): Promise<Response> {
       changed++;
     }
   }
-  if (changed === 0) return error('invalid_input', '未提供任何渠道开关（github / http / selfhost / tencent / aliyun）', 400);
+  if (changed === 0) return error('invalid_input', '未提供任何渠道开关（github / http / selfhost / native / tencent / aliyun）', 400);
   await store.setTriggerSources(ctx.env, sources);
   const detail = TRIGGER_SOURCES.map((s) => `${TRIGGER_LABELS[s]}=${sources[s] ? '开' : '关'}`).join('、');
   await store.addLog(ctx.env, 'audit', `更新监控触发源开关：${detail}`);
@@ -937,6 +937,19 @@ async function testTrigger(ctx: Context): Promise<Response> {
       ok: false, source, enabled: false, secretConfigured,
       lastSeen: seen[source] ?? 0,
       message: `渠道「${TRIGGER_LABELS[source]}」当前是关闭状态，Worker 会忽略它的触发；如需启用请先打开开关。`,
+    });
+  }
+  if (source === 'native') {
+    // 原生 Cron 由 Cloudflare 调度，无法从前台模拟触发。
+    // 顺便把「监控间隔」节流的影响讲清楚，避免用户以为点了没反应就是坏了。
+    const ms = await store.getMonitorState(ctx.env);
+    return json({
+      ok: true, source, enabled: true, secretConfigured,
+      lastSeen: seen[source] ?? 0, simulated: false,
+      monitor_interval_minutes: ms.intervalMinutes,
+      message: `原生 Cron 由 Cloudflare 每 5 分钟调度一次，请等待下一个周期`
+        + `（或到 Dashboard 的 Logs 查看 scheduled 事件）。`
+        + `当前「监控间隔」设为 ${ms.intervalMinutes} 分钟，实际执行频率以其为准。`,
     });
   }
   const nowSec = Math.floor(Date.now() / 1000);

@@ -185,12 +185,13 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && npm install
 
 ### Q3：监控没有自动跑起来
 
-本项目**不使用** Cloudflare 原生 Cron Trigger，调度全部由外部服务请求 `/__cron` 驱动。
-先按「监控触发源」里每个渠道的教程确认外部服务已配置，再看：
+调度有两条链路：Cloudflare 原生 Cron（每 5 分钟调 `scheduled()`，无需密钥）与外部服务请求 `/__cron`。
+先按「监控触发源」里每个渠道的教程确认配置，再看：
 
 - 对应渠道的开关是否为「已开启」，「上次触发」时间戳是否在走动
-- `CRON_SECRET` 是否在 Worker 侧配置（Dashboard → Worker → Settings → Variables and Secrets）
-- 外部服务请求时是否携带了 `X-Cron-Secret` 头（或 `?key=` 参数）且值一致
+- 「设置」页的**监控间隔**是否把执行频率降得比预期低（间隔大于 5 分钟时，CF 每 5 分钟的调用会被节流跳过，属正常）
+- 走外部链路时：`CRON_SECRET` 是否在 Worker 侧配置（Dashboard → Worker → Settings → Variables and Secrets），
+  且请求是否携带了 `X-Cron-Secret` 头（或 `?key=` 参数）且值一致
 
 手动验证：
 
@@ -198,9 +199,11 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && npm install
 curl -H "X-Cron-Secret: 你的密钥" https://你的地址/__cron
 ```
 
-另外若 Dashboard → Worker → Triggers 页看到该 Worker 有残留 cron 条目，
-请在该页面手动删除——wrangler 无法删除手工创建的条目，残留条目的调用会因
-没有 `scheduled` 处理函数而进入失败状态。
+若 Cloudflare 报 `error 10072`，说明账号 Cron Trigger 额度（免费版 5 个/账号）已用尽：
+删掉 `wrangler.toml` 的 `[triggers]` 段重新部署，或腾出其他 Worker 的额度。
+
+若 Dashboard → Worker → Triggers 页看到**手工创建**的残留 cron 条目，请在该页面手动删除
+——wrangler 删不掉手工创建的条目，残留条目的调用会因没有 `scheduled` 处理函数而进入失败状态。
 
 ### Q4：主密钥丢了怎么办
 

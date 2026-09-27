@@ -30,7 +30,7 @@
                  ├─ 触发源 B: cron-job.org / 自建驱动 → GET /__cron?source=http|selfhost
  [外部定时服务] ──┼─ 触发源 C: 腾讯云 SCF   → ?source=tencent
                  ├─ 触发源 D: 阿里云 FC    → ?source=aliyun
-                 └─（无 CF 原生 Cron：scheduled() 已移除，见下方说明）
+                 └─ 注：CF 原生 Cron（[triggers] */5）走 scheduled() 直调，不在此列、无需密钥
                                     │  携带 X-Cron-Secret（constantTimeEqual 校验）
                                     ▼
                           ┌─────────────────────┐
@@ -91,7 +91,7 @@
 | 编号 | 功能点 | 位置 | 说明 |
 |---|---|---|---|
 | A1 | 首次请求自动建表 | `index.ts:8-19` | `ensureSchema` 幂等（进程内 `schemaReady` 标记），失败返回 `schema_init_failed` 而非崩溃 |
-| A2 | 原生 Cron 入口 | `index.ts:25-36` | 受 `sources.native` 开关控制；关闭时 `noteTriggerDisabled` 留痕 |
+| A2 | 原生 Cron 入口 | `index.ts:22-43` | `[triggers] */5` 触发 `scheduled()`，直调内部监控函数不经 HTTP 层；受 `sources.native` 开关控制，关闭时 `noteTriggerDisabled` 留痕；按「监控间隔」节流，跳过的轮次**不写** `trigger_seen` |
 | A3 | `/__cron` HTTP 入口 | `server.ts:599-636` | 双通道鉴权：`X-Cron-Secret`/`?key=`（constantTime）或管理员会话 |
 | A4 | 触发源身份识别 | `triggers.ts:34-42` | `?source=` 或 `X-Trigger-Source`，未声明归 `http`；含 15 个别名映射 |
 | A5 | 渠道开关判定 | `server.ts:621-634` | 关闭 → `{skipped:true, reason:'source_disabled'}`，不执行监控 |
@@ -262,7 +262,7 @@
 
 | 编号 | 决策 | 理由 | 代价 |
 |---|---|---|---|
-| ADR-01 | 用外部 HTTP 触发（`/__cron`）替代 CF 原生 Cron 作为默认 | 免费账号仅 5 个 Cron 额度，启用会触发 error 10072 致部署失败 | 需自维 CRON_SECRET 与冗余渠道 |
+| ADR-01 | 定时调度双链路：`[triggers]` 原生 Cron `*/5` + 外部 `/__cron` | 曾因免费账号仅 5 个 Cron 额度而彻底移除原生 Cron（`9e67646`）；用户腾出额度后同日恢复。两条链路并行而非二选一，互为备份 | 占用 1 个账号级额度；CF cron 表达式不能运行时改（频率实际由「监控间隔」兜住） |
 | ADR-02 | 模块化单体，不分服务 | 单人维护、边界清晰、无需运维 | 规模增长后需自律模块边界 |
 | ADR-03 | 状态全放 D1，Worker 无状态 | Serverless 多 isolate，内存不可信 | 每个周期多次 D1 往返 |
 | ADR-04 | 幂等键放 `action_events` 表 | 免费额度内最省的方案，天然去重 | 键需设计好时间维度（已处理跨午夜） |
@@ -380,7 +380,7 @@ async function refresh(ctx: Context): Promise<Response> {
 | D1 读/天 | 100,000 | ~3,000 | 3% |
 | D1 写/天 | 50,000 | ~5,000 | 10% |
 | D1 存储 | 5 GB | 日志 30 天 ≈ 5 MB | 0.1% |
-| Cron Trigger | 5 个/账号 | 0（默认关闭） | 0 |
+| Cron Trigger | 5 个/账号 | 1（原生 Cron `*/5`） | 20% |
 
 **结论：D1 与请求数都很安全，唯一需要盯的是「单请求 CPU」。**
 
@@ -497,3 +497,24 @@ Cloudflare 免费额度是**账号级汇总**的。把上表 1.5%/3%/10% 的水�
 
 - **crypto AAD**：改动涉及所有已加密数据，迁移风险 > 收益，保持 `enc:v1:` 前缀格式不变。
 - **getConfig 全量缓存**：会引入配置读取陈旧问题；当前 CPU 热点已由 CryptoKey/formatter 缓存解决。
+
+### 后续变更：恢复原生 Cron 链路
+
+`9e67646` 曾以"免费账号 Cron 额度紧张"为由彻底移除原生 Cron。用户在清理账号上其他
+项目的 cron 后要求恢复，因此把该链路按原样加回，并顺带解决了"前台无法自定义时间段"这一
+诉求（CF 的 cron 表达式不能运行时修改，改一次要重新部署）。
+
+| 位置 | 改动 |
+|---|---|
+| `wrangler.toml` | 恢复 `[triggers] crons = ["*/5 * * * *"]`，注释写明额度、改频方式与 Dashboard 残留条目处理 |
+| `src/index.ts` | 恢复 `scheduled()` 出口与相关 import |
+| `src/engine/triggers.ts` | `TriggerSource` 加回 `'native'`；`normalizeSource` 的历史别名 `cron` / `scheduled` 从"降级为 http"改回映射 `native`；`DEFAULT_TRIGGER_SOURCES` 改为 `native: true`、`github`/`http: false`（用户选择只留自建驱动 + 原生 Cron），`selfhost` 保持 true |
+| `src/http/server.ts` | 恢复 native 的渠道测试分支，提示中带出当前「监控间隔」 |
+| `test/trigger-source.test.ts` | 反转两条专为"删除 native"写的断言；新增 `shouldNativeRun` 的 4 例单测（测试 58 → 64） |
+
+**新增纯函数 `shouldNativeRun(lastRun, intervalMinutes, nowSec)`**（`triggers.ts`）：
+
+`scheduled()` 每 5 分钟被 CF 调用一次，实际执行频率由「监控间隔」决定。关键约束是
+**跳过的轮次绝不能写 `trigger_seen`** —— 若把"触发"当成"执行"写进去，上次触发时间会
+被自己不断刷新，30 分钟断档阈值永远命中不了，告警形同虚设，而监控实际在空转。
+因此判定基准取 `lastRun`（`last_monitor_run`，真正抢到槽位的时刻），而非渠道触发时刻。
