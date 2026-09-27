@@ -189,16 +189,22 @@ export async function processAccount(
   const percentage = usagePercent(traffic, account.maxTraffic);
   const overThreshold = percentage >= config.trafficThreshold;
   const thresholdKey = `threshold:${account.id}:active`;
-  // 读取账单缓存（余额/月度金额），供通知变量使用（未开启账单功能时为空）
-  let balanceText = '';
-  let costText = '';
-  if (config.enableBilling) {
+  // 读取账单缓存（余额/月度金额），供通知变量使用（未开启账单功能时为空）。
+  // 关键：改成懒加载——只有真正要发通知（阈值/保活/状态变化）时才读，且只读一次。
+  // 此前这里无条件读 2 次/账号/轮，而 accountVars 只在少数分支被调用，绝大多数轮次读完就丢，
+  // 5 账号下叠加后最坏轮次会撞 Free 计划 50 subrequest 上限（详见第二轮审查 P0-R1）。
+  let billingText: { balance: string; cost: string } | null = null;
+  async function peekBillingText(): Promise<{ balance: string; cost: string }> {
+    if (!config.enableBilling) return { balance: '', cost: '' };
+    if (billingText) return billingText; // 已读过，同一轮内复用
+    billingText = { balance: '', cost: '' };
     try {
       const bal = await store.billingCache<{ amount: number; currency: string }>(env, account.id, 'balance', '', 6);
-      if (bal.hit && bal.value) balanceText = `${bal.value.amount} ${bal.value.currency || ''}`.trim();
+      if (bal.hit && bal.value) billingText.balance = `${bal.value.amount} ${bal.value.currency || ''}`.trim();
       const bill = await store.billingCache<{ totalCost: number }>(env, account.id, 'instance_bill', localCycle(now, config.timezone), 6);
-      if (bill.hit && bill.value) costText = `${bill.value.totalCost}`;
-    } catch { /* 账单读取失败不影响通知 */ }
+      if (bill.hit && bill.value) billingText.cost = `${bill.value.totalCost}`;
+    } catch { /* 账单读取失败不影响通知，保持空串 */ }
+    return billingText;
   }
   // 阈值去抖键：只在「本次确实刷新过数据」的周期清理。
   // 未刷新数据的周期里阈值状态不可能变化，无条件 DELETE 纯属浪费 D1 操作。
@@ -222,7 +228,7 @@ export async function processAccount(
       const vars = accountVars(account, config, {
         traffic, status, percentage, now,
         timezone: config.timezone,
-        balance: balanceText, cost: costText,
+        ...(await peekBillingText()),
       });
       const event = newEvent('threshold', '流量阈值告警', `账号 ${masked(account.accessKeyId)} 的流量使用率达到 ${percentage.toFixed(2)}%。`, account.id, {
         ...vars,
@@ -298,7 +304,7 @@ export async function processAccount(
         const event = newEvent('keepalive', '实例保活启动', '检测到实例在允许运行时段意外停止，已发送启动指令。', account.id, {
           ...accountVars(account, config, {
             traffic, status, percentage, now,
-            timezone: config.timezone, balance: balanceText, cost: costText,
+            timezone: config.timezone, ...(await peekBillingText()),
           }),
         });
         await store.addOutbox(env, 'notify', event);
@@ -316,9 +322,14 @@ export async function processAccount(
     // 形成尖峰（+10 subrequest）直接撞 Free 计划的 50 上限；抖动后 miss 被分散到不同轮次。
     const BILL_TTL_HOURS = (10 + (account.id % 7)) / 60;
     const cycle = localCycle(now, config.timezone); // 配置时区月份 YYYY-MM
+    // 一次查询取回 balance + instance_bill 两个 kind，替代两次 billingCache()（省 1 subrequest/轮）
+    const snap = await store.billingSnapshot<{ amount?: number; currency?: string; totalCost?: number }>(
+      env, account.id, { balance: '', instance_bill: cycle }, BILL_TTL_HOURS,
+    );
+    const balanceHit = snap.balance?.hit ?? false;
+    const billHit = snap.instance_bill?.hit ?? false;
     try {
-      const balanceCache = await store.billingCache(env, account.id, 'balance', '', BILL_TTL_HOURS);
-      if (!balanceCache.hit) {
+      if (!balanceHit) {
         const balance = await aliyun.getAccountBalance(account, account.accessKeySecret);
         await store.setBillingCache(env, account.id, 'balance', '', balance);
       }
@@ -326,8 +337,7 @@ export async function processAccount(
       await store.addLog(env, 'error', `余额查询失败 [${masked(account.accessKeyId)}]: ${err}`);
     }
     try {
-      const billCache = await store.billingCache<{ totalCost: number }>(env, account.id, 'instance_bill', cycle, BILL_TTL_HOURS);
-      if (!billCache.hit) {
+      if (!billHit) {
         // 先按实例查；无数据时回退到账号级（当月账单延迟出账、或包年包月实例无账单时）
         let bill = await aliyun.getInstanceBill(account, account.accessKeySecret, cycle);
         let scope = '实例';
@@ -367,7 +377,7 @@ export async function processAccount(
     const event = newEvent('status', title, summary, account.id, {
       ...accountVars(account, config, {
         traffic, status, percentage, now,
-        timezone: config.timezone, balance: balanceText, cost: costText,
+        timezone: config.timezone, ...(await peekBillingText()),
       }),
       '变化前状态': previousStatus || 'Unknown',
       '变化后状态': status,

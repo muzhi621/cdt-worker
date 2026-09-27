@@ -34,7 +34,9 @@ export async function encryptNotifyConfig(env: Env, cfg: Record<string, unknown>
 }
 
 // 读取侧：把加密的敏感字段还原为明文供投递使用。非 enc 前缀（旧库明文）原样透传，
-// 解密失败（主密钥更换等）时回退为空串，避免一条坏数据让整个通知配置不可用。
+// 解密失败（主密钥更换等）时回退为空串并留一条 error 日志——避免一条坏数据让整个通知配置不可用，
+// 但也不能完全静默：主密钥轮换会让 5 个通知凭据同时解密失败、通知无声停摆，
+// 对一个靠告警活着的项目，这是最难发现的一类故障，至少要让日志页能自查。
 export async function decryptNotifyConfig(env: Env, cfg: Record<string, unknown>): Promise<Record<string, unknown>> {
   for (const [chan, field] of NOTIFY_SECRET_PATHS) {
     const obj = cfg[chan];
@@ -44,7 +46,13 @@ export async function decryptNotifyConfig(env: Env, cfg: Record<string, unknown>
     if (typeof v !== 'string' || v === '') continue;
     try {
       o[field] = await decrypt(env, v);
-    } catch { o[field] = ''; }
+    } catch {
+      o[field] = '';
+      // 留痕但不抛出：解密失败是异常情况，宁可在日志页吵一点，也不要无声失效
+      void addLog(env, 'error',
+        `通知凭据解密失败，该通道将发送失败：${chan}.${field}（检查 CDT_MASTER_KEY 是否变更）`)
+        .catch(() => {});
+    }
   }
   return cfg;
 }
@@ -168,21 +176,27 @@ const CRON_SECRET_KEY = 'cron_secret';
 // isolate 级缓存：resolveCronSecret 每轮监控 + 每次 /__cron 请求都会调一次，
 // 而 D1 托管密钥极少变动，缓存后可省掉每轮 1 次 D1 读 + 1 次 AES 解密（CPU 热点）。
 // 缓存的是「解密后的明文」——仅存活于当前 isolate 内存，不落盘、不出 isolate。
-// 失效时机：setCronSecret（管理台修改/清除）时主动清空；isolate 回收自然重置。
-let cronSecretCache: string | null | undefined; // undefined=未加载，null=无托管值，string=明文
+// 失效时机：setCronSecret（管理台修改/清除）时主动清空；TTL 到期自动重读；isolate 回收自然重置。
+// TTL 为什么不能太长：管理员改密钥是安全操作（怀疑泄露），其他 isolate 里缓存的旧明文
+// 若不过期，仍可继续用于 /__cron 鉴权——残留窗口越短越好。60s 对每 5 分钟一轮的 cron 无感。
+let cronSecretCache: { value: string; at: number } | undefined;
+const CRON_SECRET_CACHE_TTL_MS = 60_000;
 
-// 仅供测试/诊断重置缓存（正常运行时缓存由 setCronSecret 主动失效、isolate 回收自然重置）
+// 仅供测试/诊断重置缓存（正常运行时缓存由 setCronSecret 主动失效、TTL 到期、isolate 回收自然重置）
 export function resetCronSecretCache(): void {
   cronSecretCache = undefined;
 }
 
 export async function resolveCronSecret(env: Env): Promise<string> {
-  if (cronSecretCache !== undefined) return cronSecretCache ?? '';
+  if (cronSecretCache && Date.now() - cronSecretCache.at < CRON_SECRET_CACHE_TTL_MS) {
+    return cronSecretCache.value;
+  }
+  cronSecretCache = undefined; // 过期：清掉旧值，重新读库
   const row = await env.DB.prepare(`SELECT value FROM settings WHERE key = '${CRON_SECRET_KEY}'`).first();
   const stored = String((row as Record<string, unknown> | null)?.value ?? '');
   if (stored) {
     try {
-      cronSecretCache = await decrypt(env, stored);
+      cronSecretCache = { value: await decrypt(env, stored), at: Date.now() };
     } catch {
       // 解密失败（主密钥更换等）时回退 env，且不缓存（下次仍重试解密，可能主密钥已恢复）
       return (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
@@ -190,9 +204,9 @@ export async function resolveCronSecret(env: Env): Promise<string> {
   } else {
     // 无托管值：回退 env.CRON_SECRET。这里缓存的是「最终生效值」（即 env 值），
     // 因为 env 在 isolate 内固定，缓存后每轮省一次 D1 读仍安全。
-    cronSecretCache = (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
+    cronSecretCache = { value: (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '', at: Date.now() };
   }
-  return cronSecretCache;
+  return cronSecretCache.value;
 }
 
 // value 传空串 = 清除托管，鉴权回退到 Worker Secret
@@ -200,14 +214,14 @@ export async function setCronSecret(env: Env, value: string): Promise<void> {
   if (!value) {
     await env.DB.prepare(`DELETE FROM settings WHERE key = '${CRON_SECRET_KEY}'`).run();
     // 清除托管后回退 env：缓存 env 值（isolate 内固定），下次 resolve 省一次 D1 读
-    cronSecretCache = (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
+    cronSecretCache = { value: (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '', at: Date.now() };
     return;
   }
   await env.DB
     .prepare(`INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('${CRON_SECRET_KEY}', ?, datetime('now'))`)
     .bind(await encrypt(env, value))
     .run();
-  cronSecretCache = value; // 直接以明文更新缓存，省一次解密
+  cronSecretCache = { value, at: Date.now() }; // 直接以明文更新缓存，省一次解密
 }
 
 // 是否已托管（只回布尔语义，不返回明文）：用于前端区分「托管值」与「Worker Secret」
@@ -271,8 +285,8 @@ export async function getMonitorState(env: Env): Promise<{ intervalMinutes: numb
   for (const r of rows.results ?? []) {
     const k = String((r as Record<string, unknown>).key);
     const v = String((r as Record<string, unknown>).value ?? '');
-    if (k === 'monitor_interval') intervalMinutes = parseInt(v, 10) || DEFAULT_CONFIG.monitorInterval;
-    else if (k === 'last_monitor_run') lastRun = parseInt(v, 10) || 0;
+    if (k === 'monitor_interval') intervalMinutes = clampInt(v, 1, 1440, DEFAULT_CONFIG.monitorInterval);
+    else if (k === 'last_monitor_run') lastRun = clampInt(v, 0, Number.MAX_SAFE_INTEGER, 0);
   }
   return { intervalMinutes, lastRun };
 }
@@ -421,18 +435,21 @@ export async function updateAccountConfig(env: Env, a: Partial<Account> & { id: 
   const akEnc = a.accessKeyId ? await encrypt(env, a.accessKeyId) : null;
   const skEnc = a.accessKeySecret ? await encrypt(env, a.accessKeySecret) : null;
   // keep_alive 列此前在 UPDATE 里遗漏（saveAccount 有它），导致编辑已有账号时
-  // 「账号级保活」开关关不掉——UI 提示保存成功但列值不变。这里补上，未显式传入时沿用 true（跟随全局）。
-  const keepAlive = a.keepAlive === undefined ? true : a.keepAlive;
+  // 「账号级保活」开关关不掉——UI 提示保存成功但列值不变。现已补上。
+  // 语义：与 AK/SK 一致，仅在调用方显式传入时才写该列。若用「未传则默认 true」，
+  // API 客户端只发 {id:1, remark:"x"} 改备注时会把已关闭的账号级保活又打开成 1。
+  const hasKeepAlive = a.keepAlive !== undefined;
   const sql =
-    `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, site_type=?, max_traffic=?, schedule_enabled=?, start_time=?, stop_time=?, shutdown_mode=?, keep_alive=?` +
+    `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, site_type=?, max_traffic=?, schedule_enabled=?, start_time=?, stop_time=?, shutdown_mode=?` +
+    (hasKeepAlive ? ', keep_alive=?' : '') +
     (akEnc ? ', access_key_id_enc=?' : '') +
     (skEnc ? ', access_key_secret_enc=?' : '') +
     `, updated_at=datetime('now') WHERE id=?`;
   const vals: unknown[] = [
     name, remark, a.regionId ?? '', a.instanceId ?? '', a.siteType ?? 'china',
     a.maxTraffic ?? 0, a.scheduleEnabled ? 1 : 0, a.startTime ?? '', a.stopTime ?? '', a.shutdownMode ?? '',
-    keepAlive ? 1 : 0,
   ];
+  if (hasKeepAlive) vals.push(a.keepAlive ? 1 : 0);
   if (akEnc) vals.push(akEnc);
   if (skEnc) vals.push(skEnc);
   vals.push(a.id);
@@ -667,6 +684,45 @@ export async function setBillingCache(
     `INSERT INTO billing_cache (account_id, kind, cycle, value, updated_at) VALUES (?,?,?,?,datetime('now'))
      ON CONFLICT(account_id, kind, cycle) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`,
   ).bind(accountId, kind, cycle, JSON.stringify(value)).run();
+}
+
+// 一次查询取回某账号的多个账单缓存 kind（如 balance + instance_bill），
+// 替代逐个 billingCache() 调用：D1 的 SELECT ... WHERE kind IN (...) 只算 1 个 subrequest，
+// 而 balance（cycle=''）与 instance_bill（cycle='YYYY-MM'）分开查是 2 个。
+// 每账号每轮省 1 个，5 账号 × 288 轮/天 ≈ 省 1440 个/天（详见第二轮审查 P0-R2）。
+// cycleFor：每个 kind 各自的 cycle（balance 固定 ''，instance_bill 为 'YYYY-MM'），
+// 因为两种 kind 的账期维度不同，不能用同一个 cycle 去匹配。
+// 返回每个 kind 的 TTL 命中情况（{ hit, value }），供调用方决定是否要重拉阿里云。
+export async function billingSnapshot<T>(
+  env: Env,
+  accountId: number,
+  cycleFor: Record<string, string>,
+  ttlHours: number,
+): Promise<Record<string, { hit: boolean; value?: T }>> {
+  const kinds = Object.keys(cycleFor);
+  const placeholders = kinds.map(() => '?').join(',');
+  const rows = await env.DB.prepare(
+    `SELECT kind, cycle, value, updated_at FROM billing_cache WHERE account_id = ? AND kind IN (${placeholders})`,
+  ).bind(accountId, ...kinds).all();
+
+  const nowMs = Date.now();
+  const out: Record<string, { hit: boolean; value?: T }> = {};
+  for (const k of kinds) out[k] = { hit: false };
+  for (const r of rows.results ?? []) {
+    const row = r as Record<string, unknown>;
+    const kind = String(row.kind);
+    // cycle 必须与该 kind 的期望值精确匹配（balance 是 ''，instance_bill 是 'YYYY-MM'）
+    if (String(row.cycle ?? '') !== (cycleFor[kind] ?? '')) continue;
+    // TTL 判断：D1 的 datetime('now') 返回 UTC 无时区字符串，需按 UTC 解析（东八区会差 8 小时）
+    const raw = String(row.updated_at ?? '');
+    const utcMs = Date.parse(raw.replace(' ', 'T') + 'Z');
+    const updatedMs = isNaN(utcMs) ? Date.parse(raw) : utcMs;
+    if (nowMs - updatedMs > ttlHours * 3600 * 1000) continue; // 过期视为未命中
+    try {
+      out[kind] = { hit: true, value: JSON.parse(String(row.value)) as T };
+    } catch { out[kind] = { hit: false }; }
+  }
+  return out;
 }
 
 // 通知 Outbox

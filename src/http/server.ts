@@ -433,6 +433,26 @@ async function saveConfig(ctx: Context): Promise<Response> {
     ? null : clampNum(b.logRetentionDays, 1, 365, 30);
   if (logRetentionDays === null) return error('invalid_input', '日志保留天数必须在 1~365 之间', 400);
 
+  // 字符串白名单校验：这几个值会直接进分支判断或时区格式化，非法值常不报错（被 try/catch
+  // 吞掉回退），只表现为「功能悄悄不对」——例如非法时区被 time.ts 回退到 UTC，会让
+  // 定时开关机整体偏移 8 小时，用户只能看到「定时不准」却无从自查。写库前统一拦截。
+  if (b.timezone !== undefined) {
+    const tz = String(b.timezone).trim();
+    const tzOk = tz !== '' && (() => {
+      try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; }
+      catch { return false; }
+    })();
+    if (!tzOk) return error('invalid_input', '时区无效，请使用 IANA 时区名（如 Asia/Shanghai）', 400);
+  }
+  const SHUTDOWN_MODES = ['StopCharging', 'KeepCharging'];
+  if (b.shutdownMode !== undefined && !SHUTDOWN_MODES.includes(String(b.shutdownMode))) {
+    return error('invalid_input', `停机模式必须是 ${SHUTDOWN_MODES.join(' / ')}`, 400);
+  }
+  const THRESHOLD_ACTIONS = ['stop_and_notify', 'notify_only'];
+  if (b.thresholdAction !== undefined && !THRESHOLD_ACTIONS.includes(String(b.thresholdAction))) {
+    return error('invalid_input', `阈值动作必须是 ${THRESHOLD_ACTIONS.join(' / ')}`, 400);
+  }
+
   // 仅写入请求中显式传入的设置项：添加账号只传 accounts 时不会重置其他参数
   const optionalSettings: [string, unknown, string][] = [
     ['traffic_threshold', b.trafficThreshold, String(trafficThreshold)],
@@ -454,8 +474,13 @@ async function saveConfig(ctx: Context): Promise<Response> {
   if (b.logRetentionDays !== undefined) {
     settings.push(['log_retention_days', String(logRetentionDays)]);
   }
-  for (const [k, v] of settings) {
-    await ctx.env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind(k, v).run();
+  // 多条 settings 写入合并成一次 DB.batch（batch 只算 1 个 subrequest，逐个 run() 是 N 个）
+  if (settings.length > 0) {
+    await ctx.env.DB.batch(
+      settings.map(([k, v]) =>
+        ctx.env.DB.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)').bind(k, v),
+      ),
+    );
   }
   if (b.notifications) {
     // 敏感字段空串继承旧值，configured 标志不入库
@@ -688,6 +713,7 @@ async function deleteAccountHandler(ctx: Context): Promise<Response> {
     return error('rate_limited', '操作过于频繁，请 1 分钟后再试', 429);
   }
   const id = parseInt(ctx.params.id, 10);
+  if (!Number.isFinite(id) || id <= 0) return error('invalid_input', '账号 ID 无效', 400);
   await store.deleteAccount(ctx.env, id);
   await store.addLog(ctx.env, 'audit', '删除账号 #' + id);
   return json({ success: true });
@@ -722,13 +748,10 @@ function matchRoute(method: string, pathname: string): { route: (typeof routes)[
 }
 
 // 安全响应头：SPA 已 100% 转义，XSS 风险低，但补齐这些头成本近乎为零。
+// 注意：直接在原响应头对象上 set，不再 new Response 重包 body ——
+// 重包会触发两次 body 流搬运，在 10ms CPU 预算下是白给的开销。
 function withSecurityHeaders(resp: Response, request: Request): Response {
-  const out = new Response(resp.body, {
-    status: resp.status,
-    statusText: resp.statusText,
-    headers: resp.headers,
-  });
-  const headers = new Headers(out.headers);
+  const headers = new Headers(resp.headers);
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Referrer-Policy', 'no-referrer');
   headers.set('X-Frame-Options', 'DENY');
@@ -750,7 +773,7 @@ function withSecurityHeaders(resp: Response, request: Request): Response {
   if (request.url.startsWith('https://')) {
     headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
-  return new Response(out.body, { status: out.status, statusText: out.statusText, headers });
+  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
 }
 
 export async function handleRequest(env: Env, request: Request): Promise<Response> {
@@ -799,8 +822,9 @@ async function route(env: Env, request: Request): Promise<Response> {
       }
       // 复用本次读取结果更新「上次触发时间」，避免 touch 内部二次读库（省 D1 读）
       await store.touchTriggerSource(env, source, Math.floor(Date.now() / 1000), state.seen);
-      // 把已读到的状态传给监控循环，省掉一次重复查询
-      return runMonitorCycle(env, false, state, source);
+      // 外部触发才是主力方式，却没吃到「透传 monitor state」的优化：这里补上，省 1 subrequest/轮
+      const monitorState = await store.getMonitorState(env);
+      return runMonitorCycle(env, false, state, source, false, monitorState);
     }
     return runMonitorCycle(env);
   }
@@ -868,11 +892,9 @@ function downloadError(status: number, message: string): Response {
 //
 // 鉴权通道（任一通过即可）：
 //   1) 管理员会话 / admin API Key —— 浏览器点「下载」按钮（原行为）；
-//   2) X-Cron-Secret 头、?key=、或 ?secret= 等于 CRON_SECRET —— 服务器 CLI 场景，
-//      curl 拿不到会话 cookie。secret= 纳入鉴权是关键闭环：教程生成的下载链接
-//      只携带 secret=，若它不参与鉴权，用户照抄命令必然 401（曾反复踩坑）。
-// 脚本内容完全来自查询参数、不含服务端数据，所以这些通道不会造成信息泄露；
-// 而真正的触发密钥就写在脚本体内，不知道 CRON_SECRET 的人依旧刷不动监控。
+//   2) X-Cron-Secret 头等于 CRON_SECRET —— 服务器 CLI 场景，curl 拿不到会话 cookie。
+// 注意：不再接受 ?key= / ?secret= 查询参数鉴权——查询串会被 CF 日志/Logpush 原样留存，
+// 等于把密钥写进 URL 到处泄露；脚本内嵌的密钥改由服务端 resolveCronSecret() 回填。
 async function selfhostDownload(ctx: Context): Promise<Response> {
   const cronSecret = await store.resolveCronSecret(ctx.env);
   const sp = new URL(ctx.request.url).searchParams;

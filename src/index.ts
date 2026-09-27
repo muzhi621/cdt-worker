@@ -23,7 +23,15 @@ export default {
   // 直调内部监控函数，不经过 HTTP 层 —— 天然可信，无需 CRON_SECRET；
   // 与外部触发共用同一套防抖与原子抢占（并发时只有一轮真正执行）。
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
-    await ensureSchema(env);
+    // 与 fetch 入口对齐：ensureSchema 失败时留痕后直接返回（下轮自动重试），而不是抛出。
+    // 抛出去 Cloudflare 只会记一条 uncaught exception，业务侧毫无留痕，排查成本极高。
+    try {
+      await ensureSchema(env);
+    } catch (err) {
+      await store.addLog(env, 'error',
+        'schema 初始化失败，本轮原生 Cron 跳过（下轮自动重试）：' + (err as Error).message).catch(() => {});
+      return;
+    }
     // 原生 Cron 受「触发源开关」控制：关闭时跳过（每小时留痕一次）
     const state = await store.getTriggerState(env);
     if (!state.sources.native) {
