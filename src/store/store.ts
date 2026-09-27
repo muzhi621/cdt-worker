@@ -105,6 +105,43 @@ export async function tryAcquireMonitorSlot(env: Env, debounceSeconds: number): 
 }
 
 // ─────────────────────────────────────────────────────────────
+// 触发密钥（CRON_SECRET）的 D1 托管
+// Cloudflare 的 Worker Secret 只写不可读：忘了只能重置，且所有渠道要跟着换值。
+// 托管一份加密值（AES-GCM，复用 CDT_MASTER_KEY，与 AK/SK 同等强度）后，
+// 管理台即可查看/修改。读取优先级：D1 托管值 > env.CRON_SECRET（未托管时的兜底）。
+// ─────────────────────────────────────────────────────────────
+const CRON_SECRET_KEY = 'cron_secret';
+
+export async function resolveCronSecret(env: Env): Promise<string> {
+  const row = await env.DB.prepare(`SELECT value FROM settings WHERE key = '${CRON_SECRET_KEY}'`).first();
+  const stored = String((row as Record<string, unknown> | null)?.value ?? '');
+  if (stored) {
+    try {
+      return await decrypt(env, stored);
+    } catch { /* 解密失败（主密钥更换等）时回退 env，保证监控不断 */ }
+  }
+  return (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
+}
+
+// value 传空串 = 清除托管，鉴权回退到 Worker Secret
+export async function setCronSecret(env: Env, value: string): Promise<void> {
+  if (!value) {
+    await env.DB.prepare(`DELETE FROM settings WHERE key = '${CRON_SECRET_KEY}'`).run();
+    return;
+  }
+  await env.DB
+    .prepare(`INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('${CRON_SECRET_KEY}', ?, datetime('now'))`)
+    .bind(await encrypt(env, value))
+    .run();
+}
+
+// 是否已托管（只回布尔语义，不返回明文）：用于前端区分「托管值」与「Worker Secret」
+export async function hasStoredCronSecret(env: Env): Promise<boolean> {
+  const row = await env.DB.prepare(`SELECT 1 AS x FROM settings WHERE key = '${CRON_SECRET_KEY}'`).first();
+  return !!row;
+}
+
+// ─────────────────────────────────────────────────────────────
 // 触发源（调度渠道）开关与「上次触发时间」
 // 存在 settings 表的两个 key：trigger_sources（JSON 开关）、trigger_seen（JSON 时间戳）
 // ─────────────────────────────────────────────────────────────

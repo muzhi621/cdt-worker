@@ -135,6 +135,8 @@ const routes: { method: string; pattern: string; scope?: string; handler: (ctx: 
   { method: 'GET', pattern: '/api/v1/system/triggers', scope: 'admin', handler: getTriggers },
   { method: 'PUT', pattern: '/api/v1/system/triggers', scope: 'admin', handler: saveTriggers },
   { method: 'POST', pattern: '/api/v1/system/triggers/test', scope: 'admin', handler: testTrigger },
+  { method: 'GET', pattern: '/api/v1/system/cron-secret', scope: 'admin', handler: getCronSecretHandler },
+  { method: 'PUT', pattern: '/api/v1/system/cron-secret', scope: 'admin', handler: setCronSecretHandler },
   // 下载自建驱动脚本（driver.mjs / install.sh），配置通过查询参数注入
   { method: 'GET', pattern: '/api/v1/system/selfhost/driver', scope: 'admin', handler: selfhostDownload },
   // 无 scope：供外部触发源（GitHub Actions / 自建驱动）在调用前查开关，内部自行鉴权
@@ -726,7 +728,8 @@ async function route(env: Env, request: Request): Promise<Response> {
   // 管理台「立即监控」按钮走管理员会话 cookie。未配置 CRON_SECRET 时仅放行管理员会话，
   // 避免 /__cron 回归公开可刷（放大阿里云 API 调用与 D1 写入）。
   if (request.headers.get('X-Cron-Trigger') === 'true' || url.pathname === '/__cron') {
-    const expected = (env as unknown as { CRON_SECRET?: string }).CRON_SECRET;
+    // 密钥支持 D1 托管（管理台可查看/修改）与 Worker Secret 两个来源
+    const expected = await store.resolveCronSecret(env);
     let authorized = false;
     let viaSecret = false;
     if (expected) {
@@ -833,7 +836,7 @@ function downloadError(status: number, message: string): Response {
 // 脚本内容完全来自查询参数、不含服务端数据，所以这些通道不会造成信息泄露；
 // 而真正的触发密钥就写在脚本体内，不知道 CRON_SECRET 的人依旧刷不动监控。
 async function selfhostDownload(ctx: Context): Promise<Response> {
-  const cronSecret = (ctx.env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
+  const cronSecret = await store.resolveCronSecret(ctx.env);
   const sp = new URL(ctx.request.url).searchParams;
   const type = sp.get('type');
   const kind = type === 'install' ? 'install' : type === 'uninstall' ? 'uninstall' : 'driver';
@@ -884,6 +887,40 @@ async function selfhostDownload(ctx: Context): Promise<Response> {
   });
 }
 
+// 触发密钥管理：Cloudflare 的 Worker Secret 只写不可读，托管进 D1（加密）后可查看/修改。
+// 查看：默认只返回脱敏值；?reveal=1 才返回明文（管理员主动揭示，写 audit 留痕）。
+// 修改：body.value 为空 = 清除托管、鉴权回退 Worker Secret。
+async function getCronSecretHandler(ctx: Context): Promise<Response> {
+  const secret = await store.resolveCronSecret(ctx.env);
+  const stored = await store.hasStoredCronSecret(ctx.env);
+  const reveal = new URL(ctx.request.url).searchParams.get('reveal') === '1';
+  if (reveal && secret) {
+    await store.addLog(ctx.env, 'audit', '管理员查看了触发密钥明文');
+    return json({ configured: true, source: stored ? 'managed' : 'worker_secret', value: secret });
+  }
+  const masked = secret
+    ? (secret.length > 8 ? secret.slice(0, 3) + '****' + secret.slice(-3) : '****')
+    : '';
+  return json({
+    configured: !!secret,
+    source: stored ? 'managed' : (secret ? 'worker_secret' : 'none'),
+    masked,
+  });
+}
+
+async function setCronSecretHandler(ctx: Context): Promise<Response> {
+  const body = await ctx.request.json().catch(() => null) as Record<string, unknown> | null;
+  const value = String(body?.value ?? '').trim();
+  if (value && value.length < 12) {
+    return error('invalid_input', '密钥太短：至少 12 个字符（它是外部触发监控的唯一门槛，太短易被爆破）', 400);
+  }
+  await store.setCronSecret(ctx.env, value);
+  await store.addLog(ctx.env, 'audit', value
+    ? '管理员修改了触发密钥（所有已配置渠道需手动同步为新值，旧值会立即 401）'
+    : '管理员清除了托管密钥，触发鉴权回退到 Worker Secret（CRON_SECRET）');
+  return json({ ok: true });
+}
+
 // 触发源开关：读取（管理员）
 async function getTriggers(ctx: Context): Promise<Response> {
   const { sources, seen } = await store.getTriggerState(ctx.env);
@@ -892,7 +929,7 @@ async function getTriggers(ctx: Context): Promise<Response> {
     seen,
     labels: TRIGGER_LABELS,
     gapThresholdSeconds: TRIGGER_GAP_THRESHOLD_SEC,
-    secretConfigured: ((ctx.env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '') !== '',
+    secretConfigured: (await store.resolveCronSecret(ctx.env)) !== '',
   });
 }
 
@@ -917,7 +954,7 @@ async function saveTriggers(ctx: Context): Promise<Response> {
 // 触发源状态查询（密钥或管理员会话）：供外部触发源调用前先查开关，省掉无用触发
 async function triggerStatus(ctx: Context): Promise<Response> {
   const env = ctx.env;
-  const expected = (env as unknown as { CRON_SECRET?: string }).CRON_SECRET;
+  const expected = await store.resolveCronSecret(env);
   let ok = false;
   if (expected) {
     const provided = ctx.request.headers.get('X-Cron-Secret')
@@ -940,7 +977,7 @@ async function testTrigger(ctx: Context): Promise<Response> {
   const body = await ctx.request.json().catch(() => null) as Record<string, unknown> | null;
   const source = normalizeSource(String(body?.source ?? ''));
   const { sources, seen } = await store.getTriggerState(ctx.env);
-  const secretConfigured = ((ctx.env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '') !== '';
+  const secretConfigured = (await store.resolveCronSecret(ctx.env)) !== '';
   if (!sources[source]) {
     return json({
       ok: false, source, enabled: false, secretConfigured,

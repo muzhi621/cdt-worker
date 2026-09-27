@@ -1186,6 +1186,24 @@
         <div class="section-title">触发渠道</div>
         <div id="trigger-list"></div>
         <p class="hint" id="trigger-state"></p>
+
+        <!-- 触发密钥托管：CF 的 Worker Secret 只写不可读，托管进 D1（加密）后可查看/修改，
+             新建渠道（SCF/FC/GitHub Actions/自建驱动）直接看一眼，不用再去 CF 重置 -->
+        <div id="cron-secret-box" style="margin:14px 0;padding:12px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-md)">
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <strong style="font-size:13.5px">触发密钥（CRON_SECRET）</strong>
+            <code id="cs-masked" class="inline-code">读取中…</code>
+            <span id="cs-source" class="hint" style="margin:0"></span>
+            <button class="btn btn-ghost btn-sm" id="cs-reveal" type="button">显示明文</button>
+            <button class="btn btn-ghost btn-sm" id="cs-edit" type="button">修改</button>
+          </div>
+          <div id="cs-edit-row" style="display:none;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <input id="cs-value" class="control" style="flex:1 1 240px;max-width:360px" placeholder="输入新密钥（≥12 字符）；留空保存 = 清除托管" spellcheck="false" autocomplete="off" />
+            <button class="btn btn-primary btn-sm" id="cs-save" type="button">保存</button>
+            <button class="btn btn-ghost btn-sm" id="cs-cancel" type="button">取消</button>
+          </div>
+          <p class="hint" style="margin-top:8px">修改后所有已配置渠道（GitHub Secrets、cron-job.org 请求头、腾讯 SCF / 阿里云 FC 环境变量、自建驱动 /etc/cdt-trigger.env）需手动同步为新值，旧值会立即 401 并触发断档告警。清空保存 = 清除托管，回退使用 Worker Secret。</p>
+        </div>
         <details id="trigger-tutorial">
           <summary>各渠道配置教程（GitHub Actions / cron-job.org / 自建驱动 / 腾讯云 SCF / 阿里云 FC）</summary>
           <div class="tutorial-body">
@@ -2386,13 +2404,69 @@
         }
         // 教程变量：首次加载时填默认值（域名=当前站点、间隔=监控间隔）并渲染；
         // 后续刷新只重渲染（不覆盖用户已修改的变量）
+        loadCronSecretState();
         if (tutorialInited) renderTutorial();
-        else { initTutorialVars(); tutorialInited = true; }
+        else { initTutorialVars(); bindCronSecretUi(); tutorialInited = true; }
+      }
+
+      /* ---------- 触发密钥（托管查看/修改） ---------- */
+      let csRevealed = false;
+      async function loadCronSecretState() {
+        const mask = $("cs-masked"), src = $("cs-source");
+        if (!mask) return;
+        try {
+          const r = await apiJson("/api/v1/system/cron-secret");
+          if (!r.ok || !r.data) { mask.textContent = "读取失败"; return; }
+          const d = r.data;
+          mask.textContent = d.configured ? (d.masked || "****") : "未配置";
+          src.textContent = d.source === "managed" ? "（托管于系统，可查看/修改）"
+            : d.source === "worker_secret" ? "（来自 Worker Secret；在下方保存一次托管后即可随时查看）" : "";
+        } catch (e) { mask.textContent = "读取失败"; }
+      }
+      function bindCronSecretUi() {
+        const reveal = $("cs-reveal"), edit = $("cs-edit"), save = $("cs-save"), cancel = $("cs-cancel");
+        if (!reveal) return;
+        reveal.addEventListener("click", async () => {
+          if (csRevealed) {
+            csRevealed = false;
+            reveal.textContent = "显示明文";
+            $("cs-edit-row").style.display = "none";
+            loadCronSecretState();
+            return;
+          }
+          const r = await apiJson("/api/v1/system/cron-secret?reveal=1");
+          if (r.ok && r.data && r.data.value) {
+            csRevealed = true;
+            reveal.textContent = "隐藏";
+            $("cs-edit-row").style.display = "flex";
+            $("cs-value").value = r.data.value;
+            $("cs-value").focus();
+          } else {
+            triggerMsg(errText(r.data) || "尚未配置触发密钥", "error");
+          }
+        });
+        edit.addEventListener("click", () => {
+          $("cs-edit-row").style.display = "flex";
+          $("cs-value").value = "";
+          $("cs-value").focus();
+          if (csRevealed) { csRevealed = false; reveal.textContent = "显示明文"; }
+        });
+        cancel.addEventListener("click", () => { $("cs-edit-row").style.display = "none"; loadCronSecretState(); });
+        save.addEventListener("click", async () => {
+          const v = $("cs-value").value.trim();
+          const r = await apiJson("/api/v1/system/cron-secret", { method: "PUT", body: JSON.stringify({ value: v }) });
+          if (r.ok) {
+            triggerMsg(v ? "密钥已更新：所有已配置渠道需手动同步为新值，旧值已失效" : "已清除托管密钥，回退使用 Worker Secret", "ok");
+            $("cs-edit-row").style.display = "none";
+          } else {
+            triggerMsg(errText(r.data), "error");
+          }
+          loadCronSecretState();
+        });
       }
 
       // 触发源操作的就地提示（结果展示在设置页该模块内，不复用登录页的 showAlert）
-      function triggerMsg(text, kind) {
-        const st = $("trigger-state");
+      function triggerMsg(text, kind) {        const st = $("trigger-state");
         if (!st) return;
         st.textContent = text;
         st.className = "hint" + (kind === "error" ? " danger" : kind === "ok" ? " ok" : "");
