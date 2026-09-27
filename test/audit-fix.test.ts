@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { formatWallClock } from '../src/engine/time';
 import { AliyunError } from '../src/provider/aliyun';
 import { hashPassword, verifyPassword } from '../src/security/security';
-import { driverScript, installScript } from '../src/engine/selfhost';
+import { driverScript, installScript, uninstallScript } from '../src/engine/selfhost';
 
 describe('formatWallClock（日志展示用，复用 formatter 缓存）', () => {
   it('输出 YYYY-MM-DD HH:mm:ss 墙钟格式', () => {
@@ -87,5 +87,21 @@ describe('自建驱动脚本（selfhost）', () => {
 
   it('间隔过小会被收敛到 30 秒下限', () => {
     expect(installScript(URL_, 's3cr3t', 1)).toContain('INTERVAL=30');
+  });
+
+  it('卸载脚本清理两种安装方式且不含任何密钥', () => {
+    const un = uninstallScript();
+    expect(un.split('\n')[0]).toMatch(/^#!/);
+    // systemd：停服务 + 禁自启 + 删 unit
+    expect(un).toContain('systemctl stop "${UNIT}"');
+    expect(un).toContain('rm -f "/etc/systemd/system/${UNIT}.service"');
+    // crontab：只删本驱动的行（grep -v），不动其他任务
+    expect(un).toContain('grep -v "${TARGET}/run.sh"');
+    // 文件清理
+    expect(un).toContain('rm -rf "${TARGET}"');
+    expect(un).toContain('rm -f "${ENV_FILE}"');
+    // 不含密钥/URL —— 内容固定，密钥丢了也能安全分发
+    expect(un).not.toContain('SECRET');
+    expect(un).not.toContain('s3cr3t');
   });
 });

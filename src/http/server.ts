@@ -7,7 +7,7 @@ import * as engine from '../engine/engine';
 import { masked } from '../engine/engine';
 import { hashPassword, verifyPassword, constantTimeEqual, envPassword, newToken, tokenHash, type Env } from '../security/security';
 import { deliverEvent } from '../notify/service';
-import { driverScript, installScript } from '../engine/selfhost';
+import { driverScript, installScript, uninstallScript } from '../engine/selfhost';
 import {
   isSourceStale, normalizeSource, TRIGGER_GAP_THRESHOLD_SEC, TRIGGER_LABELS, TRIGGER_SOURCES,
   type TriggerSource,
@@ -823,22 +823,25 @@ function downloadError(status: number, message: string): Response {
   });
 }
 
-// 下载自建驱动脚本（driver.mjs / install.sh），已按用户填写的配置注入。
+// 下载自建驱动脚本（driver.mjs / install.sh / uninstall.sh），已按用户填写的配置注入。
 //
-// 鉴权三条通道，任一通过即可：
+// 鉴权通道（任一通过即可）：
 //   1) 管理员会话 / admin API Key —— 浏览器点「下载」按钮（原行为）；
-//   2) X-Cron-Secret 头或 ?key= 等于 CRON_SECRET —— 服务器 CLI 场景，curl 拿不到会话 cookie。
-// 脚本内容完全来自查询参数、不含服务端数据，所以 CRON_SECRET 通道不会造成信息泄露；
+//   2) X-Cron-Secret 头、?key=、或 ?secret= 等于 CRON_SECRET —— 服务器 CLI 场景，
+//      curl 拿不到会话 cookie。secret= 纳入鉴权是关键闭环：教程生成的下载链接
+//      只携带 secret=，若它不参与鉴权，用户照抄命令必然 401（曾反复踩坑）。
+// 脚本内容完全来自查询参数、不含服务端数据，所以这些通道不会造成信息泄露；
 // 而真正的触发密钥就写在脚本体内，不知道 CRON_SECRET 的人依旧刷不动监控。
 async function selfhostDownload(ctx: Context): Promise<Response> {
   const cronSecret = (ctx.env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '';
   const sp = new URL(ctx.request.url).searchParams;
-  const kind = sp.get('type') === 'install' ? 'install' : 'driver';
+  const type = sp.get('type');
+  const kind = type === 'install' ? 'install' : type === 'uninstall' ? 'uninstall' : 'driver';
   const url = (sp.get('url') || 'https://你的域名/__cron?source=selfhost').trim();
   const secret = (sp.get('secret') || '').trim();
   const interval = parseInt(sp.get('interval') || '300', 10) || 300;
 
-  const presented = ctx.request.headers.get('X-Cron-Secret') || sp.get('key') || '';
+  const presented = ctx.request.headers.get('X-Cron-Secret') || sp.get('key') || secret;
   const viaSecret = !!cronSecret && !!presented && await constantTimeEqual(cronSecret, presented);
   if (!viaSecret) {
     const principal = await authenticate(ctx.env, ctx.request);
@@ -857,15 +860,21 @@ async function selfhostDownload(ctx: Context): Promise<Response> {
   // 脚本必须带密钥，否则驱动启动即退出。
   // 链接里没填时，用服务端已配置的 CRON_SECRET 回填（能走到这里的人本就知道该密钥）；
   // 两边都没有则给不出可用脚本，直接拒绝并说明怎么配。
+  // 例外：卸载脚本不含任何密钥与站点配置，不受此限——用户可能正是丢了密钥才要卸载。
   const effectiveSecret = secret || cronSecret;
-  if (!effectiveSecret) {
+  if (!effectiveSecret && kind !== 'uninstall') {
     return downloadError(400, '未取得触发密钥：请先在 Worker 侧配置 CRON_SECRET（wrangler secret put CRON_SECRET），'
       + '然后回到本页填写教程变量中的 CRON_SECRET，再重新复制下载链接。');
   }
 
   const isInstall = kind === 'install';
-  const body = isInstall ? installScript(url, effectiveSecret, interval) : driverScript(url, effectiveSecret, interval);
-  const filename = isInstall ? 'cdt-trigger-install.sh' : 'cdt-trigger-driver.mjs';
+  const isUninstall = kind === 'uninstall';
+  // 卸载脚本不含任何密钥与站点配置，内容固定
+  const body = isUninstall ? uninstallScript()
+    : isInstall ? installScript(url, effectiveSecret, interval)
+    : driverScript(url, effectiveSecret, interval);
+  const filename = isUninstall ? 'cdt-trigger-uninstall.sh'
+    : isInstall ? 'cdt-trigger-install.sh' : 'cdt-trigger-driver.mjs';
   return new Response(body, {
     headers: {
       'Content-Type': 'text/plain; charset=utf-8',

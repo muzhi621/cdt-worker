@@ -124,3 +124,40 @@ fi
 echo "完成后到管理台 → 设置 → 监控触发源，确认「自建驱动」的上次触发时间已更新"
 `;
 }
+
+// 一键卸载：清掉 install.sh 可能留下的所有痕迹（systemd 服务 / crontab 条目 / 文件）。
+// 不含任何密钥与站点配置，内容固定——用户可能正是在密钥丢失后才会来卸载。
+export function uninstallScript(): string {
+  return `#!/usr/bin/env bash
+# CDT Monitor 自建触发驱动 · 一键卸载
+# 会自动清理两种安装方式留下的东西（systemd 服务 / crontab 条目），无需关心当初用哪种装的
+# 用法：sudo bash cdt-uninstall.sh
+set -euo pipefail
+
+UNIT="cdt-trigger"
+TARGET="/opt/\${UNIT}"
+ENV_FILE="/etc/\${UNIT}.env"
+LOG_FILE="/var/log/\${UNIT}.log"
+
+[ "$(id -u)" = "0" ] || { echo "请用 root 执行：sudo bash cdt-uninstall.sh"; exit 1; }
+
+# systemd 模式：停服务 → 禁自启 → 删 unit 文件
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl stop "\${UNIT}" 2>/dev/null || true
+  systemctl disable "\${UNIT}" 2>/dev/null || true
+  rm -f "/etc/systemd/system/\${UNIT}.service"
+  systemctl daemon-reload 2>/dev/null || true
+fi
+
+# crontab 降级模式：移除引用本驱动 run.sh 的条目（其余 crontab 内容原样保留）
+if command -v crontab >/dev/null 2>&1; then
+  ( crontab -l 2>/dev/null | grep -v "\${TARGET}/run.sh" ) | crontab - || true
+fi
+
+rm -f "\${ENV_FILE}" "\${LOG_FILE}"
+rm -rf "\${TARGET}"
+echo "卸载完成：已停止并删除 systemd 服务（如有）、清理 crontab 条目（如有）、"
+echo "删除 \${TARGET}、\${ENV_FILE} 与 \${LOG_FILE}。"
+echo "管理台「监控触发源 → 自建驱动」的开关可按需关闭，其上次触发时间将不再更新。"
+`;
+}
