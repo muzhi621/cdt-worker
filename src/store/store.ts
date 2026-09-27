@@ -531,7 +531,12 @@ export async function history(env: Env, accountId: number): Promise<{ traffic: n
 }
 
 export async function addLog(env: Env, type: string, message: string): Promise<void> {
-  await env.DB.prepare('INSERT INTO logs (type, message) VALUES (?,?)').bind(type, message).run();
+  // created_at 显式写带 Z 的 UTC ISO，不依赖表默认值：线上已有的 logs 表是早期
+  // ensureSchema 建的（CREATE IF NOT EXISTS 不会更新默认值），其实际默认值与当前
+  // schema 可能不同——已观察到存成了本地时间字符串，导致日志时间在两种"差 8 小时"
+  // 之间反复。写入端统一后，前端只需一套解析规则。
+  await env.DB.prepare('INSERT INTO logs (type, message, created_at) VALUES (?,?,?)')
+    .bind(type, message, new Date().toISOString()).run();
 }
 
 // 业务分类 → 底层日志类型集合（登录/监控/保活/告警，其余归「全部」）

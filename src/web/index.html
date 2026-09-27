@@ -1978,15 +1978,25 @@
         if (pct > 0) return "ok";
         return "";
       }
+      // 解析 D1 时间字符串。无时区后缀的按 UTC 补 Z 解析（datetime('now') 语义）；
+      // 但早期版本的表默认值写入过「本地时间字符串」——补 Z 后会显示成未来时间，
+      // 而业务时间戳不可能来自未来：解析结果超前时钟超过 15 分钟即判定为
+      // 「无后缀的本地时间」，按原文（浏览器时区）重新解析。
+      function parseDbTime(iso) {
+        const raw = String(iso).trim();
+        if (!raw) return null;
+        if (/[Zz]|[+-]\d\d:?\d\d$/.test(raw)) {
+          const d = new Date(raw);
+          return isNaN(d.getTime()) ? null : d;
+        }
+        let d = new Date(raw.replace(" ", "T") + "Z");
+        if (isNaN(d.getTime())) return null;
+        if (d.getTime() > Date.now() + 15 * 60 * 1000) d = new Date(raw);
+        return isNaN(d.getTime()) ? null : d;
+      }
       function fmtTime(iso, withSec) {
-        if (!iso) return "—";
-        // D1 datetime('now') 写入的是 UTC 无时区后缀（"2026-09-27 15:30:12"），new Date
-        // 会按浏览器本地时区解析，东八区恰好差 8 小时（卡片「更新 15:30」实为 23:30）。
-        // 与 relFromNow 相同的兜底：无后缀视为 UTC 补 Z 再解析。
-        let s = String(iso).trim();
-        if (!/[Zz]|[+-]\d\d:?\d\d$/.test(s)) s = s.replace(" ", "T") + "Z";
-        const d = new Date(s);
-        if (isNaN(d.getTime())) return "—";
+        const d = parseDbTime(iso);
+        if (!d) return "—";
         const pad = (n) => String(n).padStart(2, "0");
         const hm = pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
         return withSec ? hm + ":" + pad(d.getSeconds()) : hm;
@@ -2858,10 +2868,9 @@
         return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
       }
       function relFromNow(iso) {
-        if (!iso) return "—";
-        const t = Date.parse(String(iso).replace(" ", "T") + (/[Zz]|[+-]\d\d:\d\d$/.test(String(iso)) ? "" : "Z"));
-        if (isNaN(t)) return String(iso);
-        const mins = Math.floor((Date.now() - t) / 60000);
+        const d = parseDbTime(iso);
+        if (!d) return String(iso || "—");
+        const mins = Math.floor((Date.now() - d.getTime()) / 60000);
         if (mins < 1) return "刚刚";
         if (mins < 60) return mins + " 分钟前";
         const h = Math.floor(mins / 60);
