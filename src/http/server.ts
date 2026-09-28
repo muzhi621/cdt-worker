@@ -1001,7 +1001,7 @@ async function saveTriggers(ctx: Context): Promise<Response> {
       changed++;
     }
   }
-  if (changed === 0) return error('invalid_input', '未提供任何渠道开关（github / http / selfhost / native / tencent / aliyun）', 400);
+  if (changed === 0) return error('invalid_input', '未提供任何渠道开关（github / http / selfhost / native / tencent / aliyun / huawei）', 400);
   await store.setTriggerSources(ctx.env, sources);
   const detail = TRIGGER_SOURCES.map((s) => `${TRIGGER_LABELS[s]}=${sources[s] ? '开' : '关'}`).join('、');
   await store.addLog(ctx.env, 'audit', `更新监控触发源开关：${detail}`);

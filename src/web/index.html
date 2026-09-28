@@ -1209,7 +1209,7 @@
           <p class="hint" style="margin-top:8px">修改后所有已配置渠道（GitHub Secrets、cron-job.org 请求头、腾讯 SCF / 阿里云 FC 环境变量、自建驱动 /etc/cdt-trigger.env）需手动同步为新值，旧值会立即 401 并触发断档告警。清空保存 = 清除托管，回退使用 Worker Secret。</p>
         </div>
         <details id="trigger-tutorial">
-          <summary>各渠道配置教程（GitHub Actions / cron-job.org / 自建驱动 / 腾讯云 SCF / 阿里云 FC）</summary>
+          <summary>各渠道配置教程（GitHub Actions / cron-job.org / 自建驱动 / 腾讯云 SCF / 阿里云 FC / 华为云 FG）</summary>
           <div class="tutorial-body">
 
             <!-- 教程变量：下面所有示例都会随这里的取值自动更新 -->
@@ -1290,6 +1290,22 @@
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
                 <pre><code id="fc-code"></code></pre>
+              </div>
+            </div>
+
+            <div class="steps">
+              <strong>⑥ 华为云函数工作流 FG（免费额度充足，含定时触发器）</strong>
+              <ol>
+                <li>函数工作流 FunctionGraph → 创建函数 → 运行环境 Node.js 18/20 → 粘贴下方代码（<code>handler</code>）</li>
+                <li>配置 → 环境变量：<code>CDT_URL</code>=<code id="fg-url"></code>、<code>CDT_SECRET</code>=上面的密钥</li>
+                <li>触发器 → 定时触发器（TIMER），Cron 表达式 <code id="fg-cron"></code>（6 位，含秒）</li>
+                <li>需确保函数可访问公网（未配置 VPC 时默认出网）；地域建议选中国香港或国内，保存后启用即可</li>
+              </ol>
+              <div class="code-wrap">
+                <button class="copy-btn" type="button" data-copy-target="fg-code" aria-label="复制 FG 代码">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+                <pre><code id="fg-code"></code></pre>
               </div>
             </div>
 
@@ -2590,6 +2606,8 @@
         set("scf-cron", "0 */" + v.step + " * * * *");
         set("fc-url", v.url("aliyun"));
         set("fc-cron", "0 */" + v.step + " * * *");
+        set("fg-url", v.url("huawei"));
+        set("fg-cron", "0 */" + v.step + " * * * *");
 
         set("scf-code",
           "// 腾讯云 SCF：入口 main_handler，环境变量 CDT_URL / CDT_SECRET\n" +
@@ -2624,6 +2642,23 @@
           "  } catch (err) {\n" +
           "    return { statusCode: 500, body: String(err) };\n" +
           "  }\n" +
+          "};");
+
+        set("fg-code",
+          "// 华为云函数工作流 FG：入口 handler，环境变量 CDT_URL / CDT_SECRET\n" +
+          "const https = require('https');\n\n" +
+          "exports.handler = async (event, context) => {\n" +
+          "  const url = process.env.CDT_URL || '" + v.url("huawei") + "';\n" +
+          "  const secret = process.env.CDT_SECRET || '';\n" +
+          "  return new Promise((resolve) => {\n" +
+          "    const req = https.get(url, { headers: { 'X-Cron-Secret': secret }, timeout: 60000 }, (res) => {\n" +
+          "      let body = '';\n" +
+          "      res.on('data', (c) => { body += c; });\n" +
+          "      res.on('end', () => resolve({ statusCode: res.statusCode, body: body.slice(0, 200) }));\n" +
+          "    });\n" +
+          "    req.on('error', (e) => resolve({ statusCode: 500, body: String(e) }));\n" +
+          "    req.on('timeout', () => { req.destroy(); resolve({ statusCode: 500, body: 'timeout' }); });\n" +
+          "  });\n" +
           "};");
 
         renderSelfhostLinks();

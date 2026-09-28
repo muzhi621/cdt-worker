@@ -8,9 +8,9 @@
 // 「实际多久跑一次」由管理台的「监控间隔」控制：CF 每 5 分钟叫一次，不足间隔的轮次
 // 在 scheduled() 内部直接跳过，不跑阿里云 API、也不写 trigger_seen（保持"上次真实执行"
 // 语义，否则断档告警会被自己刷新的时间戳掩盖）。
-export type TriggerSource = 'github' | 'http' | 'selfhost' | 'native' | 'tencent' | 'aliyun';
+export type TriggerSource = 'github' | 'http' | 'selfhost' | 'native' | 'tencent' | 'aliyun' | 'huawei';
 
-export const TRIGGER_SOURCES: TriggerSource[] = ['github', 'http', 'selfhost', 'native', 'tencent', 'aliyun'];
+export const TRIGGER_SOURCES: TriggerSource[] = ['github', 'http', 'selfhost', 'native', 'tencent', 'aliyun', 'huawei'];
 
 export const TRIGGER_LABELS: Record<TriggerSource, string> = {
   github: 'GitHub Actions',
@@ -19,6 +19,7 @@ export const TRIGGER_LABELS: Record<TriggerSource, string> = {
   native: 'Cloudflare 原生 Cron',
   tencent: '腾讯云云函数 SCF',
   aliyun: '阿里云函数计算 FC',
+  huawei: '华为云函数 FG',
 };
 
 // 默认开关：CF 原生 Cron 默认开（调度最稳，不依赖任何外部服务）；
@@ -31,6 +32,7 @@ export const DEFAULT_TRIGGER_SOURCES: Record<TriggerSource, boolean> = {
   native: true,
   tencent: false,
   aliyun: false,
+  huawei: false,
 };
 
 // 断档判定阈值（秒）：已启用的渠道超过该时长没有触发即告警（默认 30 分钟）
@@ -45,6 +47,7 @@ export function normalizeSource(raw: string | null | undefined): TriggerSource {
   if (v === 'native' || v === 'cron' || v === 'scheduled') return 'native';
   if (v === 'tencent' || v === 'scf' || v === 'tencent_cloud' || v === 'tencentcloud') return 'tencent';
   if (v === 'aliyun' || v === 'fc' || v === 'alicloud' || v === 'aliyun_fc') return 'aliyun';
+  if (v === 'huawei' || v === 'fg' || v === 'huaweicloud' || v === 'functiongraph' || v === 'huawei_fg') return 'huawei';
   return 'http';
 }
 
