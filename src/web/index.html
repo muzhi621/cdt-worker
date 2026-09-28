@@ -1910,11 +1910,16 @@
         el.classList.toggle("hidden", !msg);
       }
 
-      /** 渲染单个弹窗字段；支持 text / number / password / select / textarea */
+      /** 渲染单个弹窗字段；支持 text / number / password / select / textarea / note */
       function modalFieldHtml(f, count) {
         const id = "modal-f-" + f.key;
         // 单字段弹窗占满整行，双栏只在真有多个字段时才生效
         const cls = "field" + (count === 1 || f.full ? " full" : "");
+        const wrapAttr = ' data-mwrap="' + esc(f.key) + '"';
+        // note：纯说明块（无输入控件），用于「该模式无需额外参数」这类提示
+        if (f.type === "note") {
+          return '<div class="' + cls + '"' + wrapAttr + '><p class="sub-note" style="margin:0">' + esc(f.text || "") + "</p></div>";
+        }
         const label = '<label for="' + id + '">' + esc(f.label) + "</label>";
         const hint = f.hint ? '<p class="hint">' + esc(f.hint) + "</p>" : "";
         const mk = ' data-mkey="' + esc(f.key) + '"';
@@ -1936,7 +1941,29 @@
             ' value="' + esc(val) + '" placeholder="' + esc(f.placeholder || "") +
             '" autocomplete="off" spellcheck="false" />';
         }
-        return '<div class="' + cls + '">' + label + control + hint + "</div>";
+        return '<div class="' + cls + '"' + wrapAttr + '>' + label + control + hint + "</div>";
+      }
+
+      /**
+       * 按字段的 showIf(values) 重算可见性。
+       * 用于「下拉切换后，下方无关字段应即时隐藏」的联动（如分组的排班模式）：
+       * 否则用户会同时看到「(rotate)」「(interval)」两套参数而无从下手。
+       * 注意：隐藏≠清空——被隐藏字段的值仍照常提交，来回切模式不会丢已填内容。
+       */
+      function modalApplyVisibility() {
+        const fields = (modalOpts && modalOpts.fields) || [];
+        if (!fields.length) return;
+        const host = $("modal-fields");
+        const values = {};
+        host.querySelectorAll("[data-mkey]").forEach(function (el) {
+          values[el.getAttribute("data-mkey")] = el.type === "checkbox" ? el.checked : String(el.value || "").trim();
+        });
+        fields.forEach(function (f) {
+          if (typeof f.showIf !== "function") return;
+          const wrap = host.querySelector('[data-mwrap="' + f.key + '"]');
+          if (!wrap) return;
+          wrap.classList.toggle("hidden", !f.showIf(values));
+        });
       }
 
       function openModal(opts) {
@@ -1956,6 +1983,8 @@
         } else {
           host.className = "form-grid" + (fields.length ? "" : " hidden");
           host.innerHTML = fields.map(function (f) { return modalFieldHtml(f, fields.length); }).join("");
+          // 初始可见性：showIf 依赖的默认值（如排班模式）也要在打开时就生效
+          modalApplyVisibility();
         }
         const ok = $("modal-ok");
         ok.textContent = opts.okText || "确定";
@@ -2008,6 +2037,11 @@
         });
         const fields = (modalOpts && modalOpts.fields) || [];
         for (const f of fields) {
+          // 当前不可见的字段不参与必填校验（其值仍会提交，只是不该拦着用户）
+          if (typeof f.showIf === "function") {
+            const wrap = $("modal-fields").querySelector('[data-mwrap="' + f.key + '"]');
+            if (wrap && wrap.classList.contains("hidden")) continue;
+          }
           if (f.required && !values[f.key]) { modalError((f.label || "该项") + "不能为空"); return; }
         }
         if (modalOpts && typeof modalOpts.validate === "function") {
@@ -2017,6 +2051,10 @@
         closeModal(values);
       });
       $("modal-cancel").addEventListener("click", function () { closeModal(null); });
+      // 字段联动：改下拉/输入时重算 showIf 可见性（排班模式切换即靠这里即时生效）
+      ["change", "input"].forEach(function (evt) {
+        $("modal-fields").addEventListener(evt, modalApplyVisibility);
+      });
       // 回车提交：表单默认 method="dialog" 会直接关闭，必须拦下并走上面的校验流程
       $("modal-form").addEventListener("submit", function (e) { e.preventDefault(); $("modal-ok").click(); });
       // Esc 关闭：默认会绕过 Promise，改成走 closeModal 统一兑现
@@ -3497,7 +3535,7 @@
        * 每次改动前端后手动更新此值。作用：部署后强刷页面（Ctrl+F5）时看页脚即可
        * 确认浏览器加载的是哪个构建，用于区分「线上已更新但浏览器缓存了旧 JS」——
        * 这是「保存无效 / 新功能不见」类问题的第一排查步骤。 */
-      const APP_BUILD = "20260928-2114";
+      const APP_BUILD = "20260928-2136";
       try {
         const el = document.createElement("div");
         el.style.cssText = "text-align:center;color:var(--muted);font-size:11px;padding:12px 0;opacity:.7";
@@ -3853,34 +3891,43 @@
 
       /* ---- 分组动作 ---- */
       async function openGroupModal(g) {
+        // 排班参数彼此互斥：只显示当前模式用得上的字段，避免「两套参数同时摆着」
+        const modeIs = function (m) { return function (v) { return v.mode === m; }; };
+        const choice = g ? g.mode : "rotate";
         const vals = await openModal({
           title: g ? "编辑分组" : "新增分组",
+          desc: "排班模式决定「谁在值班」，下方参数会随所选模式变化。",
           okText: g ? "保存" : "创建",
           fields: [
             { key: "name", label: "分组名称", value: g ? g.name : "", placeholder: "如「香港三台轮换」", required: true },
             {
-              key: "mode", label: "排班模式", type: "select", value: g ? g.mode : "rotate", options: [
+              key: "mode", label: "排班模式", type: "select", value: choice, options: [
                 { value: "rotate", label: "按天轮换（每台机器各自值班 N 天）" },
                 { value: "interval", label: "基准时间 + 每 N 天（各自 N 天）" },
                 { value: "window", label: "一天内按时段轮换" },
                 { value: "static", label: "固定首台" },
               ],
             },
+            { key: "note-rotate", type: "note", full: true, text: "机器按各自值班天数依次轮转；每台的「天数」在分组卡片点「排班」设置。下面是轮换的时间原点。", showIf: modeIs("rotate") },
+            { key: "note-interval", type: "note", full: true, text: "从基准时间起，机器按各自值班天数依次轮转；每台的「天数」在分组卡片点「排班」设置，这里只需给出精确起点。", showIf: modeIs("interval") },
+            { key: "note-window", type: "note", full: true, text: "一天内按各机器自己的「值班时段」轮换；时段在分组卡片点「排班」逐台设置，这里无需其他参数。", showIf: modeIs("window") },
+            { key: "note-static", type: "note", full: true, text: "固定使用排序最靠前的可用机器，无需其他排班参数。", showIf: modeIs("static") },
             { key: "timezone", label: "时区", value: g ? g.timezone : "Asia/Shanghai", placeholder: "Asia/Shanghai", hint: "按此时区判断「今天 / 现在几点」" },
-            { key: "switchTime", label: "切换时刻（rotate）", value: g ? g.switch_time : "03:00", placeholder: "03:00" },
-            { key: "anchorDate", label: "轮换基准日（rotate）", value: g ? g.anchor_date : "1970-01-01", placeholder: "1970-01-01" },
-            { key: "anchorAt", label: "基准时间（interval）", value: g ? (g.anchor_at || "") : "", placeholder: "2026-01-01 03:00", hint: "interval 模式的轮换起点，精确到分钟" },
+            { key: "switchTime", label: "切换时刻", value: g ? g.switch_time : "03:00", placeholder: "03:00", hint: "当天的换班时刻；早于它仍算前一天值班的机器", showIf: modeIs("rotate") },
+            { key: "anchorDate", label: "轮换基准日", value: g ? g.anchor_date : "1970-01-01", placeholder: "1970-01-01", hint: "轮换周期从这天算起，改动可改变当前值班机器", showIf: modeIs("rotate") },
+            { key: "anchorAt", label: "基准时间", value: g ? (g.anchor_at || "") : "", placeholder: "2026-01-01 03:00", hint: "轮换起点，精确到分钟；留空视为 1970-01-01 00:00", showIf: modeIs("interval") },
             { key: "fallbackIp", label: "兜底 IP（无机器值班时）", value: g ? g.fallback_ip : "", placeholder: "留空则保持原解析" },
           ],
         });
         if (!vals) return;
         const body = {
-          name: vals.name.trim(), mode: vals.mode,
-          timezone: vals.timezone.trim() || "Asia/Shanghai",
-          switchTime: vals.switchTime.trim() || "03:00",
-          anchorDate: vals.anchorDate.trim() || "1970-01-01",
-          anchorAt: vals.anchorAt.trim(),
-          fallbackIp: vals.fallbackIp.trim(),
+          name: (vals.name || "").trim(), mode: vals.mode,
+          timezone: (vals.timezone || "").trim() || "Asia/Shanghai",
+          // 与当前模式无关的字段可能未渲染：回退到原值，避免切模式时把已存参数清掉
+          switchTime: ((vals.switchTime || (g ? g.switch_time : "")) || "03:00").trim() || "03:00",
+          anchorDate: ((vals.anchorDate || (g ? g.anchor_date : "")) || "1970-01-01").trim() || "1970-01-01",
+          anchorAt: (vals.anchorAt !== undefined ? vals.anchorAt : (g ? (g.anchor_at || "") : "")).trim(),
+          fallbackIp: (vals.fallbackIp || "").trim(),
           enabled: g ? g.enabled : true,
         };
         const r = g
