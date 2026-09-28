@@ -5,4 +5,6 @@ dist/
 .env
 preview.html
 tmp-*.cjs
+# vitest 在本机常因 SSR 缓存写入被拦（EPERM），跑测试时用 .tmp-vitest 重定向 TMP
+.tmp-vitest/
 .dev.vars

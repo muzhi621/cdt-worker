@@ -60,19 +60,22 @@ function clientIP(request: Request): string {
 }
 
 // 简单内存限流（单 Isolate 内有效）
-const rateMap = new Map<string, { start: number; count: number }>();
+// windowMs 存在 entry 里：清理时要用「该 key 自己的窗口」判断，
+// 否则一次 60s 的调用会把 login（15 分钟窗口）这类长窗口的计数提前清掉（P1-R4-3）。
+const rateMap = new Map<string, { start: number; count: number; windowMs: number }>();
 function allowRate(key: string, max: number, windowMs: number): boolean {
   const now = Date.now();
   // 定期清理过期条目，防止 key 随 IP 数量无限增长（内存泄漏），
   // 同时避免 isolate 长活时旧 key 复用带来的计数残留
   if (rateMap.size > 500) {
     for (const [k, v] of rateMap) {
-      if (now - v.start >= windowMs) rateMap.delete(k);
+      // P1-R4-3：用 v.windowMs（该 key 自己的窗口），不能用本次调用的 windowMs
+      if (now - v.start >= v.windowMs) rateMap.delete(k);
     }
   }
   const entry = rateMap.get(key);
-  if (!entry || now - entry.start >= windowMs) {
-    rateMap.set(key, { start: now, count: 1 });
+  if (!entry || now - entry.start >= entry.windowMs) {
+    rateMap.set(key, { start: now, count: 1, windowMs });
     return true;
   }
   if (entry.count >= max) return false;
@@ -1306,6 +1309,8 @@ const DDNS_MODES = ['rotate', 'interval', 'window', 'static'];
 
 // P2-1：分组时间字段白名单校验，避免「前端校验即安全」反模式——非法值被静默回落到
 // 1970-01-01 00:00 或 03:00 原点运行却无任何报错。后端必须独立校验格式。
+// P3-R4-2：这几个正则只做**形状**校验（例如 2026-99-99 也会通过），
+// 日期是否真实存在由 scheduler 兜底；前端已做「2 月 31 日」这类收敛，后端不重复实现。
 const RE_SWITCH_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const RE_ANCHOR_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const RE_ANCHOR_AT = /^\d{4}-\d{2}-\d{2}([ T][0-2]\d:[0-5]\d)?$/;
@@ -1367,6 +1372,10 @@ async function ddnsSaveMembers(ctx: Context): Promise<Response> {
   })).filter((m: { machineId: number }) => Number.isFinite(m.machineId) && m.machineId > 0);
   // P2-2：window 模式时段字段格式校验，非法值会导致 parseHm 返回 null → 该机器被静默跳过，
   // 必须显式报错让用户看到，而不是「看起来配了却不生效」。
+  // P2-R4-1：再补上「语义缺失」——时段为空在 window 模式下同样让机器永不值班。
+  // 上一版只堵了「填了但格式错」，没堵「压根没填」，静默失效的口子还在。
+  const group = await ddnsStore.getGroup(ctx.env, id);
+  if (!group) return error('invalid_input', '分组不存在', 400);
   for (const m of members) {
     if (m.windowStart && parseHm(m.windowStart) === null) {
       return error('invalid_input', `在线开始时间格式不正确（应为 HH:MM）：${m.windowStart}`, 400);
@@ -1374,12 +1383,29 @@ async function ddnsSaveMembers(ctx: Context): Promise<Response> {
     if (m.windowEnd && parseHm(m.windowEnd) === null) {
       return error('invalid_input', `在线结束时间格式不正确（应为 HH:MM）：${m.windowEnd}`, 400);
     }
+    if (group.mode === 'window' && (!m.windowStart || !m.windowEnd)) {
+      return error('invalid_input', `按时段模式下机器 #${m.machineId} 必须同时填写在线开始与结束时间`, 400);
+    }
   }
   await ddnsStore.saveMembers(ctx.env, id, members);
   return json({ ok: true, count: members.length });
 }
 
 /* ---- 解析记录 ---- */
+
+/**
+ * P1-R4-1：凭据存在性校验 —— create 与 update **共用**。
+ * 第三轮的 P2-3 只在「新增」路径加了校验，编辑路径仍可写入悬空 / 已删除的 credentialId：
+ * 同步时 readCredential 拿到空对象，日志表现是「鉴权失败」而不是「凭据不存在」，
+ * 排查方向会被直接带偏。这就是标准里「按位置修复」反模式的复发。
+ * 0 表示「不绑定凭据」，是合法值。
+ */
+async function assertCredentialExists(ctx: Context, credentialId: number): Promise<Response | null> {
+  if (credentialId <= 0) return null;
+  const cred = await ddnsStore.getCredential(ctx.env, credentialId);
+  if (cred) return null;
+  return error('invalid_input', `引用的 DNS 凭据不存在（credentialId=${credentialId}）`, 400);
+}
 
 async function ddnsCreateRecord(ctx: Context): Promise<Response> {
   const b = await ddnsBody(ctx);
@@ -1390,12 +1416,10 @@ async function ddnsCreateRecord(ctx: Context): Promise<Response> {
   if (!listProviders().some((p) => p.id === provider)) return error('invalid_input', `不支持的 DNS 厂商：${provider}`, 400);
   if (!zone) return error('invalid_input', '域名（zone）不能为空', 400);
   const credentialId = Math.max(0, Math.floor(Number(b.credentialId) || 0));
-  // P2-3：引用独立凭据实体时，后端必须校验凭据确实存在——前端只提供合法凭据，
-  // 但悬空/伪造 id 会让记录无可用凭据、同步时厂商鉴权失败。0 表示「不绑定凭据」合法。
-  if (credentialId > 0) {
-    const cred = await ddnsStore.getCredential(ctx.env, credentialId);
-    if (!cred) return error('invalid_input', `引用的 DNS 凭据不存在（credentialId=${credentialId}）`, 400);
-  }
+  // 引用独立凭据实体时后端必须校验存在性：前端只提供合法凭据，但悬空 / 伪造 id
+  // 会让记录无可用凭据、同步时厂商鉴权失败。0 表示「不绑定凭据」，合法。
+  const credErr = await assertCredentialExists(ctx, credentialId);
+  if (credErr) return credErr;
   const id = await ddnsStore.createRecord(ctx.env, {
     groupId,
     provider,
@@ -1429,7 +1453,12 @@ async function ddnsUpdateRecord(ctx: Context): Promise<Response> {
   if (b.enabled !== undefined) patch.enabled = !!b.enabled;
   // 凭据改为引用独立实体：显式传 credentialId 才覆盖（0 表示解绑）
   if (b.credentialId !== undefined) {
-    patch.credentialId = Math.max(0, Math.floor(Number(b.credentialId) || 0));
+    const credentialId = Math.max(0, Math.floor(Number(b.credentialId) || 0));
+    // P1-R4-1：编辑路径同样要校验存在性，与新增共用同一函数。
+    // 决策锁要求：校验类改动必须在 create 与 update 两条路径都能 grep 到。
+    const credErr = await assertCredentialExists(ctx, credentialId);
+    if (credErr) return credErr;
+    patch.credentialId = credentialId;
   }
   await ddnsStore.updateRecord(ctx.env, id, patch);
   return json({ ok: true });

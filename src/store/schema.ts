@@ -229,6 +229,10 @@ async function migrateInlineCredentials(env: Env): Promise<void> {
 }
 
 let schemaReady = false;
+// P2-R4-2：遗留凭据迁移的失败次数。迁移失败时**不置** schemaReady，让下个请求再试一次；
+// 达到上限后放弃重试，否则每个请求都会重跑一遍建表 batch，把 D1 写打满。
+let migrateFailures = 0;
+const MIGRATE_MAX_ATTEMPTS = 3;
 
 // 幂等建表 + 增量迁移 + 默认值补齐，多次调用只真正执行一次（进程内标记）
 export async function ensureSchema(env: Env): Promise<void> {
@@ -245,9 +249,13 @@ export async function ensureSchema(env: Env): Promise<void> {
   try {
     await migrateInlineCredentials(env);
   } catch (e) {
-    // P2-5：迁移失败不可静默吞掉——若因某条脏数据持续抛错，问题会一直卡住且无从发现。
-    // schemaReady 随后即置 true、本 isolate 内不会再重试，故必须落日志到日志页。
-    await addLog(env, 'error', 'DDNS 遗留凭据迁移失败：' + (e instanceof Error ? e.message : String(e))).catch(() => {});
+    migrateFailures++;
+    const detail = e instanceof Error ? e.message : String(e);
+    // P2-5：迁移失败不可静默吞掉；P2-R4-2：顺带说明接下来还会不会重试
+    const tail = migrateFailures >= MIGRATE_MAX_ATTEMPTS
+      ? '（已达重试上限，本 isolate 不再重试：需修复脏数据后重新部署才会再次迁移）'
+      : `（第 ${migrateFailures}/${MIGRATE_MAX_ATTEMPTS} 次，下个请求会重试）`;
+    await addLog(env, 'error', 'DDNS 遗留凭据迁移失败：' + detail + tail).catch(() => {});
   }
   // 补齐缺失的设置默认值（已存在的不覆盖）
   try {
@@ -257,5 +265,7 @@ export async function ensureSchema(env: Env): Promise<void> {
       ),
     );
   } catch { /* 默认值写入失败不影响启动 */ }
-  schemaReady = true;
+  // P2-R4-2：迁移成功 → 完成；迁移失败且未达上限 → 不置 true，下个请求重试；
+  // 失败达上限 → 放弃重试，避免每个请求都重跑一遍建表 batch 把 D1 写打满
+  schemaReady = migrateFailures === 0 || migrateFailures >= MIGRATE_MAX_ATTEMPTS;
 }
