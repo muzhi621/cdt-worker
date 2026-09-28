@@ -9,8 +9,14 @@
 | --- | --- | --- |
 | `github` | GitHub Actions | 本文件下方 |
 | `http` | cron-job.org 等外部定时服务 | 本文件下方 |
-| `selfhost` | 自建驱动 / 腾讯云 SCF / 阿里云 FC | [docs/SELFHOST.md](./docs/SELFHOST.md) |
+| `selfhost` | 自建驱动 | [docs/SELFHOST.md](./docs/SELFHOST.md) |
 | `native` | Cloudflare 原生 Cron | 本文件下方（需账号 cron 额度） |
+| `tencent` | 腾讯云云函数 SCF | 管理台 → 定时监控配置 → 各渠道配置教程 ④ |
+| `aliyun` | 阿里云函数计算 FC | 管理台 → 定时监控配置 → 各渠道配置教程 ⑤ |
+| `huawei` | 华为云函数 FG（免费额度充足） | 本文件下方 / 管理台教程 ⑥ |
+
+> 渠道标识还支持别名：`huawei` / `fg` / `huaweicloud` / `functiongraph` 都识别为华为云；
+> `scf` / `tencentcloud` 识别为腾讯云，`fc` / `alicloud` 识别为阿里云。
 
 触发时带上来源标识（查询参数或请求头二选一），例如：
 
@@ -126,6 +132,52 @@ CF 固定每 5 分钟叫一次，但「设置」页的**监控间隔**决定真�
 1. URL 填 `https://你的域名/__cron`
 2. 添加请求头 `X-Cron-Secret: <你的 CRON_SECRET>`（cron-job.org 在 Advanced 设置里支持自定义 header；不支持 header 的服务可用 `?key=<你的 CRON_SECRET>` 查询参数）
 3. 调度频率建议 ≥ 前台「监控间隔」（更频繁也可以，防抖会自动跳过）
+
+---
+
+## 华为云函数工作流 FG（免费额度充足，推荐替代收费渠道）
+
+部分云厂商的 Serverless 已开始对定时触发计费；华为云 FunctionGraph 目前免费额度
+（每月约 100 万次调用 + 40 万 GB·秒）对「每 5 分钟触发一次」的场景绰绰有余。
+
+### 配置步骤
+
+1. 进入**函数工作流 FunctionGraph** → 创建函数 → 运行环境选 **Node.js 18 / 20**
+2. 函数代码粘贴下方示例（入口为 `handler`）
+3. 配置 → 环境变量，添加两项：
+   - `CDT_URL` = `https://你的域名/__cron?source=huawei`
+   - `CDT_SECRET` = 与 Worker 侧一致的 `CRON_SECRET`
+4. 触发器 → **定时触发器（TIMER）**，Cron 表达式填 `0 */5 * * * *`
+   （华为云为 6 位，依次为 秒 分 时 日 月 周；每 5 分钟一次）
+5. 确保函数可访问公网（未绑定 VPC 时默认出网），保存并启用
+
+> 管理台「定时监控配置 → 各渠道配置教程 ⑥」会自动按你填的域名、密钥、间隔生成
+> 上面的 URL、Cron 表达式和完整代码，直接复制即可。
+
+### 函数代码
+
+```js
+const https = require('https');
+
+exports.handler = async (event, context) => {
+  const url = process.env.CDT_URL || '';
+  const secret = process.env.CDT_SECRET || '';
+  return new Promise((resolve) => {
+    const req = https.get(url, { headers: { 'X-Cron-Secret': secret }, timeout: 60000 }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve({ statusCode: res.statusCode, body: body.slice(0, 200) }));
+    });
+    req.on('error', (e) => resolve({ statusCode: 500, body: String(e) }));
+    req.on('timeout', () => { req.destroy(); resolve({ statusCode: 500, body: 'timeout' }); });
+  });
+};
+```
+
+### 验证
+
+部署后回到管理台 → 设置 → 触发渠道，确认「华为云函数 FG」开关已打开，
+点该行的**测试**按钮会强制跑一轮监控；稍后「上次触发时间」应刷新为「几秒前」。
 
 ---
 
