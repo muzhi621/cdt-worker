@@ -746,6 +746,48 @@
     .sched-table th, .sched-table td { padding: 8px 8px; }
     .sched-table td { border-bottom: 1px solid var(--border); }
     .sched-table tbody tr:last-child td { border-bottom: 0; }
+    /* 日期/时间控件：文本框可直接输入，下方「年/月/日/时/分」下拉可点选 */
+    .dt-pick { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    .dt-pick select {
+      flex: 1 1 68px; min-width: 60px; min-height: 44px; padding: 7px 4px; font-size: 13px;
+      color: var(--text); background: var(--surface-2);
+      border: 1px solid var(--border); border-radius: var(--r-sm);
+      transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+    }
+    .dt-pick select:hover { border-color: var(--border-strong); }
+    .dt-pick select:focus {
+      outline: none; border-color: var(--accent);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 26%, transparent);
+    }
+    /* 下拉勾选（多选）：面板内联展开，避免被弹窗滚动区裁切 */
+    .pick-dd { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface-2); }
+    .pick-dd .pick-dd-btn {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      width: 100%; cursor: pointer; text-align: left;
+      background: transparent; border: 0; border-radius: var(--r-md);
+    }
+    .pick-dd-arrow { flex: none; color: var(--muted); transition: transform var(--dur) var(--ease); }
+    .pick-dd.open .pick-dd-arrow { transform: rotate(180deg); }
+    .pick-dd-panel { max-height: 216px; overflow-y: auto; border-top: 1px solid var(--border); padding: 6px; }
+    .pick-dd-item {
+      display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 8px;
+      border-radius: var(--r-sm); font-size: 13.5px; color: var(--text); cursor: pointer;
+    }
+    .pick-dd-item:hover { background: var(--surface); }
+    .pick-dd-item:focus-within { background: var(--surface); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+    .pick-dd-item input { width: 16px; height: 16px; accent-color: var(--accent); flex: none; margin: 0; }
+    /* 排班参数条：把「切换时刻/基准日/轮换起点」按模式摆在成员表上方 */
+    .sched-params { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+    .sched-params .field { margin-bottom: 0; }
+    .win-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .win-cell .control { max-width: 82px; }
+    .tag-warn {
+      display: inline-block; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+      font-size: 11.5px; color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    }
+    @media (max-width: 720px) { .sched-params { grid-template-columns: 1fr; } }
     @media (max-width: 720px) { .ov-grid { grid-template-columns: 1fr; } }
 
     /* 日志 */
@@ -1897,8 +1939,12 @@
        * 全站只有 #modal 一个通用弹窗外壳，替代原生 prompt / confirm：原生弹窗样式来自
        * 浏览器、无法跟随主题（深色下刺眼），且被部分环境屏蔽后功能会「静默失效」。
        * openModal(opts) → Promise<values|null>：null 表示取消。
-       *   opts = { title, desc, fields:[{key,label,value,placeholder,hint,type,required}],
+       *   opts = { title, desc, wide,
+       *            fields:[{key,label,value,placeholder,hint,type,required,full,showIf(values),options,text}],
+       *            html, htmlClass, onMount(host),
        *            okText, cancelText, danger, validate(values)->错误文案|null }
+       *   type ∈ text | number | password | select | textarea | note | time | date | datetime
+       *   showIf(values) 返回 false 时该字段隐藏（值仍提交，只是不参与必填校验）。
        * confirmModal(opts) → Promise<boolean>。
        */
       let modalOpts = null;
@@ -1908,6 +1954,138 @@
         const el = $("modal-error");
         el.textContent = msg || "";
         el.classList.toggle("hidden", !msg);
+      }
+
+      /* ---- 日期 / 时间控件（统一弹窗通用能力） ----
+       * 文本输入 + 「年/月/日/时/分」下拉并存：下拉适合点选，输入适合粘贴/精确填写，
+       * 两者双向同步。只给「今年 ±」的年份区间——轮换基准几乎不需要跨年代。
+       */
+      const DT_KINDS = { time: ["h", "mi"], date: ["y", "mo", "d"], datetime: ["y", "mo", "d", "h", "mi"] };
+      const DT_LABEL = { y: "年", mo: "月", d: "日", h: "时", mi: "分" };
+
+      function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+      function todayStr() {
+        const n = new Date();
+        return n.getFullYear() + "-" + pad2(n.getMonth() + 1) + "-" + pad2(n.getDate());
+      }
+
+      function nowMinuteStr() {
+        const n = new Date();
+        return todayStr() + " " + pad2(n.getHours()) + ":" + pad2(n.getMinutes());
+      }
+
+      /** 拆 "YYYY-MM-DD[ HH:MM]" 或 "HH:MM" 为 {y,mo,d,h,mi}；识别不出的部分不返回 */
+      function splitDt(s) {
+        const raw = String(s || "");
+        const out = {};
+        const d = /(\d{4})-(\d{1,2})-(\d{1,2})/.exec(raw);
+        if (d) { out.y = d[1]; out.mo = pad2(Number(d[2])); out.d = pad2(Number(d[3])); }
+        const t = /(\d{1,2}):(\d{1,2})/.exec(raw);
+        if (t) { out.h = pad2(Number(t[1])); out.mi = pad2(Number(t[2])); }
+        return out;
+      }
+
+      function dtOptionsHtml(part, cur) {
+        const list = [];
+        if (part === "y") {
+          const y = new Date().getFullYear();
+          for (let i = y - 3; i <= y + 8; i++) list.push(String(i));
+        } else if (part === "mo") for (let i = 1; i <= 12; i++) list.push(pad2(i));
+        else if (part === "d") for (let i = 1; i <= 31; i++) list.push(pad2(i));
+        else if (part === "h") for (let i = 0; i < 24; i++) list.push(pad2(i));
+        else for (let i = 0; i < 60; i++) list.push(pad2(i));
+        return list.map(function (v) {
+          return '<option value="' + v + '"' + (v === cur ? " selected" : "") + ">" + v + "</option>";
+        }).join("");
+      }
+
+      /** 日期/时间控件：id 给 label[for]，key 决定提交用的 data-mkey，kind ∈ time|date|datetime */
+      function dtControlHtml(id, key, value, kind) {
+        const parts = DT_KINDS[kind] || DT_KINDS.date;
+        const n = new Date();
+        const fallback = {
+          y: String(n.getFullYear()), mo: pad2(n.getMonth() + 1), d: pad2(n.getDate()),
+          h: pad2(n.getHours()), mi: pad2(n.getMinutes()),
+        };
+        const got = splitDt(value);
+        const ph = kind === "time" ? "03:00" : (kind === "datetime" ? "2026-01-01 03:00" : "2026-01-01");
+        return '<input id="' + id + '" class="control" type="text" data-mkey="' + esc(key) + '"' +
+          ' value="' + esc(value == null ? "" : value) + '" placeholder="' + ph + '"' +
+          ' autocomplete="off" spellcheck="false" />' +
+          // 文本框为空时下拉停在「今天 / 现在」，避免一打开就是个万年历起点
+          '<div class="dt-pick" data-dt="' + esc(key) + '">' +
+          parts.map(function (k) {
+            const cur = got[k] != null ? got[k] : fallback[k];
+            return '<select data-dtp="' + k + '" aria-label="' + DT_LABEL[k] + '">' + dtOptionsHtml(k, cur) + "</select>";
+          }).join("") + "</div>";
+      }
+
+      /** 把 dt 下拉组与文本框接起来：下拉 → 写文本；文本 → 反向同步下拉 */
+      function bindDtPickers(host) {
+        host.querySelectorAll("[data-dt]").forEach(function (box) {
+          const input = host.querySelector('[data-mkey="' + box.getAttribute("data-dt") + '"]');
+          if (!input) return;
+          const sels = {};
+          box.querySelectorAll("[data-dtp]").forEach(function (s) { sels[s.getAttribute("data-dtp")] = s; });
+          const build = function () {
+            if (sels.y) {
+              return sels.y.value + "-" + sels.mo.value + "-" + sels.d.value +
+                (sels.h ? " " + sels.h.value + ":" + sels.mi.value : "");
+            }
+            return sels.h.value + ":" + sels.mi.value;
+          };
+          // 日候选固定 1-31，切年月后收敛到当月最后一天（避免 2 月 31 日这类非法组合）
+          const clampDay = function () {
+            if (!sels.d) return;
+            const max = new Date(Number(sels.y.value), Number(sels.mo.value), 0).getDate();
+            if (Number(sels.d.value) > max) sels.d.value = pad2(max);
+          };
+          Object.keys(sels).forEach(function (k) {
+            sels[k].addEventListener("change", function () {
+              if (k === "y" || k === "mo") clampDay();
+              input.value = build();
+            });
+          });
+          input.addEventListener("input", function () {
+            const p = splitDt(input.value);
+            if (!p.y && !p.h) return; // 打字中途解析不出就先不动下拉
+            Object.keys(sels).forEach(function (k) { if (p[k] != null) sels[k].value = p[k]; });
+            clampDay();
+          });
+        });
+      }
+
+      /** 下拉勾选：点标题展开面板，勾选后把数量回写到标题 */
+      function bindPickDropdowns(host) {
+        host.querySelectorAll("[data-pick]").forEach(function (box) {
+          const btn = box.querySelector("[data-pick-toggle]");
+          const panel = box.querySelector(".pick-dd-panel");
+          const label = box.querySelector("[data-pick-label]");
+          const items = function () {
+            return Array.prototype.slice.call(box.querySelectorAll('input[type="checkbox"]'));
+          };
+          const refresh = function () {
+            const n = items().filter(function (c) { return c.checked; }).length;
+            if (label) label.textContent = n ? "已勾选 " + n + " 台" : "选择机器（可多选）";
+          };
+          if (btn && panel) {
+            btn.addEventListener("click", function () {
+              const open = box.classList.toggle("open");
+              panel.classList.toggle("hidden", !open);
+              // 展开状态同步给读屏，否则只能靠视觉判断
+              btn.setAttribute("aria-expanded", String(open));
+            });
+          }
+          items().forEach(function (c) { c.addEventListener("change", refresh); });
+          refresh();
+        });
+      }
+
+      /** openModal 渲染完统一挂载：日历下拉 + 下拉勾选（fields 与自定义 html 两种模式都要生效） */
+      function bindModalExtras(host) {
+        bindDtPickers(host);
+        bindPickDropdowns(host);
       }
 
       /** 渲染单个弹窗字段；支持 text / number / password / select / textarea / note */
@@ -1934,6 +2112,8 @@
         } else if (f.type === "textarea") {
           control = '<textarea id="' + id + '" class="control" rows="' + (f.rows || 3) + '"' + mk +
             ' placeholder="' + esc(f.placeholder || "") + '">' + esc(val) + "</textarea>";
+        } else if (DT_KINDS[f.type]) {
+          control = dtControlHtml(id, f.key, val, f.type);
         } else {
           const type = f.type === "password" ? "password" : f.type === "number" ? "number" : "text";
           const extra = f.type === "number" ? ' min="' + (f.min != null ? f.min : 0) + '"' : "";
@@ -1983,9 +2163,10 @@
         } else {
           host.className = "form-grid" + (fields.length ? "" : " hidden");
           host.innerHTML = fields.map(function (f) { return modalFieldHtml(f, fields.length); }).join("");
-          // 初始可见性：showIf 依赖的默认值（如排班模式）也要在打开时就生效
-          modalApplyVisibility();
         }
+        bindModalExtras(host);
+        // 初始可见性：showIf 依赖的默认值（如排班模式）也要在打开时就生效
+        modalApplyVisibility();
         const ok = $("modal-ok");
         ok.textContent = opts.okText || "确定";
         ok.className = "btn " + (opts.danger ? "btn-danger" : "btn-primary");
@@ -1995,6 +2176,8 @@
         return new Promise(function (resolve) {
           modalResolve = resolve;
           const dlg = $("modal");
+          // 宽弹窗：表格列多的场景（如排班）少一点横向滚动
+          dlg.classList.toggle("wide", !!opts.wide);
           if (!dlg.open) dlg.showModal();
           // onMount：自定义正文需要自己挂监听时用（如按下拉切换动态字段）
           if (typeof opts.onMount === "function") {
@@ -3535,7 +3718,7 @@
        * 每次改动前端后手动更新此值。作用：部署后强刷页面（Ctrl+F5）时看页脚即可
        * 确认浏览器加载的是哪个构建，用于区分「线上已更新但浏览器缓存了旧 JS」——
        * 这是「保存无效 / 新功能不见」类问题的第一排查步骤。 */
-      const APP_BUILD = "20260928-2136";
+      const APP_BUILD = "20260928-2204";
       try {
         const el = document.createElement("div");
         el.style.cssText = "text-align:center;color:var(--muted);font-size:11px;padding:12px 0;opacity:.7";
@@ -3898,6 +4081,7 @@
           title: g ? "编辑分组" : "新增分组",
           desc: "排班模式决定「谁在值班」，下方参数会随所选模式变化。",
           okText: g ? "保存" : "创建",
+          wide: true,
           fields: [
             { key: "name", label: "分组名称", value: g ? g.name : "", placeholder: "如「香港三台轮换」", required: true },
             {
@@ -3909,15 +4093,27 @@
               ],
             },
             { key: "note-rotate", type: "note", full: true, text: "机器按各自值班天数依次轮转；每台的「天数」在分组卡片点「排班」设置。下面是轮换的时间原点。", showIf: modeIs("rotate") },
-            { key: "note-interval", type: "note", full: true, text: "从基准时间起，机器按各自值班天数依次轮转；每台的「天数」在分组卡片点「排班」设置，这里只需给出精确起点。", showIf: modeIs("interval") },
+            { key: "note-interval", type: "note", full: true, text: "从轮换起点起，机器按各自值班天数依次轮转；每台的「天数」在分组卡片点「排班」设置。", showIf: modeIs("interval") },
             { key: "note-window", type: "note", full: true, text: "一天内按各机器自己的「值班时段」轮换；时段在分组卡片点「排班」逐台设置，这里无需其他参数。", showIf: modeIs("window") },
             { key: "note-static", type: "note", full: true, text: "固定使用排序最靠前的可用机器，无需其他排班参数。", showIf: modeIs("static") },
             { key: "timezone", label: "时区", value: g ? g.timezone : "Asia/Shanghai", placeholder: "Asia/Shanghai", hint: "按此时区判断「今天 / 现在几点」" },
-            { key: "switchTime", label: "切换时刻", value: g ? g.switch_time : "03:00", placeholder: "03:00", hint: "当天的换班时刻；早于它仍算前一天值班的机器", showIf: modeIs("rotate") },
-            { key: "anchorDate", label: "轮换基准日", value: g ? g.anchor_date : "1970-01-01", placeholder: "1970-01-01", hint: "轮换周期从这天算起，改动可改变当前值班机器", showIf: modeIs("rotate") },
-            { key: "anchorAt", label: "基准时间", value: g ? (g.anchor_at || "") : "", placeholder: "2026-01-01 03:00", hint: "轮换起点，精确到分钟；留空视为 1970-01-01 00:00", showIf: modeIs("interval") },
+            { key: "switchTime", label: "切换时刻", type: "time", value: g ? g.switch_time : "03:00", hint: "当天的换班时刻；早于它仍算前一天值班的机器", showIf: modeIs("rotate") },
+            { key: "anchorDate", label: "轮换基准日", type: "date", full: true, value: g ? g.anchor_date : todayStr(), hint: "轮换周期从这天算起，改动可改变当前值班机器", showIf: modeIs("rotate") },
+            { key: "anchorAt", label: "轮换起点", type: "datetime", full: true, value: g ? (g.anchor_at || "") : nowMinuteStr(), hint: "轮换起点，精确到分钟；留空视为 1970-01-01 00:00", showIf: modeIs("interval") },
             { key: "fallbackIp", label: "兜底 IP（无机器值班时）", value: g ? g.fallback_ip : "", placeholder: "留空则保持原解析" },
           ],
+          validate: function (v) {
+            // 只校验当前模式真正用到的字段，隐藏字段的值不参与判断
+            if (v.mode === "rotate") {
+              if (!/^\d{1,2}:\d{2}$/.test(v.switchTime || "")) return "切换时刻格式应为 HH:MM";
+              if (!/^\d{4}-\d{2}-\d{2}$/.test(v.anchorDate || "")) return "轮换基准日格式应为 YYYY-MM-DD";
+            }
+            if (v.mode === "interval" && String(v.anchorAt || "").trim() &&
+              !/^\d{4}-\d{2}-\d{2}([ T]\d{1,2}:\d{2})?$/.test(String(v.anchorAt).trim())) {
+              return "轮换起点格式应为 YYYY-MM-DD HH:MM";
+            }
+            return null;
+          },
         });
         if (!vals) return;
         const body = {
@@ -3936,44 +4132,113 @@
         if (r.ok) { ddnsMsg(g ? "分组已保存" : "分组已创建，请点「排班」加入机器", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
       }
 
+      /** HH:MM → 当日分钟数；非法返回 null（用于跨天判定） */
+      function hmMin(s) {
+        const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || "").trim());
+        if (!m) return null;
+        const h = Number(m[1]), mi = Number(m[2]);
+        if (h > 23 || mi > 59) return null;
+        return h * 60 + mi;
+      }
+
+      /**
+       * 排班弹窗：同一条「机器 + 参数」表，但列与参数区随分组模式变化。
+       * rotate/interval 看「值班天数」，window 看「几点到几点」（支持跨天），static 只看排序。
+       */
       async function openScheduleModal(g) {
         if (!g) return;
-        const isWindow = g.mode === "window";
-        const isStatic = g.mode === "static";
-        const members = g.members || [];
-        const inGroup = members.map(function (m) { return m.machineId; });
-        const pool = (ddnsState.machines || []).filter(function (m) { return inGroup.indexOf(m.id) < 0; });
+        const mode = g.mode || "rotate";
+        const isWindow = mode === "window";
+        const isStatic = mode === "static";
+        const isInterval = mode === "interval";
+        const members = (g.members || []).slice()
+          .sort(function (a, b) { return a.sortOrder - b.sortOrder || a.machineId - b.machineId; });
+        const joined = members.map(function (m) { return m.machineId; });
+        const pool = (ddnsState.machines || []).filter(function (m) { return joined.indexOf(m.id) < 0; });
 
+        // 模式参数区：把该模式真正要调的参数摆出来，别的模式看不到也改不了
+        let params = "";
+        if (mode === "rotate") {
+          params = '<div class="sched-params">'
+            + '<div class="field"><label for="sched-switchTime">切换时刻</label>'
+            + dtControlHtml("sched-switchTime", "switchTime", g.switch_time || "03:00", "time") + "</div>"
+            + '<div class="field"><label for="sched-anchorDate">轮换基准日</label>'
+            + dtControlHtml("sched-anchorDate", "anchorDate", g.anchor_date || todayStr(), "date") + "</div>"
+            + '</div><p class="sub-note" style="margin:-4px 0 14px">机器按各自「天数」依次轮转；早于切换时刻仍算前一天值班的机器。</p>';
+        } else if (isInterval) {
+          params = '<div style="margin-bottom:14px"><div class="field">'
+            + '<label for="sched-anchorAt">轮换起点</label>'
+            + dtControlHtml("sched-anchorAt", "anchorAt", g.anchor_at || "", "datetime") + "</div>"
+            + '<p class="sub-note" style="margin:6px 0 0">「起点 + 每台机器各自 N 天」依次轮转，精确到分钟；留空视为 1970-01-01 00:00。</p></div>';
+        } else if (isWindow) {
+          params = '<p class="sub-note" style="margin:0 0 14px">本模式不看天数：为每台机器填「在线开始 / 在线结束」（HH:MM）。'
+            + "结束时刻早于开始时刻表示跨天，例如 22:00 → 06:00。</p>";
+        } else {
+          params = '<p class="sub-note" style="margin:0 0 14px">固定首台：按「排序」取第一台可用机器，无需其他参数。</p>';
+        }
+
+        const colCount = isWindow ? 5 : (isStatic ? 3 : 4);
         let rowsHtml = members.map(function (m) {
-          const dutyCell = isStatic
-            ? '<span class="cell-sub" style="margin:0">—</span>'
-            : (isWindow
-              ? '<input class="control" data-mkey="ws_' + m.machineId + '" value="' + escDdns(m.windowStart) + '" placeholder="08:00" style="max-width:92px" />'
-                + ' <input class="control" data-mkey="we_' + m.machineId + '" value="' + escDdns(m.windowEnd) + '" placeholder="14:00" style="max-width:92px" />'
-              : '<input class="control" type="number" min="1" data-mkey="days_' + m.machineId + '" value="' + (m.days || 1) + '" style="max-width:96px" />');
+          let cells = "";
+          if (isWindow) {
+            const s = m.windowStart || "", e = m.windowEnd || "";
+            const sm = hmMin(s), em = hmMin(e);
+            // 只在两端都合法且「结束 <= 开始」时提示跨天，避免脏数据乱打标
+            const cross = sm !== null && em !== null && em <= sm;
+            cells = '<td><input class="control" data-mkey="ws_' + m.machineId + '" value="' + escDdns(s) + '" placeholder="08:00" /></td>'
+              + '<td><div class="win-cell"><input class="control" data-mkey="we_' + m.machineId + '" value="' + escDdns(e) + '" placeholder="14:00" />'
+              + (cross ? '<span class="tag-warn">跨天</span>' : "") + "</div></td>";
+          } else if (!isStatic) {
+            cells = '<td><input class="control" type="number" min="1" data-mkey="days_' + m.machineId
+              + '" value="' + (m.days || 1) + '" style="max-width:96px" /></td>';
+          }
           return "<tr><td><strong>" + escDdns(m.name) + '</strong><span class="cell-sub">' + escDdns(m.ip) + (m.machineEnabled ? "" : " · 已停用") + "</span></td>"
-            + "<td>" + dutyCell + "</td>"
+            + cells
             + '<td><input class="control" type="number" data-mkey="so_' + m.machineId + '" value="' + m.sortOrder + '" style="max-width:80px" /></td>'
             + '<td><label class="nt-toggle"><input type="checkbox" data-mkey="rm_' + m.machineId + '" /> 移除</label></td></tr>';
         }).join("");
-        if (!members.length) rowsHtml = '<tr><td colspan="4"><span class="cell-sub" style="margin:0">还没有成员，从下方添加。</span></td></tr>';
+        if (!members.length) {
+          rowsHtml = '<tr><td colspan="' + colCount + '"><span class="cell-sub" style="margin:0">还没有成员，从下方勾选加入。</span></td></tr>';
+        }
 
-        const dutyCol = isStatic ? "值班" : (isWindow ? "在线时段" : (g.mode === "interval" ? "值班天数 N" : "值班天数"));
-        const html = '<div class="table-wrap"><table class="sched-table"><thead><tr><th>机器</th><th>' + dutyCol + "</th><th>排序</th><th>操作</th></tr></thead><tbody>" + rowsHtml + "</tbody></table></div>"
-          + (pool.length
-            ? '<div class="field" style="margin-top:14px"><label>添加机器到本组</label><select class="control" data-mkey="addpick"><option value="">（不添加）</option>'
-              + pool.map(function (m) { return '<option value="' + m.id + '">' + escDdns(m.name) + "（" + escDdns(m.ip) + "）</option>"; }).join("") + "</select></div>"
-            : '<p class="hint" style="margin-top:12px">机器池里的机器都已加入本组。</p>');
+        const modeTh = isWindow ? "<th>在线开始</th><th>在线结束</th>"
+          : (isStatic ? "" : "<th>" + (isInterval ? "值班天数 N" : "值班天数") + "</th>");
+        const tableHtml = '<div class="table-wrap"><table class="sched-table"><thead><tr><th>机器</th>'
+          + modeTh + "<th>排序</th><th>操作</th></tr></thead><tbody>" + rowsHtml + "</tbody></table></div>";
 
-        const desc = g.mode === "interval" ? "基准时间 + 每 N 天：为每台机器填连续值班天数。「基准时间」在分组编辑里设置。"
-          : g.mode === "rotate" ? "按天轮换：为每台机器填连续值班天数，到切换时刻才换班。"
-            : g.mode === "window" ? "按时段轮换：为每台机器填在线时段（HH:MM），支持跨天。"
-              : "固定首台：按排序取第一台可用机器。";
+        // 添加机器：改成下拉勾选（多选），一次可以把池子里的机器批量加进来
+        const addBlock = pool.length
+          ? '<div class="field" style="margin-top:14px"><label>添加机器到本组</label>'
+            + '<div class="pick-dd" data-pick>'
+            + '<button type="button" class="control pick-dd-btn" data-pick-toggle aria-expanded="false">'
+            + '<span data-pick-label>选择机器（可多选）</span><span class="pick-dd-arrow" aria-hidden="true">▾</span></button>'
+            + '<div class="pick-dd-panel hidden">'
+            + pool.map(function (m) {
+              return '<label class="pick-dd-item"><input type="checkbox" data-mkey="add_' + m.id + '" />'
+                + "<span><strong>" + escDdns(m.name) + '</strong><span class="cell-sub">' + escDdns(m.ip) + "</span></span></label>";
+            }).join("")
+            + "</div></div>"
+            + '<p class="hint">勾选后点「保存排班」一并加入'
+            + (isWindow ? "（时段默认全天 00:00–23:59，保存后可改）" : "") + "。</p></div>"
+          : '<p class="hint" style="margin-top:12px">机器池里的机器都已加入本组。</p>';
+
         const vals = await openModal({
           title: "排班 · " + g.name,
-          desc: desc,
+          desc: "当前模式：" + (DDNS_MODE_LABEL[mode] || mode) + "。如需换模式，请用分组卡片的「编辑」。",
           okText: "保存排班",
-          html: html,
+          wide: true,
+          html: params + tableHtml + addBlock,
+          validate: function (v) {
+            if (!isWindow) return null;
+            for (const m of members) {
+              if (v["rm_" + m.machineId]) continue; // 打算移除的就不校验时段了
+              const s = String(v["ws_" + m.machineId] || "").trim();
+              const e = String(v["we_" + m.machineId] || "").trim();
+              if (!s && !e) return "「" + m.name + "」请填写在线时段，或勾选「移除」";
+              if (hmMin(s) === null || hmMin(e) === null) return "「" + m.name + "」的时段格式应为 HH:MM";
+            }
+            return null;
+          },
         });
         if (!vals) return;
         const next = [];
@@ -3982,16 +4247,54 @@
           next.push({
             machineId: m.machineId,
             days: Math.max(1, Number(vals["days_" + m.machineId]) || 1),
-            windowStart: String(vals["ws_" + m.machineId] || "").trim(),
-            windowEnd: String(vals["we_" + m.machineId] || "").trim(),
+            windowStart: isWindow ? String(vals["ws_" + m.machineId] || "").trim() : "",
+            windowEnd: isWindow ? String(vals["we_" + m.machineId] || "").trim() : "",
             sortOrder: Number(vals["so_" + m.machineId]) || 0,
           });
         });
-        if (vals.addpick) {
-          next.push({ machineId: Number(vals.addpick), days: 1, windowStart: "", windowEnd: "", sortOrder: next.length });
-        }
+        pool.forEach(function (m) {
+          if (!vals["add_" + m.id]) return;
+          next.push({
+            machineId: m.id,
+            days: 1,
+            // 时段模式给个「全天」默认值：否则新成员会因时段未配置而永远不命中
+            windowStart: isWindow ? "00:00" : "",
+            windowEnd: isWindow ? "23:59" : "",
+            sortOrder: next.length,
+          });
+        });
         const r = await apiJson("/api/v1/ddns/groups/" + g.id + "/members", { method: "PUT", body: JSON.stringify({ members: next }) });
-        if (r.ok) { ddnsMsg("排班已保存", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+        if (!r.ok) { ddnsMsg(errText(r.data), "error"); return; }
+        // 排班参数与成员一次保存：此前只能回分组编辑里改，模式差异体现不出来
+        const patch = {};
+        if (mode === "rotate") {
+          const st = String(vals.switchTime || "").trim();
+          const ad = String(vals.anchorDate || "").trim();
+          if (st && st !== (g.switch_time || "")) patch.switchTime = st;
+          if (ad && ad !== (g.anchor_date || "")) patch.anchorDate = ad;
+        }
+        if (isInterval) {
+          const at = String(vals.anchorAt || "").trim();
+          if (at !== (g.anchor_at || "")) patch.anchorAt = at;
+        }
+        if (Object.keys(patch).length) {
+          // PUT 是全量覆盖：未改动的字段用原值回填，避免切模式顺手把参数清掉
+          const body = {
+            name: g.name, mode: mode, timezone: g.timezone,
+            switchTime: patch.switchTime !== undefined ? patch.switchTime : (g.switch_time || "03:00"),
+            anchorDate: patch.anchorDate !== undefined ? patch.anchorDate : (g.anchor_date || "1970-01-01"),
+            anchorAt: patch.anchorAt !== undefined ? patch.anchorAt : (g.anchor_at || ""),
+            fallbackIp: g.fallback_ip || "", enabled: !!g.enabled,
+          };
+          const r2 = await apiJson("/api/v1/ddns/groups/" + g.id, { method: "PUT", body: JSON.stringify(body) });
+          if (!r2.ok) {
+            ddnsMsg("成员已保存，但排班参数保存失败：" + errText(r2.data), "error");
+            await loadDdns();
+            return;
+          }
+        }
+        ddnsMsg("排班已保存", "ok");
+        await loadDdns();
       }
 
       async function deleteGroup(id) {
