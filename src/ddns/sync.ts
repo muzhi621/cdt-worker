@@ -28,6 +28,15 @@ export interface SyncOutcome {
   details: string[];
 }
 
+/**
+ * P2-4：切换时刻突发护栏。每轮 DDNS 同步占用的厂商 API 调用（subrequest）上限。
+ * 监控周期本身已占用约 35 个 subrequest（Cloudflare 免费计划上限 50），
+ * 切换时刻若大量记录同时变更会叠加，逼近上限触发 1101 并中断整轮 cron（含监控主流程）。
+ * 逼近上限时停止本轮回填、下轮续做，宁可晚几分钟切换也不拖垮监控。
+ * 注意：稳态下目标 IP 与厂商一致会提前跳过（sync.ts 幂等），绝大多数轮次 0 厂商调用。
+ */
+const DDNS_SUBREQUEST_BUDGET = 20;
+
 /** 把成员行转成排班算法需要的机器结构 */
 function toSchedulerMachines(members: store.DdnsMember[]): DdnsMachine[] {
   return members.map((m) => ({
@@ -50,6 +59,9 @@ function toSchedulerMachines(members: store.DdnsMember[]): DdnsMachine[] {
  */
 export async function runDdnsSync(env: Env, opts: SyncOptions = {}): Promise<SyncOutcome> {
   const out: SyncOutcome = { groups: 0, records: 0, changed: 0, failed: 0, skipped: 0, details: [] };
+  // P2-4：本轮厂商调用计数（query + update 各计 1），逼近 DDNS_SUBREQUEST_BUDGET 即停
+  let providerCalls = 0;
+  let budgetHit = false;
 
   let groups: store.DdnsGroupDetail[];
   try {
@@ -110,6 +122,17 @@ export async function runDdnsSync(env: Env, opts: SyncOptions = {}): Promise<Syn
         continue;
       }
 
+      // P2-4：本轮回填已达厂商调用上限 → 停止回填、下轮续做（避免触发 CF 1101 中断监控）
+      if (providerCalls >= DDNS_SUBREQUEST_BUDGET) {
+        out.skipped++;
+        if (!budgetHit) {
+          budgetHit = true;
+          await addDdnsLog(env, 'warning',
+            `DDNS 同步已达本轮回填上限（${DDNS_SUBREQUEST_BUDGET} 次厂商调用），剩余切换将在下一轮监控周期续做`).catch(() => {});
+        }
+        continue;
+      }
+
       const cred = await store.readCredential(env, rec);
       const target = {
         zone: rec.zone, host: rec.host, ttl: rec.ttl,
@@ -118,6 +141,7 @@ export async function runDdnsSync(env: Env, opts: SyncOptions = {}): Promise<Syn
 
       try {
         // 先查厂商实际值：可能已被外部改动，避免多余的写
+        providerCalls++;
         const cur = await provider.query(target, cred);
         if (cur.ip === targetIp) {
           // 厂商已是目标值，只需把本地状态对齐（含回填 zone_id/record_id 供下次快速更新）
@@ -125,6 +149,17 @@ export async function runDdnsSync(env: Env, opts: SyncOptions = {}): Promise<Syn
           out.skipped++;
           continue;
         }
+        // 需要写入：再次检查护栏（update 是第二个 subrequest）
+        if (providerCalls >= DDNS_SUBREQUEST_BUDGET) {
+          out.skipped++;
+          if (!budgetHit) {
+            budgetHit = true;
+            await addDdnsLog(env, 'warning',
+              `DDNS 同步已达本轮回填上限（${DDNS_SUBREQUEST_BUDGET} 次厂商调用），剩余切换将在下一轮监控周期续做`).catch(() => {});
+          }
+          continue;
+        }
+        providerCalls++;
         await provider.update(target, cred, targetIp);
         await store.markSynced(env, rec.id, targetIp, cur.zoneId || rec.zone_id, cur.recordId || rec.record_id, '');
         out.changed++;

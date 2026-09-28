@@ -1,7 +1,7 @@
 // 自动建表：部署后首次请求时幂等执行 schema
 // 对应 schema.sql，全部用 IF NOT EXISTS 保证可重复执行
 import type { Env } from '../security/security';
-import { DEFAULT_CONFIG } from './store';
+import { DEFAULT_CONFIG, addLog } from './store';
 
 const SCHEMA_STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS settings (
@@ -244,7 +244,11 @@ export async function ensureSchema(env: Env): Promise<void> {
   // 数据迁移：把历史上内嵌在解析记录里的凭据提升为独立凭据并回填引用
   try {
     await migrateInlineCredentials(env);
-  } catch { /* 迁移失败不影响启动，下次请求重试 */ }
+  } catch (e) {
+    // P2-5：迁移失败不可静默吞掉——若因某条脏数据持续抛错，问题会一直卡住且无从发现。
+    // schemaReady 随后即置 true、本 isolate 内不会再重试，故必须落日志到日志页。
+    await addLog(env, 'error', 'DDNS 遗留凭据迁移失败：' + (e instanceof Error ? e.message : String(e))).catch(() => {});
+  }
   // 补齐缺失的设置默认值（已存在的不覆盖）
   try {
     await env.DB.batch(

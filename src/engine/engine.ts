@@ -199,10 +199,16 @@ export async function processAccount(
     if (billingText) return billingText; // 已读过，同一轮内复用
     billingText = { balance: '', cost: '' };
     try {
-      const bal = await store.billingCache<{ amount: number; currency: string }>(env, account.id, 'balance', '', 6);
-      if (bal.hit && bal.value) billingText.balance = `${bal.value.amount} ${bal.value.currency || ''}`.trim();
-      const bill = await store.billingCache<{ totalCost: number }>(env, account.id, 'instance_bill', localCycle(now, config.timezone), 6);
-      if (bill.hit && bill.value) billingText.cost = `${bill.value.totalCost}`;
+      // P0-T1：改为一次查询取回 balance + instance_bill 两个 kind（billingSnapshot），
+      // 替代两次独立 billingCache()，通知轮次每账号省 1 个 subrequest（详见第三轮审查）。
+      const snap = await store.billingSnapshot<{ amount?: number; currency?: string; totalCost?: number }>(
+        env, account.id, { balance: '', instance_bill: localCycle(now, config.timezone) }, 6);
+      if (snap.balance?.hit && snap.balance.value) {
+        billingText.balance = `${snap.balance.value.amount} ${snap.balance.value.currency || ''}`.trim();
+      }
+      if (snap.instance_bill?.hit && snap.instance_bill.value) {
+        billingText.cost = `${snap.instance_bill.value.totalCost}`;
+      }
     } catch { /* 账单读取失败不影响通知，保持空串 */ }
     return billingText;
   }
@@ -541,13 +547,15 @@ export async function summary(env: Env) {
     let currency = 'CNY';
     if (config.enableBilling) {
       try {
-        const bal = await store.billingCache<{ amount: number; currency: string }>(env, account.id, 'balance', '', 8760);
-        if (bal.hit && bal.value) {
-          balance = bal.value.amount;
-          currency = bal.value.currency || 'CNY';
+        // P0-T2：改为一次查询取回 balance + instance_bill 两个 kind（billingSnapshot），
+        // 替代两次独立 billingCache()，状态页每次刷新每账号省 1 个 subrequest（详见第三轮审查）。
+        const snap = await store.billingSnapshot<{ amount?: number; currency?: string; totalCost?: number }>(
+          env, account.id, { balance: '', instance_bill: cycle }, 8760);
+        if (snap.balance?.hit && snap.balance.value) {
+          balance = snap.balance.value.amount ?? null;
+          currency = snap.balance.value.currency || 'CNY';
         }
-        const bill = await store.billingCache<{ totalCost: number }>(env, account.id, 'instance_bill', cycle, 8760);
-        if (bill.hit && bill.value) cost = bill.value.totalCost;
+        if (snap.instance_bill?.hit && snap.instance_bill.value) cost = snap.instance_bill.value.totalCost ?? null;
       } catch { /* 账单读取失败忽略 */ }
     }
     result.push({

@@ -14,6 +14,7 @@ import {
 } from '../engine/triggers';
 import { formatWallClock } from '../engine/time';
 import { runDdnsSync, previewGroups } from '../ddns/sync';
+import { parseHm } from '../ddns/scheduler';
 import * as ddnsStore from '../ddns/store';
 import { listProviders, getProvider } from '../ddns/providers';
 import type { Account } from '../provider/aliyun';
@@ -1303,11 +1304,27 @@ function parseGroupBody(b: Record<string, any>) {
 /** 合法排班模式：rotate 按天轮换 / interval 基准时间+每N天 / window 时段 / static 固定首台 */
 const DDNS_MODES = ['rotate', 'interval', 'window', 'static'];
 
+// P2-1：分组时间字段白名单校验，避免「前端校验即安全」反模式——非法值被静默回落到
+// 1970-01-01 00:00 或 03:00 原点运行却无任何报错。后端必须独立校验格式。
+const RE_SWITCH_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+const RE_ANCHOR_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const RE_ANCHOR_AT = /^\d{4}-\d{2}-\d{2}([ T][0-2]\d:[0-5]\d)?$/;
+function groupTimeError(g: ReturnType<typeof parseGroupBody>): string | null {
+  if (!RE_SWITCH_TIME.test(g.switchTime)) return `切换时刻格式不正确（应为 HH:MM，如 03:00）：${g.switchTime}`;
+  if (!RE_ANCHOR_DATE.test(g.anchorDate)) return `轮换基准日格式不正确（应为 YYYY-MM-DD，如 2026-09-28）：${g.anchorDate}`;
+  if (g.anchorAt && !RE_ANCHOR_AT.test(g.anchorAt)) {
+    return `基准时间格式不正确（应为 YYYY-MM-DD 或 YYYY-MM-DD HH:MM）：${g.anchorAt}`;
+  }
+  return null;
+}
+
 async function ddnsCreateGroup(ctx: Context): Promise<Response> {
   const b = await ddnsBody(ctx);
   const g = parseGroupBody(b);
   if (!g.name) return error('invalid_input', '分组名称不能为空', 400);
   if (!DDNS_MODES.includes(g.mode)) return error('invalid_input', '排班模式只能是 rotate / interval / window / static', 400);
+  const terr = groupTimeError(g);
+  if (terr) return error('invalid_input', terr, 400);
   const id = await ddnsStore.createGroup(ctx.env, g);
   await store.addLog(ctx.env, 'audit', `新增 DDNS 分组「${g.name}」（模式 ${g.mode}）`);
   return json({ ok: true, id }, 201);
@@ -1320,6 +1337,8 @@ async function ddnsUpdateGroup(ctx: Context): Promise<Response> {
   const g = parseGroupBody(b);
   if (!g.name) return error('invalid_input', '分组名称不能为空', 400);
   if (!DDNS_MODES.includes(g.mode)) return error('invalid_input', '排班模式只能是 rotate / interval / window / static', 400);
+  const terr = groupTimeError(g);
+  if (terr) return error('invalid_input', terr, 400);
   await ddnsStore.updateGroup(ctx.env, id, g);
   return json({ ok: true });
 }
@@ -1346,6 +1365,16 @@ async function ddnsSaveMembers(ctx: Context): Promise<Response> {
     windowEnd: String(m?.windowEnd ?? '').trim(),
     sortOrder: Number.isFinite(Number(m?.sortOrder)) ? Number(m.sortOrder) : i,
   })).filter((m: { machineId: number }) => Number.isFinite(m.machineId) && m.machineId > 0);
+  // P2-2：window 模式时段字段格式校验，非法值会导致 parseHm 返回 null → 该机器被静默跳过，
+  // 必须显式报错让用户看到，而不是「看起来配了却不生效」。
+  for (const m of members) {
+    if (m.windowStart && parseHm(m.windowStart) === null) {
+      return error('invalid_input', `在线开始时间格式不正确（应为 HH:MM）：${m.windowStart}`, 400);
+    }
+    if (m.windowEnd && parseHm(m.windowEnd) === null) {
+      return error('invalid_input', `在线结束时间格式不正确（应为 HH:MM）：${m.windowEnd}`, 400);
+    }
+  }
   await ddnsStore.saveMembers(ctx.env, id, members);
   return json({ ok: true, count: members.length });
 }
@@ -1360,13 +1389,20 @@ async function ddnsCreateRecord(ctx: Context): Promise<Response> {
   if (!groupId) return error('invalid_input', '所属分组不能为空', 400);
   if (!listProviders().some((p) => p.id === provider)) return error('invalid_input', `不支持的 DNS 厂商：${provider}`, 400);
   if (!zone) return error('invalid_input', '域名（zone）不能为空', 400);
+  const credentialId = Math.max(0, Math.floor(Number(b.credentialId) || 0));
+  // P2-3：引用独立凭据实体时，后端必须校验凭据确实存在——前端只提供合法凭据，
+  // 但悬空/伪造 id 会让记录无可用凭据、同步时厂商鉴权失败。0 表示「不绑定凭据」合法。
+  if (credentialId > 0) {
+    const cred = await ddnsStore.getCredential(ctx.env, credentialId);
+    if (!cred) return error('invalid_input', `引用的 DNS 凭据不存在（credentialId=${credentialId}）`, 400);
+  }
   const id = await ddnsStore.createRecord(ctx.env, {
     groupId,
     provider,
     zone,
     host: String(b.host ?? '@').trim() || '@',
     ttl: Math.max(60, Math.floor(Number(b.ttl) || 600)),
-    credentialId: Math.max(0, Math.floor(Number(b.credentialId) || 0)),
+    credentialId,
     enabled: b.enabled !== false,
   });
   await store.addLog(ctx.env, 'audit', `新增 DDNS 解析记录 ${zone}（厂商 ${provider}）`);
@@ -1483,6 +1519,10 @@ async function ddnsDeleteCredential(ctx: Context): Promise<Response> {
 async function ddnsTestCredential(ctx: Context): Promise<Response> {
   const id = ddnsId(ctx);
   if (!id) return error('invalid_input', '凭据 ID 无效', 400);
+  // P1-1：连通测试会打外部 DNS 厂商 API，按标准「测试类按钮必须限流」加服务端闸门
+  if (!allowRate('ddns-test:' + clientIP(ctx.request), 5, 60_000)) {
+    return error('rate_limited', '连通测试过于频繁，请稍后再试', 429);
+  }
   const b = await ddnsBody(ctx);
   const credRow = await ddnsStore.getCredential(ctx.env, id);
   if (!credRow) return error('not_found', '凭据不存在', 404);
@@ -1512,6 +1552,10 @@ async function ddnsTestCredential(ctx: Context): Promise<Response> {
 
 /** 手动同步：force 为真时忽略本地记录、强制查一次厂商 */
 async function ddnsSyncHandler(ctx: Context): Promise<Response> {
+  // P1-1：手动同步会打外部 DNS 厂商 API（切换时刻尤其集中），加限流防误点刷爆厂商
+  if (!allowRate('ddns-sync:' + clientIP(ctx.request), 3, 60_000)) {
+    return error('rate_limited', '同步操作过于频繁，请稍后再试', 429);
+  }
   const b = await ddnsBody(ctx);
   const groupId = b.groupId ? Number(b.groupId) : undefined;
   const out = await runDdnsSync(ctx.env, {
