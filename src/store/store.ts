@@ -545,6 +545,8 @@ const LOG_CATEGORY_TYPES: Record<string, string[]> = {
   monitor: ['heartbeat', 'info'],
   keepalive: ['keepalive'],
   alert: ['warning', 'error'],
+  // DNS 轮换解析：解析切换成功记 'ddns'，失败记 'error'（归入告警分类）
+  ddns: ['ddns'],
 };
 
 export interface LogPage {

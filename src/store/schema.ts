@@ -96,6 +96,63 @@ const SCHEMA_STATEMENTS: string[] = [
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_login_ip ON login_attempts(ip, created_at)`,
+
+  // ── DDNS 轮换解析 ──
+  // 分组（一组机器 + 若干域名记录，同一分组下的域名永远指向同一台值班机器）
+  `CREATE TABLE IF NOT EXISTS ddns_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'rotate',
+    timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+    switch_time TEXT NOT NULL DEFAULT '03:00',
+    anchor_date TEXT NOT NULL DEFAULT '1970-01-01',
+    fallback_ip TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  // 机器池（与阿里云账号解耦：这里只关心「名字 + 公网 IP」）
+  `CREATE TABLE IF NOT EXISTS ddns_machines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    remark TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  // 分组↔机器的成员关系与排班参数（days 用于 rotate，window_* 用于 window）
+  `CREATE TABLE IF NOT EXISTS ddns_group_members (
+    group_id INTEGER NOT NULL,
+    machine_id INTEGER NOT NULL,
+    days INTEGER NOT NULL DEFAULT 1,
+    window_start TEXT NOT NULL DEFAULT '',
+    window_end TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (group_id, machine_id),
+    FOREIGN KEY (group_id) REFERENCES ddns_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (machine_id) REFERENCES ddns_machines(id) ON DELETE CASCADE
+  )`,
+  // 解析记录：一个分组可挂多条（多域名/跨厂商），全部同步指向本组值班机器
+  `CREATE TABLE IF NOT EXISTS ddns_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    zone TEXT NOT NULL,
+    host TEXT NOT NULL DEFAULT '@',
+    ttl INTEGER NOT NULL DEFAULT 60,
+    zone_id TEXT NOT NULL DEFAULT '',
+    record_id TEXT NOT NULL DEFAULT '',
+    credential_enc TEXT NOT NULL DEFAULT '',
+    current_ip TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_sync_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (group_id) REFERENCES ddns_groups(id) ON DELETE CASCADE
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_ddns_records_group ON ddns_records(group_id)`,
 ];
 
 // 已部署库的增量迁移（ALTER 在列已存在时会报错，需逐条容错执行）

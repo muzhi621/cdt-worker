@@ -13,6 +13,9 @@ import {
   type TriggerSource,
 } from '../engine/triggers';
 import { formatWallClock } from '../engine/time';
+import { runDdnsSync, previewGroups } from '../ddns/sync';
+import * as ddnsStore from '../ddns/store';
+import { listProviders } from '../ddns/providers';
 import type { Account } from '../provider/aliyun';
 import indexHtml from '../web/index.html';
 
@@ -158,6 +161,20 @@ const routes: { method: string; pattern: string; scope?: string; handler: (ctx: 
   { method: 'GET', pattern: '/api/v1/system/api-keys', scope: 'admin', handler: listApiKeysHandler },
   { method: 'POST', pattern: '/api/v1/system/api-keys', scope: 'admin', handler: createApiKeyHandler },
   { method: 'DELETE', pattern: '/api/v1/system/api-keys/:id', scope: 'admin', handler: deleteApiKeyHandler },
+  // ── DDNS 轮换解析 ──
+  { method: 'GET', pattern: '/api/v1/ddns/overview', scope: 'admin', handler: ddnsOverview },
+  { method: 'POST', pattern: '/api/v1/ddns/machines', scope: 'admin', handler: ddnsCreateMachine },
+  { method: 'PUT', pattern: '/api/v1/ddns/machines/:id', scope: 'admin', handler: ddnsUpdateMachine },
+  { method: 'DELETE', pattern: '/api/v1/ddns/machines/:id', scope: 'admin', handler: ddnsDeleteMachine },
+  { method: 'POST', pattern: '/api/v1/ddns/groups', scope: 'admin', handler: ddnsCreateGroup },
+  { method: 'PUT', pattern: '/api/v1/ddns/groups/:id', scope: 'admin', handler: ddnsUpdateGroup },
+  { method: 'DELETE', pattern: '/api/v1/ddns/groups/:id', scope: 'admin', handler: ddnsDeleteGroup },
+  { method: 'PUT', pattern: '/api/v1/ddns/groups/:id/members', scope: 'admin', handler: ddnsSaveMembers },
+  { method: 'POST', pattern: '/api/v1/ddns/records', scope: 'admin', handler: ddnsCreateRecord },
+  { method: 'PUT', pattern: '/api/v1/ddns/records/:id', scope: 'admin', handler: ddnsUpdateRecord },
+  { method: 'DELETE', pattern: '/api/v1/ddns/records/:id', scope: 'admin', handler: ddnsDeleteRecord },
+  { method: 'POST', pattern: '/api/v1/ddns/sync', scope: 'admin', handler: ddnsSyncHandler },
+  { method: 'GET', pattern: '/api/v1/ddns/preview', scope: 'admin', handler: ddnsPreviewHandler },
 ];
 
 async function setup(ctx: Context): Promise<Response> {
@@ -1179,5 +1196,246 @@ export async function runMonitorCycle(
   } else {
     await store.addLog(env, 'info', `监控周期已触发 [${origin}]，但尚未配置任何账号（请到「账号」页添加）`);
   }
+
+  // DDNS 轮换解析同步：搭监控周期的便车执行，不再单独占一个 Cron 槽位与触发次数。
+  // 内部幂等是省额度的关键——目标 IP 与厂商当前值一致时不调厂商 API，
+  // 按天轮换的分组一天最多真正写一次，window 模式也只会在跨时段时写。
+  // 整段包 try/catch：DDNS 出错绝不能影响监控主流程的返回值与上面的周期日志。
+  try {
+    const ddns = await runDdnsSync(env);
+    // 只在「有切换或有失败」时写汇总，避免每 5 分钟一条无意义日志灌满日志页
+    if (ddns.changed > 0 || ddns.failed > 0) {
+      await store.addLog(env, ddns.failed > 0 ? 'warning' : 'info',
+        `DDNS 轮换同步：${ddns.groups} 个分组 / ${ddns.records} 条记录，切换 ${ddns.changed} 条，失败 ${ddns.failed} 条`);
+    }
+  } catch (err) {
+    await store.addLog(env, 'error', `DDNS 轮换同步异常: ${err}`);
+  }
+
   return json({ monitored: results.length, interval_minutes: config.monitorInterval, source: source ?? 'manual' });
+}
+
+/* ------------------------------ DDNS 轮换解析 API ------------------------------ */
+
+// 统一取 body：非法 JSON 当空对象处理，避免每个 handler 各写一遍 catch
+async function ddnsBody(ctx: Context): Promise<Record<string, any>> {
+  const b = await ctx.request.json().catch(() => null);
+  return (b && typeof b === 'object' ? b : {}) as Record<string, any>;
+}
+
+function ddnsId(ctx: Context): number {
+  const id = Number(ctx.params.id);
+  return Number.isFinite(id) && id > 0 ? id : 0;
+}
+
+/**
+ * 总览：机器 + 分组（含成员/记录）+ 厂商元信息，一次取全。
+ * 前端每开一次页面只发这一个请求，省掉「先拉分组再逐组拉记录」的多次往返。
+ * 凭据只回脱敏值，密文与明文都不出后端。
+ */
+async function ddnsOverview(ctx: Context): Promise<Response> {
+  const machines = await ddnsStore.listMachines(ctx.env);
+  const groups = await ddnsStore.listGroups(ctx.env);
+  const outGroups = [];
+  for (const g of groups) {
+    const records = [];
+    for (const r of g.records) {
+      const cred = await ddnsStore.readCredential(ctx.env, r);
+      records.push({
+        ...r,
+        credential_enc: '', // 密文不外传：前端拿不到也就无法误泄露
+        credentialMasked: ddnsStore.maskCredential(cred),
+        credentialFilled: Object.keys(cred).length > 0,
+      });
+    }
+    outGroups.push({ ...g, records });
+  }
+  return json({ machines, groups: outGroups, providers: listProviders() });
+}
+
+/* ---- 机器 ---- */
+
+async function ddnsCreateMachine(ctx: Context): Promise<Response> {
+  const b = await ddnsBody(ctx);
+  const name = String(b.name ?? '').trim();
+  const ip = String(b.ip ?? '').trim();
+  if (!name) return error('invalid_input', '机器名称不能为空', 400);
+  if (!ip) return error('invalid_input', '机器 IP 不能为空', 400);
+  // 只做形状校验（IPv4 点分十进制），不做可达性探测——那是监控循环的活
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return error('invalid_input', 'IP 格式不正确，请填写 IPv4 地址', 400);
+  const id = await ddnsStore.createMachine(ctx.env, name, ip, String(b.remark ?? '').trim(), b.enabled !== false);
+  await store.addLog(ctx.env, 'audit', `新增 DDNS 机器「${name}」（${ip}）`);
+  return json({ ok: true, id }, 201);
+}
+
+async function ddnsUpdateMachine(ctx: Context): Promise<Response> {
+  const id = ddnsId(ctx);
+  if (!id) return error('invalid_input', '机器 ID 无效', 400);
+  const b = await ddnsBody(ctx);
+  const name = String(b.name ?? '').trim();
+  const ip = String(b.ip ?? '').trim();
+  if (!name) return error('invalid_input', '机器名称不能为空', 400);
+  if (!ip || !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return error('invalid_input', 'IP 格式不正确，请填写 IPv4 地址', 400);
+  await ddnsStore.updateMachine(ctx.env, id, name, ip, String(b.remark ?? '').trim(), b.enabled !== false);
+  return json({ ok: true });
+}
+
+async function ddnsDeleteMachine(ctx: Context): Promise<Response> {
+  const id = ddnsId(ctx);
+  if (!id) return error('invalid_input', '机器 ID 无效', 400);
+  await ddnsStore.deleteMachine(ctx.env, id);
+  await store.addLog(ctx.env, 'audit', `删除 DDNS 机器 #${id}（各分组的成员关系同步移除）`);
+  return json({ ok: true });
+}
+
+/* ---- 分组 ---- */
+
+function parseGroupBody(b: Record<string, any>) {
+  return {
+    name: String(b.name ?? '').trim(),
+    mode: String(b.mode ?? 'rotate').trim(),
+    timezone: String(b.timezone ?? 'Asia/Shanghai').trim() || 'Asia/Shanghai',
+    switchTime: String(b.switchTime ?? '03:00').trim() || '03:00',
+    anchorDate: String(b.anchorDate ?? '1970-01-01').trim() || '1970-01-01',
+    fallbackIp: String(b.fallbackIp ?? '').trim(),
+    enabled: b.enabled !== false,
+  };
+}
+
+async function ddnsCreateGroup(ctx: Context): Promise<Response> {
+  const b = await ddnsBody(ctx);
+  const g = parseGroupBody(b);
+  if (!g.name) return error('invalid_input', '分组名称不能为空', 400);
+  if (!['rotate', 'window', 'static'].includes(g.mode)) return error('invalid_input', '排班模式只能是 rotate / window / static', 400);
+  const id = await ddnsStore.createGroup(ctx.env, g);
+  await store.addLog(ctx.env, 'audit', `新增 DDNS 分组「${g.name}」（模式 ${g.mode}）`);
+  return json({ ok: true, id }, 201);
+}
+
+async function ddnsUpdateGroup(ctx: Context): Promise<Response> {
+  const id = ddnsId(ctx);
+  if (!id) return error('invalid_input', '分组 ID 无效', 400);
+  const b = await ddnsBody(ctx);
+  const g = parseGroupBody(b);
+  if (!g.name) return error('invalid_input', '分组名称不能为空', 400);
+  if (!['rotate', 'window', 'static'].includes(g.mode)) return error('invalid_input', '排班模式只能是 rotate / window / static', 400);
+  await ddnsStore.updateGroup(ctx.env, id, g);
+  return json({ ok: true });
+}
+
+async function ddnsDeleteGroup(ctx: Context): Promise<Response> {
+  const id = ddnsId(ctx);
+  if (!id) return error('invalid_input', '分组 ID 无效', 400);
+  await ddnsStore.deleteGroup(ctx.env, id);
+  await store.addLog(ctx.env, 'audit', `删除 DDNS 分组 #${id}（成员与解析记录同步移除）`);
+  return json({ ok: true });
+}
+
+/** 全量保存组内成员与排班参数（前端拖拽排序后整体提交） */
+async function ddnsSaveMembers(ctx: Context): Promise<Response> {
+  const id = ddnsId(ctx);
+  if (!id) return error('invalid_input', '分组 ID 无效', 400);
+  const b = await ddnsBody(ctx);
+  const raw = Array.isArray(b.members) ? b.members : null;
+  if (!raw) return error('invalid_input', 'members 必须是数组', 400);
+  const members = raw.map((m: any, i: number) => ({
+    machineId: Number(m?.machineId),
+    days: Math.max(1, Math.floor(Number(m?.days) || 1)),
+    windowStart: String(m?.windowStart ?? '').trim(),
+    windowEnd: String(m?.windowEnd ?? '').trim(),
+    sortOrder: Number.isFinite(Number(m?.sortOrder)) ? Number(m.sortOrder) : i,
+  })).filter((m: { machineId: number }) => Number.isFinite(m.machineId) && m.machineId > 0);
+  await ddnsStore.saveMembers(ctx.env, id, members);
+  return json({ ok: true, count: members.length });
+}
+
+/* ---- 解析记录 ---- */
+
+async function ddnsCreateRecord(ctx: Context): Promise<Response> {
+  const b = await ddnsBody(ctx);
+  const groupId = Number(b.groupId);
+  const provider = String(b.provider ?? '').trim();
+  const zone = String(b.zone ?? '').trim();
+  if (!groupId) return error('invalid_input', '所属分组不能为空', 400);
+  if (!listProviders().some((p) => p.id === provider)) return error('invalid_input', `不支持的 DNS 厂商：${provider}`, 400);
+  if (!zone) return error('invalid_input', '域名（zone）不能为空', 400);
+  const id = await ddnsStore.createRecord(ctx.env, {
+    groupId,
+    provider,
+    zone,
+    host: String(b.host ?? '@').trim() || '@',
+    ttl: Math.max(60, Math.floor(Number(b.ttl) || 600)),
+    credential: (b.credential && typeof b.credential === 'object') ? b.credential as Record<string, string> : {},
+    enabled: b.enabled !== false,
+  });
+  await store.addLog(ctx.env, 'audit', `新增 DDNS 解析记录 ${zone}（厂商 ${provider}）`);
+  return json({ ok: true, id }, 201);
+}
+
+async function ddnsUpdateRecord(ctx: Context): Promise<Response> {
+  const id = ddnsId(ctx);
+  if (!id) return error('invalid_input', '记录 ID 无效', 400);
+  const b = await ddnsBody(ctx);
+  const patch: Parameters<typeof ddnsStore.updateRecord>[2] = {};
+  if (b.provider !== undefined) {
+    const provider = String(b.provider).trim();
+    if (!listProviders().some((p) => p.id === provider)) return error('invalid_input', `不支持的 DNS 厂商：${provider}`, 400);
+    patch.provider = provider;
+  }
+  if (b.zone !== undefined) {
+    const zone = String(b.zone).trim();
+    if (!zone) return error('invalid_input', '域名（zone）不能为空', 400);
+    patch.zone = zone;
+  }
+  if (b.host !== undefined) patch.host = String(b.host).trim() || '@';
+  if (b.ttl !== undefined) patch.ttl = Math.max(60, Math.floor(Number(b.ttl) || 600));
+  if (b.enabled !== undefined) patch.enabled = !!b.enabled;
+  // 凭据只在显式传来对象时才覆盖：前端「只改 TTL」时不该把密钥清空
+  if (b.credential !== undefined && b.credential && typeof b.credential === 'object') {
+    const cred = b.credential as Record<string, string>;
+    // 前端会把未修改的脱敏值（含 ****）回传，这里剔除掉，避免把掩码写进库里
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(cred)) {
+      const s = String(v ?? '').trim();
+      if (s && !s.includes('****')) clean[k] = s;
+    }
+    if (Object.keys(clean).length > 0) patch.credential = clean;
+  }
+  await ddnsStore.updateRecord(ctx.env, id, patch);
+  return json({ ok: true });
+}
+
+async function ddnsDeleteRecord(ctx: Context): Promise<Response> {
+  const id = ddnsId(ctx);
+  if (!id) return error('invalid_input', '记录 ID 无效', 400);
+  await ddnsStore.deleteRecord(ctx.env, id);
+  return json({ ok: true });
+}
+
+/* ---- 同步 / 预览 ---- */
+
+/** 手动同步：force 为真时忽略本地记录、强制查一次厂商 */
+async function ddnsSyncHandler(ctx: Context): Promise<Response> {
+  const b = await ddnsBody(ctx);
+  const groupId = b.groupId ? Number(b.groupId) : undefined;
+  const out = await runDdnsSync(ctx.env, {
+    force: b.force === true,
+    groupId: Number.isFinite(groupId) && groupId ? groupId : undefined,
+    manual: true,
+  });
+  await store.addLog(ctx.env, out.failed > 0 ? 'warning' : 'info',
+    `手动触发 DDNS 同步：切换 ${out.changed} 条，失败 ${out.failed} 条，跳过 ${out.skipped} 条`);
+  // 明细直接回前端：用户点「立即同步」就是为了看到结果，再看日志页成本高
+  return json({ ok: out.failed === 0, ...out });
+}
+
+/** 预览未来排班：rotate 模式按天输出，window/static 只返回当前命中 */
+async function ddnsPreviewHandler(ctx: Context): Promise<Response> {
+  const sp = new URL(ctx.request.url).searchParams;
+  const groupId = Number(sp.get('group_id'));
+  if (!Number.isFinite(groupId) || groupId <= 0) return error('invalid_input', '缺少有效的 group_id', 400);
+  const days = Math.min(30, Math.max(1, Math.floor(Number(sp.get('days')) || 7)));
+  const rows = await previewGroups(ctx.env, groupId, days);
+  if (!rows) return error('not_found', '分组不存在', 404);
+  return json({ rows });
 }
