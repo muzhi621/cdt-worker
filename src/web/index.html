@@ -440,16 +440,33 @@
     .var-chip:hover { background: var(--surface-3); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
     textarea.control { resize: vertical; min-height: 140px; line-height: 1.7; font-family: var(--font-mono); font-size: 12.5px; }
     /* 通知渠道子块：标题+开关一行，字段网格独立两列 */
-    dialog#edit-dialog {
+    /* ---------- 统一弹窗外壳 ----------
+     * 全站所有 dialog 共用 .modal：同一圆角、同一背景、同一阴影、同一页脚按钮排布。
+     * 结构固定为 .modal-head / .modal-body / .modal-foot，禁止在弹窗里另起一套内边距。 */
+    dialog.modal {
       border: 1px solid var(--border-strong); border-radius: var(--r-lg);
       background: var(--surface-solid); color: var(--text);
-      padding: 22px; width: min(680px, calc(100vw - 32px)); max-height: 86vh;
-      box-shadow: var(--shadow-lg);
+      padding: 0; width: min(560px, calc(100vw - 32px)); max-height: 86vh;
+      box-shadow: var(--shadow-lg); overflow: hidden;
     }
-    dialog#edit-dialog::backdrop { background: rgba(2, 6, 16, 0.55); backdrop-filter: blur(3px); }
-    dialog#edit-dialog .form-grid { margin-top: 14px; }
+    dialog.modal.wide { width: min(680px, calc(100vw - 32px)); }
+    dialog.modal::backdrop { background: rgba(2, 6, 16, 0.55); backdrop-filter: blur(3px); }
+    dialog.modal > form { display: flex; flex-direction: column; max-height: 86vh; }
+    .modal-head { padding: 20px 22px 0; }
+    .modal-head h3 { margin: 0; font-size: 17px; font-weight: 650; }
+    .modal-desc { margin: 6px 0 0; font-size: 13.5px; color: var(--text-2); line-height: 1.65; }
+    .modal-body { padding: 16px 22px 6px; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+    .modal-body .form-grid { margin-top: 0; }
+    .modal-foot {
+      display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap;
+      padding: 14px 22px 20px;
+    }
+    .modal-foot .btn { width: auto; }
     @media (max-width: 720px) {
-      dialog#edit-dialog { padding: 16px; }
+      .modal-head { padding: 16px 16px 0; }
+      .modal-body { padding: 14px 16px 6px; }
+      .modal-foot { padding: 12px 16px 16px; }
+      .modal-foot .btn { flex: 1 1 auto; }
     }
     .nt-block {
       border: 1px solid var(--border); border-radius: var(--r-md);
@@ -597,6 +614,79 @@
     .url-box { display: flex; gap: 8px; align-items: center; margin: 8px 0 4px; }
     .url-box .control { font-family: var(--font-mono); font-size: 12.5px; flex: 1 1 auto; min-width: 0; }
     .hint { font-size: 12.5px; color: var(--muted); margin-top: 6px; line-height: 1.6; }
+
+    /* ---------- 卡片内子区块 ----------
+     * 与「通知渠道」同款容器：DDNS 分组、机器池等二级内容一律用它包裹，
+     * 保证任何模块在卡片里的「块」长得一样（背景 --surface-2 + 1px 边框 + r-md）。 */
+    .sub-block {
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      background: var(--surface-2); padding: 14px 16px 16px; margin-bottom: 14px;
+    }
+    .sub-block:last-child { margin-bottom: 0; }
+    .sub-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
+    }
+    .sub-head .section-title { margin-bottom: 0; }
+    .sub-head .hint, .sub-note { margin: 0; }
+    .sub-note { font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+    /* 行列表：机器 / 密钥等「一行一条 + 行尾操作」的统一容器 */
+    .row-list { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); padding: 0 12px; }
+    .row-list:empty { display: none; }
+    .row-list .trigger-row { padding: 10px 0; }
+    .row-list > p { padding: 12px 0; margin: 0; }
+    /* 行内提示条：与 .alert 同一套语义色，但用于卡片内的轻量状态回显 */
+    .inline-note {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 10px 12px; border-radius: var(--r-md); font-size: 13px; line-height: 1.6;
+      border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2);
+      margin-bottom: 14px;
+    }
+    .inline-note:empty { display: none; }
+    .inline-note.ok {
+      color: var(--success);
+      border-color: color-mix(in srgb, var(--success) 40%, transparent);
+      background: color-mix(in srgb, var(--success) 10%, transparent);
+    }
+    .inline-note.error {
+      color: var(--danger);
+      border-color: color-mix(in srgb, var(--danger) 38%, transparent);
+      background: color-mix(in srgb, var(--danger) 10%, transparent);
+    }
+    /* 表单动作行：按钮一律贴右、不全宽（.btn-primary 默认 width:100%） */
+    .form-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+    .form-actions .btn { width: auto; }
+    .form-actions .spacer { flex: 1 1 auto; }
+    /* 记录块：解析记录等「可折叠的一块表单」 */
+    .record-block {
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      background: var(--surface); padding: 12px 14px 14px; margin-bottom: 10px;
+    }
+    .record-block:last-child { margin-bottom: 0; }
+    .record-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .record-head strong { font-size: 13.5px; word-break: break-all; }
+    .record-head .spacer { flex: 1 1 auto; }
+    /* 成员行：机器 + 若干排班字段 + 行尾「移除」，窄屏自动换行堆叠 */
+    .member-row {
+      display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;
+      padding: 12px 0; border-bottom: 1px solid var(--border);
+    }
+    .member-row:last-of-type { border-bottom: 0; padding-bottom: 0; }
+    .member-row .field { margin: 0; flex: 1 1 140px; min-width: 0; }
+    .member-row .field > label { font-size: 12.5px; margin-bottom: 5px; }
+    .member-row .field.f-num { flex: 0 0 96px; }
+    .member-row .field.f-time { flex: 0 0 104px; }
+    .member-row .row-end { flex: 0 0 auto; margin-left: auto; }
+    .static-value {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      min-height: 48px; padding: 11px 14px; font-size: 14px;
+      border: 1px dashed var(--border); border-radius: var(--r-md);
+      background: var(--surface); color: var(--text-2);
+    }
+    /* 表单列数变体：仅在宽屏生效，窄屏统一回落单列（与 .form-grid 一致） */
+    @media (min-width: 721px) {
+      .form-grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
 
     /* 日志 */
     .log-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
@@ -820,17 +910,14 @@
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" data-page-node-id="NOTIFY-TAB-ICO"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" data-page-node-id="NOTIFY-TAB-P1"/><path d="M13.7 21a2 2 0 0 1-3.4 0" data-page-node-id="NOTIFY-TAB-P2"/></svg>
         通知
       </button>
-      <button class="tab" role="tab" type="button" data-tab="logs" aria-selected="false" data-page-node-id="BfYm7DB4X3q0lk1HQmnDVg">
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" data-page-node-id="XihEmagGTRBEkEEoMCxCHP"><path d="M4 4h16v16H4z" data-page-node-id="XnZeKsE38GpCoHlLWCGHxA"/><path d="M8 9h8M8 13h8M8 17h5" data-page-node-id="FLhPf7hqWhKV9UjNuhnyKG"/></svg>
-        日志
-      </button>
-      <button class="tab" role="tab" type="button" data-tab="apikeys" aria-selected="false">
-        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2 15 8"/><path d="M10.5 12.5 3 20l1 1 7.5-7.5"/><path d="m5.5 14.5 4 4"/><path d="M15 5l4-4 4 4-4 4"/></svg>
-        密钥
-      </button>
       <button class="tab" role="tab" type="button" data-tab="ddns" aria-selected="false">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10"/></svg>
         DDNS
+      </button>
+      <!-- 「日志」固定为最右侧一项；「密钥」已并入设置页（#apikeys 哈希会重定向过去） -->
+      <button class="tab" role="tab" type="button" data-tab="logs" aria-selected="false" data-page-node-id="BfYm7DB4X3q0lk1HQmnDVg">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" data-page-node-id="XihEmagGTRBEkEEoMCxCHP"><path d="M4 4h16v16H4z" data-page-node-id="XnZeKsE38GpCoHlLWCGHxA"/><path d="M8 9h8M8 13h8M8 17h5" data-page-node-id="FLhPf7hqWhKV9UjNuhnyKG"/></svg>
+        日志
       </button>
     </div>
 
@@ -839,10 +926,12 @@
       <button type="button" data-tab="accounts" aria-selected="false" data-page-node-id="n1Z4hHtTc6gFPbPzP7NMC2"><span class="ic" data-page-node-id="W3bi2I8EuOMhFqfzKvZmfg"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="NfKoWD3HA4BAq7GqGMyB5B"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" data-page-node-id="dseaOvgqE8FO2ZghfrEFXl"/><circle cx="9" cy="7" r="4" data-page-node-id="yHxj4iIHHikaTjwJbpwNCr"/><path d="M22 21v-2a4 4 0 0 0-3-3.87" data-page-node-id="ECcinl3czZiFGQcqN5RfJW"/></svg></span>账号</button>
       <button type="button" data-tab="settings" aria-selected="false" data-page-node-id="5q0apAoXNA9jqY1hDx880t"><span class="ic" data-page-node-id="7Cxj35OmbDIBiwDA3EAhnf"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="cKOa14N9mulmS3n8L0Tdzc"><circle cx="12" cy="12" r="3" data-page-node-id="GcToAMs0141ZWeTApB0n5R"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1" data-page-node-id="OWGkkcgxzXhVckXVCBo3BK"/></svg></span>设置</button>
       <button type="button" data-tab="notify" aria-selected="false" data-page-node-id="NOTIFY-TAB-MOBILE"><span class="ic" data-page-node-id="NOTIFY-TAB-MICO"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="NOTIFY-TAB-MP1"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" data-page-node-id="NOTIFY-TAB-MP2"/><path d="M13.7 21a2 2 0 0 1-3.4 0" data-page-node-id="NOTIFY-TAB-MP3"/></svg></span>通知</button>
+      <button type="button" data-tab="ddns" aria-selected="false"><span class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10"/></svg></span>DDNS</button>
       <button type="button" data-tab="logs" aria-selected="false" data-page-node-id="beEnc5JPHtLoruYa9lwBNK"><span class="ic" data-page-node-id="PIdVHE9lGUCo9gasmagBdM"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="zAX2aBl8lMDLA7OUYhzOZi"><path d="M4 4h16v16H4z" data-page-node-id="jxGQjR9PwBNRvfY67M1Rk6"/><path d="M8 9h8M8 13h8M8 17h5" data-page-node-id="PakoQ01ymsnjIm5xW3NjQE"/></svg></span>日志</button>
     </div>
 
-    <!-- 移动端底部导航保持 5 项：密钥页可通过哈希 #apikeys 直达，避免挤占布局 -->
+    <!-- 移动端底部导航与桌面 Tab 顺序、图标完全一致（状态/账号/设置/通知/DDNS/日志）；
+         密钥页已并入设置页，不再是独立入口，仅保留 #apikeys 哈希重定向 -->
 
     <!-- 状态 -->
     <section id="tab-status" role="tabpanel" aria-label="状态" data-page-node-id="D9DDFzlIH2Zd6IerKK0e6t">
@@ -1318,6 +1407,55 @@
           </div>
         </details>
       </div>
+
+      <!-- API 密钥：原为独立 Tab，现并入设置页 —— 管理员密码 / 触发密钥 / API 令牌
+           都属于「凭据」，集中在一处更符合系统导航语义；#apikeys 哈希会自动定位到这里 -->
+      <div class="card" id="apikey-card">
+        <div class="card-head">
+          <div>
+            <h2>API 密钥</h2>
+            <p class="card-desc">为第三方程序或面板签发只读/受控令牌。明文密钥只在创建时显示一次，请立即保存。</p>
+          </div>
+          <span class="spacer"></span>
+          <button class="btn btn-primary btn-sm" type="button" id="apikey-new">新建密钥</button>
+        </div>
+
+        <div id="apikey-new-box" class="sub-block hidden">
+          <div class="sub-head">
+            <div class="section-title">新建密钥</div>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="apikey-name">名称</label>
+              <input id="apikey-name" class="control" type="text" maxlength="40" placeholder="例如：Grafana / 自建面板" />
+            </div>
+            <div class="field">
+              <label for="apikey-expire">有效期（天，留空为长期有效）</label>
+              <input id="apikey-expire" class="control" type="number" min="1" max="3650" placeholder="不填即永不过期" />
+            </div>
+            <div class="field full">
+              <label>权限</label>
+              <label class="check" for="apikey-scope-read"><input type="checkbox" id="apikey-scope-read" value="widget:read" checked /> widget:read — 读取概览 / 账号历史</label>
+              <label class="check" for="apikey-scope-ctrl" style="margin-top:8px"><input type="checkbox" id="apikey-scope-ctrl" value="instance:control" /> instance:control — 手动刷新与开机/关机</label>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button class="btn btn-ghost btn-sm" type="button" id="apikey-cancel">取消</button>
+            <button class="btn btn-primary btn-sm" type="button" id="apikey-create">确认创建</button>
+          </div>
+        </div>
+
+        <div id="apikey-token-box" class="hidden">
+          <div class="inline-note ok">密钥已生成，请立即复制保存——离开此页面后无法再次查看。</div>
+          <div class="code-wrap">
+            <button class="copy-btn" type="button" data-copy-text="" aria-label="复制密钥">复制图标</button>
+            <pre><code id="apikey-token"></code></pre>
+          </div>
+        </div>
+
+        <div id="apikey-list" class="row-list"></div>
+        <p class="hint">调用方式：<code>Authorization: Bearer &lt;密钥&gt;</code> 或 <code>X-API-Key: &lt;密钥&gt;</code>。密钥仅存哈希，服务端无法找回。</p>
+      </div>
     </section>
 
     <!-- 通知 -->
@@ -1477,53 +1615,6 @@
       </div>
     </section>
 
-    <!-- API 密钥 -->
-    <section id="tab-apikeys" class="hidden" role="tabpanel" aria-label="API 密钥">
-      <div class="card">
-        <div class="card-head">
-          <div>
-            <h2>API 密钥</h2>
-            <p class="card-desc">为第三方程序或面板签发只读/受控令牌。明文密钥只在创建时显示一次，请立即保存。</p>
-          </div>
-          <span class="spacer"></span>
-          <button class="btn btn-primary btn-sm" type="button" id="apikey-new">新建密钥</button>
-        </div>
-
-        <div id="apikey-new-box" class="hidden" style="margin-bottom:14px">
-          <div class="form-grid">
-            <div class="field">
-              <label for="apikey-name">名称</label>
-              <input id="apikey-name" class="control" type="text" maxlength="40" placeholder="例如：Grafana / 自建面板" />
-            </div>
-            <div class="field">
-              <label for="apikey-expire">有效期（天，留空为长期有效）</label>
-              <input id="apikey-expire" class="control" type="number" min="1" max="3650" placeholder="不填即永不过期" />
-            </div>
-          </div>
-          <div class="field" style="margin-top:10px">
-            <label>权限</label>
-            <label class="check" for="apikey-scope-read"><input type="checkbox" id="apikey-scope-read" value="widget:read" checked /> widget:read — 读取概览 / 账号历史</label>
-            <label class="check" for="apikey-scope-ctrl" style="margin-top:4px"><input type="checkbox" id="apikey-scope-ctrl" value="instance:control" /> instance:control — 手动刷新与开机/关机</label>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
-            <button class="btn btn-primary btn-sm" type="button" id="apikey-create">确认创建</button>
-            <button class="btn btn-ghost btn-sm" type="button" id="apikey-cancel">取消</button>
-          </div>
-        </div>
-
-        <div id="apikey-token-box" class="hidden" style="margin:12px 0">
-          <div class="hint ok">密钥已生成，请立即复制保存——离开此页面后无法再次查看。</div>
-          <div class="code-wrap" style="margin-top:8px">
-            <button class="copy-btn" type="button" data-copy-text="" aria-label="复制密钥">复制图标</button>
-            <pre><code id="apikey-token"></code></pre>
-          </div>
-        </div>
-
-        <div id="apikey-list" class="log-list" style="border:0;padding:0"></div>
-        <p class="hint">调用方式：<code>Authorization: Bearer &lt;密钥&gt;</code> 或 <code>X-API-Key: &lt;密钥&gt;</code>。密钥仅存哈希，服务端无法找回。</p>
-      </div>
-    </section>
-
     <!-- DDNS 轮换解析 -->
     <section id="tab-ddns" class="hidden" role="tabpanel" aria-label="DDNS 轮换">
       <div class="card">
@@ -1533,33 +1624,43 @@
             <p class="card-desc">多台机器轮流值班，自动把域名解析切到当前值班机器的 IP。支持「按天轮换」与「一天内按时段轮换」两种排班；一个分组可挂多个域名（允许跨厂商），它们始终解析到同一台值班机器。</p>
           </div>
           <span class="spacer"></span>
-          <button class="btn btn-primary" type="button" id="ddns-sync" style="width:auto">立即同步</button>
+          <button class="btn btn-primary btn-sm" type="button" id="ddns-sync">立即同步</button>
         </div>
-        <div id="ddns-msg" class="hint"></div>
+        <div id="ddns-msg" class="inline-note"></div>
 
-        <div class="section-title">机器（值班候选）</div>
-        <div id="ddns-machines"></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px">
-          <div class="field" style="flex:1 1 130px;margin:0">
-            <label for="ddns-m-name">名称</label>
-            <input id="ddns-m-name" class="control" placeholder="如 HK-01" />
+        <div class="sub-block">
+          <div class="sub-head">
+            <div class="section-title">机器（值班候选）</div>
+            <p class="sub-note">开关机请在云厂商控制台设置，这里只登记「名称 + 公网 IP」用于切换解析</p>
           </div>
-          <div class="field" style="flex:1 1 130px;margin:0">
-            <label for="ddns-m-ip">公网 IP</label>
-            <input id="ddns-m-ip" class="control" placeholder="1.2.3.4" />
+          <div id="ddns-machines" class="row-list"></div>
+          <div class="form-grid cols-3">
+            <div class="field">
+              <label for="ddns-m-name">名称</label>
+              <input id="ddns-m-name" class="control" placeholder="如 HK-01" />
+            </div>
+            <div class="field">
+              <label for="ddns-m-ip">公网 IP</label>
+              <input id="ddns-m-ip" class="control" placeholder="1.2.3.4" />
+            </div>
+            <div class="field">
+              <label for="ddns-m-remark">备注</label>
+              <input id="ddns-m-remark" class="control" placeholder="选填" />
+            </div>
           </div>
-          <div class="field" style="flex:1 1 150px;margin:0">
-            <label for="ddns-m-remark">备注</label>
-            <input id="ddns-m-remark" class="control" placeholder="选填" />
+          <div class="form-actions">
+            <button class="btn btn-primary btn-sm" type="button" id="ddns-m-add">添加机器</button>
           </div>
-          <button class="btn btn-ghost btn-sm" type="button" id="ddns-m-add" style="width:auto">添加机器</button>
         </div>
-        <p class="hint">机器的开关机由你在云厂商控制台设置，这里只登记「名字 + 公网 IP」用于切换解析。</p>
 
-        <div class="section-title" style="margin-top:18px">分组（一组机器 + 若干域名）</div>
-        <div id="ddns-groups"></div>
-        <button class="btn btn-ghost btn-sm" type="button" id="ddns-g-add" style="width:auto;margin-top:8px">新增分组</button>
-        <p class="hint">同步搭监控周期的便车执行（不额外占用 Cron 次数），且目标 IP 未变化时不调用厂商 API——按天轮换的分组一天最多真正写一次。</p>
+        <div class="sub-block">
+          <div class="sub-head">
+            <div class="section-title">分组（一组机器 + 若干域名）</div>
+            <button class="btn btn-ghost btn-sm" type="button" id="ddns-g-add">新增分组</button>
+          </div>
+          <div id="ddns-groups"></div>
+          <p class="hint">同步搭监控周期的便车执行（不额外占用 Cron 次数），且目标 IP 未变化时不调用厂商 API——按天轮换的分组一天最多真正写一次。</p>
+        </div>
       </div>
     </section>
 
