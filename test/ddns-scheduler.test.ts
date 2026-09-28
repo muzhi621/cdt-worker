@@ -1,8 +1,8 @@
 // DDNS 排班算法单测：覆盖时段命中、跨天、按天轮转、切换时刻、时区与预览
 import { describe, it, expect } from 'vitest';
 import {
-  pickByRotate, pickByWindow, pickActiveMachine, previewRotate,
-  parseHm, parseDate, formatDate, zonedParts, type DdnsMachine,
+  pickByRotate, pickByWindow, pickByInterval, pickActiveMachine, previewRotate,
+  splitAnchorAt, parseHm, parseDate, formatDate, zonedParts, type DdnsMachine,
 } from '../src/ddns/scheduler';
 
 const TZ = 'UTC'; // 统一用 UTC 时区，避免测试受运行环境时区影响
@@ -174,5 +174,76 @@ describe('previewRotate 预览', () => {
     expect(rows).toHaveLength(4);
     expect(rows.map((r) => r.machineName)).toEqual(['A', 'B', 'A', 'B']);
     expect(rows[0].date).toBe('1970-01-01');
+  });
+});
+
+describe('splitAnchorAt 解析基准时间', () => {
+  it('解析 "YYYY-MM-DD HH:MM"', () => {
+    expect(splitAnchorAt('2026-09-20 03:00')).toEqual({ date: '2026-09-20', hm: '03:00' });
+  });
+  it('兼容 T 分隔与纯日期', () => {
+    expect(splitAnchorAt('2026-09-20T08:30')).toEqual({ date: '2026-09-20', hm: '08:30' });
+    expect(splitAnchorAt('2026-09-20')).toEqual({ date: '2026-09-20', hm: '' });
+  });
+  it('非法值返回空', () => {
+    expect(splitAnchorAt('nope')).toEqual({ date: '', hm: '' });
+    expect(splitAnchorAt('')).toEqual({ date: '', hm: '' });
+  });
+});
+
+describe('interval 模式：基准时间 + 每 N 天', () => {
+  // 三台各 5 天，基准时间 2026-09-20 03:00，15 天一循环
+  const machines = [
+    machine(1, 'SG', '1.1.1.1', { days: 5 }),
+    machine(2, 'KR', '2.2.2.2', { days: 5 }),
+    machine(3, 'HK', '3.3.3.3', { days: 5 }),
+  ];
+  const opts = { anchorAt: '2026-09-20 03:00' };
+
+  it('基准日当天由第一台值班', () => {
+    expect(pickByInterval(machines, atUtc(2026, 9, 20, 12), TZ, opts).machine?.name).toBe('SG');
+  });
+
+  it('第 5 天仍是第一台，第 6 天切到第二台', () => {
+    expect(pickByInterval(machines, atUtc(2026, 9, 24, 12), TZ, opts).machine?.name).toBe('SG');
+    expect(pickByInterval(machines, atUtc(2026, 9, 25, 12), TZ, opts).machine?.name).toBe('KR');
+  });
+
+  it('第 11 天切到第三台，第 16 天回到第一台', () => {
+    expect(pickByInterval(machines, atUtc(2026, 9, 30, 12), TZ, opts).machine?.name).toBe('HK');
+    expect(pickByInterval(machines, atUtc(2026, 10, 5, 12), TZ, opts).machine?.name).toBe('SG');
+  });
+
+  it('基准时间早于当天切换时刻时，仍算前一天（与 rotate 一致）', () => {
+    // 2026-09-25 01:00 早于 03:00 → 排班日回退到 09-24（第 5 天）→ 仍是 SG
+    expect(pickByInterval(machines, atUtc(2026, 9, 25, 1, 0), TZ, opts).machine?.name).toBe('SG');
+    // 2026-09-25 04:00 → 切到 KR
+    expect(pickByInterval(machines, atUtc(2026, 9, 25, 4, 0), TZ, opts).machine?.name).toBe('KR');
+  });
+
+  it('reason 文案标明「按基准时间轮转」', () => {
+    expect(pickByInterval(machines, atUtc(2026, 9, 20, 12), TZ, opts).reason).toContain('按基准时间轮转');
+  });
+
+  it('基准时间缺失时回退到 1970-01-01 且不崩', () => {
+    const r = pickByInterval(machines, atUtc(2026, 9, 20, 12), TZ, { anchorAt: '' });
+    expect(r.machine).not.toBeNull();
+    expect(['SG', 'KR', 'HK']).toContain(r.machine!.name);
+  });
+
+  it('没有可用机器时返回 null', () => {
+    expect(pickByInterval([], atUtc(2026, 9, 20, 12), TZ, opts).machine).toBeNull();
+  });
+
+  it('pickActiveMachine 正确分发 interval', () => {
+    const r = pickActiveMachine('interval', machines, atUtc(2026, 9, 20, 12), TZ, {
+      anchorDate: '1970-01-01', switchTime: '03:00', anchorAt: '2026-09-20 03:00',
+    });
+    expect(r.machine?.name).toBe('SG');
+  });
+
+  it('previewRotate 支持 interval 模式', () => {
+    const rows = previewRotate(machines, atUtc(2026, 9, 20, 0), 3, TZ, { anchorDate: '1970-01-01', switchTime: '03:00', anchorAt: '2026-09-20 03:00' }, 'interval');
+    expect(rows.map((x) => x.machineName)).toEqual(['SG', 'SG', 'SG']);
   });
 });

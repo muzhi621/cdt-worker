@@ -75,7 +75,7 @@ export async function runDdnsSync(env: Env, opts: SyncOptions = {}): Promise<Syn
       toSchedulerMachines(group.members),
       Date.now(),
       group.timezone || 'Asia/Shanghai',
-      { anchorDate: group.anchor_date, switchTime: group.switch_time },
+      { anchorDate: group.anchor_date, switchTime: group.switch_time, anchorAt: group.anchor_at },
     );
 
     // ② 没人值班时走兜底 IP；兜底也为空则保持现状（避免把解析写坏）
@@ -153,18 +153,19 @@ export async function runDdnsSync(env: Env, opts: SyncOptions = {}): Promise<Syn
 export async function previewGroups(env: Env, groupId: number, days: number) {
   const group = await store.getGroup(env, groupId);
   if (!group) return null;
-  if (group.mode === 'rotate') {
+  if (group.mode === 'rotate' || group.mode === 'interval') {
     return previewRotate(
       toSchedulerMachines(group.members),
       Date.now(), days, group.timezone || 'Asia/Shanghai',
-      { anchorDate: group.anchor_date, switchTime: group.switch_time },
+      { anchorDate: group.anchor_date, switchTime: group.switch_time, anchorAt: group.anchor_at },
+      group.mode,
     );
   }
   // window / static：时段模式不随日期变化，返回当天命中结果即可
   const picked = pickActiveMachine(
     group.mode, toSchedulerMachines(group.members), Date.now(),
     group.timezone || 'Asia/Shanghai',
-    { anchorDate: group.anchor_date, switchTime: group.switch_time },
+    { anchorDate: group.anchor_date, switchTime: group.switch_time, anchorAt: group.anchor_at },
   );
   return [{ date: '当前', machineName: picked.machine?.name || '(无)', ip: picked.machine?.ip || '' }];
 }

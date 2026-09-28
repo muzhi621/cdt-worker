@@ -30,6 +30,23 @@ export interface RotateOptions {
   switchTime: string;
 }
 
+/** 统一排班参数：rotate 用 anchorDate+switchTime，interval 用 anchorAt */
+export interface ScheduleOptions extends RotateOptions {
+  /** 基准时间 YYYY-MM-DD HH:MM（interval 模式的轮换起点，含切换时刻） */
+  anchorAt?: string;
+}
+
+/**
+ * 拆出「基准时间」里的日期与时刻。
+ * 兼容 "YYYY-MM-DD HH:MM" / "YYYY-MM-DDTHH:MM" / 仅 "YYYY-MM-DD"（缺时刻视为 00:00）。
+ */
+export function splitAnchorAt(s: string | null | undefined): { date: string; hm: string } {
+  const raw = String(s || '').trim();
+  const m = /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}))?/.exec(raw);
+  if (!m) return { date: '', hm: '' };
+  return { date: m[1], hm: m[2] || '' };
+}
+
 export interface PickResult {
   machine: DdnsMachine | null;
   /** 命中原因，写日志用 */
@@ -177,6 +194,30 @@ export function pickByRotate(
 }
 
 /**
+ * interval 模式：「基准时间 + 每 N 天」轮换。
+ *
+ * 与 rotate 共用「每台机器值班天数（各自 N）」的轮转内核，区别在于轮换原点是一
+ * 个精确到分钟的**基准时间**（anchorAt），而不是「基准日 + 每日切换时刻」两段式。
+ * 适合「从某个时刻起，每台机器各跑 N 天」的简单心智。
+ */
+export function pickByInterval(
+  machines: DdnsMachine[],
+  nowMs: number,
+  timeZone: string,
+  opts: { anchorAt?: string },
+): PickResult {
+  const list = activeSorted(machines);
+  if (list.length === 0) return { machine: null, reason: '组内没有可用的机器' };
+  const { date, hm } = splitAnchorAt(opts.anchorAt);
+  const res = pickByRotate(machines, nowMs, timeZone, {
+    anchorDate: date || '1970-01-01',
+    switchTime: hm || '00:00',
+  });
+  if (!res.machine) return res;
+  return { machine: res.machine, reason: res.reason.replace(/^按天轮转/, '按基准时间轮转') };
+}
+
+/**
  * 统一入口：按分组模式选择值班机器。
  * static 模式（固定首台）也走这里，取 sortOrder 最小的可用机器。
  */
@@ -185,10 +226,11 @@ export function pickActiveMachine(
   machines: DdnsMachine[],
   nowMs: number,
   timeZone: string,
-  rotate: RotateOptions,
+  opts: ScheduleOptions,
 ): PickResult {
   if (mode === 'window') return pickByWindow(machines, nowMs, timeZone);
-  if (mode === 'rotate') return pickByRotate(machines, nowMs, timeZone, rotate);
+  if (mode === 'rotate') return pickByRotate(machines, nowMs, timeZone, opts);
+  if (mode === 'interval') return pickByInterval(machines, nowMs, timeZone, { anchorAt: opts.anchorAt });
   // static 或未识别的模式：固定首台
   const list = activeSorted(machines);
   return list.length
@@ -205,16 +247,22 @@ export function previewRotate(
   startMs: number,
   days: number,
   timeZone: string,
-  opts: RotateOptions,
+  opts: ScheduleOptions,
+  mode = 'rotate',
 ): { date: string; machineName: string; ip: string }[] {
   const out: { date: string; machineName: string; ip: string }[] = [];
   const dayMs = 86400000;
-  // 取样时刻取「当天 switchTime 之后 1 分钟」，确保取到的是当天的新排班而非前一天残留
-  const switchMin = parseHm(opts.switchTime) ?? 180;
+  const pick = (ms: number): PickResult => (mode === 'interval'
+    ? pickByInterval(machines, ms, timeZone, { anchorAt: opts.anchorAt })
+    : pickByRotate(machines, ms, timeZone, opts));
+  // 取样时刻取「切换时刻之后 1 分钟」，确保取到的是当天的新排班而非前一天残留
+  const switchMin = mode === 'interval'
+    ? (parseHm(splitAnchorAt(opts.anchorAt).hm) ?? 0)
+    : (parseHm(opts.switchTime) ?? 180);
   for (let i = 0; i < days; i++) {
     const dayStart = startMs + i * dayMs;
     const sampleMs = dayStart + (switchMin + 1) * 60000;
-    const r = pickByRotate(machines, sampleMs, timeZone, opts);
+    const r = pick(sampleMs);
     out.push({
       date: formatDate(dayStart),
       machineName: r.machine ? r.machine.name : '(无)',

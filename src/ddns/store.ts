@@ -8,7 +8,7 @@
 
 import { decrypt, encrypt, type Env } from '../security/security';
 
-export type DdnsMode = 'rotate' | 'window' | 'static';
+export type DdnsMode = 'rotate' | 'interval' | 'window' | 'static';
 
 export interface DdnsGroupRow {
   id: number;
@@ -17,6 +17,7 @@ export interface DdnsGroupRow {
   timezone: string;
   switch_time: string;
   anchor_date: string;
+  anchor_at: string;
   fallback_ip: string;
   enabled: number;
 }
@@ -65,11 +66,33 @@ export interface DdnsRecordRow {
   ttl: number;
   zone_id: string;
   record_id: string;
+  credential_id: number;
   credential_enc: string;
   current_ip: string;
   enabled: number;
   last_sync_at: string | null;
   last_error: string;
+}
+
+/** DNS 厂商凭据（独立实体，可被多条解析记录复用） */
+export interface DdnsCredentialRow {
+  id: number;
+  name: string;
+  provider: string;
+  credential_enc: string;
+}
+
+export interface DdnsCredential {
+  id: number;
+  name: string;
+  provider: string;
+  /** 凭据字段是否已填写（前端用来显示「已填字段」） */
+  filled: boolean;
+}
+
+/** 凭据 + 脱敏值（overview 给前端展示用，不回明文/密文） */
+export interface DdnsCredentialDetail extends DdnsCredential {
+  masked: Record<string, string>;
 }
 
 export interface DdnsRecord extends Omit<DdnsRecordRow, 'enabled'> {
@@ -85,7 +108,7 @@ export interface DdnsGroupDetail extends DdnsGroup {
 function toGroup(r: DdnsGroupRow): DdnsGroup {
   return {
     id: r.id, name: r.name, mode: r.mode, timezone: r.timezone,
-    switch_time: r.switch_time, anchor_date: r.anchor_date,
+    switch_time: r.switch_time, anchor_date: r.anchor_date, anchor_at: r.anchor_at || '',
     fallback_ip: r.fallback_ip, enabled: !!r.enabled,
   };
 }
@@ -98,6 +121,7 @@ function toRecord(r: DdnsRecordRow): DdnsRecord {
   return {
     id: r.id, group_id: r.group_id, provider: r.provider, zone: r.zone, host: r.host,
     ttl: r.ttl, zone_id: r.zone_id, record_id: r.record_id,
+    credential_id: Number(r.credential_id || 0),
     credential_enc: r.credential_enc, current_ip: r.current_ip,
     enabled: !!r.enabled, last_sync_at: r.last_sync_at, last_error: r.last_error,
   };
@@ -194,23 +218,23 @@ async function listMembers(env: Env, groupId: number): Promise<DdnsMember[]> {
 
 export async function createGroup(env: Env, g: {
   name: string; mode: string; timezone: string; switchTime: string;
-  anchorDate: string; fallbackIp: string; enabled: boolean;
+  anchorDate: string; anchorAt: string; fallbackIp: string; enabled: boolean;
 }): Promise<number> {
   const res = await env.DB.prepare(
-    `INSERT INTO ddns_groups (name, mode, timezone, switch_time, anchor_date, fallback_ip, enabled)
-     VALUES (?,?,?,?,?,?,?)`,
-  ).bind(g.name, g.mode, g.timezone, g.switchTime, g.anchorDate, g.fallbackIp, g.enabled ? 1 : 0).run();
+    `INSERT INTO ddns_groups (name, mode, timezone, switch_time, anchor_date, anchor_at, fallback_ip, enabled)
+     VALUES (?,?,?,?,?,?,?,?)`,
+  ).bind(g.name, g.mode, g.timezone, g.switchTime, g.anchorDate, g.anchorAt || '', g.fallbackIp, g.enabled ? 1 : 0).run();
   return Number(res.meta?.last_row_id ?? 0);
 }
 
 export async function updateGroup(env: Env, id: number, g: {
   name: string; mode: string; timezone: string; switchTime: string;
-  anchorDate: string; fallbackIp: string; enabled: boolean;
+  anchorDate: string; anchorAt: string; fallbackIp: string; enabled: boolean;
 }): Promise<void> {
   await env.DB.prepare(
-    `UPDATE ddns_groups SET name=?, mode=?, timezone=?, switch_time=?, anchor_date=?,
+    `UPDATE ddns_groups SET name=?, mode=?, timezone=?, switch_time=?, anchor_date=?, anchor_at=?,
      fallback_ip=?, enabled=?, updated_at=datetime('now') WHERE id=?`,
-  ).bind(g.name, g.mode, g.timezone, g.switchTime, g.anchorDate, g.fallbackIp, g.enabled ? 1 : 0, id).run();
+  ).bind(g.name, g.mode, g.timezone, g.switchTime, g.anchorDate, g.anchorAt || '', g.fallbackIp, g.enabled ? 1 : 0, id).run();
 }
 
 export async function deleteGroup(env: Env, id: number): Promise<void> {
@@ -245,19 +269,18 @@ export async function listRecords(env: Env, groupId?: number): Promise<DdnsRecor
 
 export async function createRecord(env: Env, r: {
   groupId: number; provider: string; zone: string; host: string; ttl: number;
-  credential: Record<string, string>; enabled: boolean;
+  credentialId: number; enabled: boolean;
 }): Promise<number> {
-  const enc = await encrypt(env, JSON.stringify(r.credential || {}));
   const res = await env.DB.prepare(
-    `INSERT INTO ddns_records (group_id, provider, zone, host, ttl, credential_enc, enabled)
+    `INSERT INTO ddns_records (group_id, provider, zone, host, ttl, credential_id, enabled)
      VALUES (?,?,?,?,?,?,?)`,
-  ).bind(r.groupId, r.provider, r.zone, r.host || '@', r.ttl, enc, r.enabled ? 1 : 0).run();
+  ).bind(r.groupId, r.provider, r.zone, r.host || '@', r.ttl, Number(r.credentialId) || 0, r.enabled ? 1 : 0).run();
   return Number(res.meta?.last_row_id ?? 0);
 }
 
 export async function updateRecord(env: Env, id: number, patch: {
   provider?: string; zone?: string; host?: string; ttl?: number;
-  credential?: Record<string, string>; enabled?: boolean;
+  credentialId?: number; enabled?: boolean;
 }): Promise<void> {
   const sets: string[] = [];
   const vals: (string | number)[] = [];
@@ -266,9 +289,9 @@ export async function updateRecord(env: Env, id: number, patch: {
   if (patch.host !== undefined) { sets.push('host=?'); vals.push(patch.host || '@'); }
   if (patch.ttl !== undefined) { sets.push('ttl=?'); vals.push(patch.ttl); }
   if (patch.enabled !== undefined) { sets.push('enabled=?'); vals.push(patch.enabled ? 1 : 0); }
-  if (patch.credential !== undefined) {
-    sets.push('credential_enc=?');
-    vals.push(await encrypt(env, JSON.stringify(patch.credential)));
+  if (patch.credentialId !== undefined) {
+    sets.push('credential_id=?');
+    vals.push(Number(patch.credentialId) || 0);
   }
   if (sets.length === 0) return;
   sets.push('updated_at=datetime(\'now\')');
@@ -290,15 +313,124 @@ export async function markSynced(
   ).bind(ip, zoneId, recordId, error, id).run();
 }
 
-/** 解密凭据：损坏时返回空对象而非抛出，避免一条脏凭据打断整轮同步 */
-export async function readCredential(env: Env, row: DdnsRecord): Promise<Record<string, string>> {
+/** 解密一段凭据密文：损坏时返回空对象而非抛出，避免一条脏凭据打断整轮同步 */
+async function decryptCredential(env: Env, enc: string): Promise<Record<string, string>> {
   try {
-    const plain = await decrypt(env, row.credential_enc);
+    const plain = await decrypt(env, enc || '');
     const parsed = JSON.parse(plain || '{}');
     return parsed && typeof parsed === 'object' ? parsed as Record<string, string> : {};
   } catch {
     return {};
   }
+}
+
+/**
+ * 读取某条解析记录实际使用的凭据（明文）。
+ * 优先按 credential_id 引用独立凭据；未绑定则回退到历史遗留的内嵌密文 credential_enc。
+ */
+export async function readCredential(env: Env, row: DdnsRecord): Promise<Record<string, string>> {
+  const cid = Number(row.credential_id || 0);
+  if (cid > 0) {
+    const enc = await getCredentialEnc(env, cid);
+    if (enc !== null) return decryptCredential(env, enc);
+  }
+  return decryptCredential(env, row.credential_enc || '');
+}
+
+/* ------------------------------ DNS 凭据 ------------------------------ */
+
+/** 取凭据密文（内部用）；不存在返回 null */
+async function getCredentialEnc(env: Env, id: number): Promise<string | null> {
+  const row = await env.DB.prepare('SELECT credential_enc FROM ddns_credentials WHERE id=?').bind(id).first();
+  if (!row) return null;
+  return String((row as { credential_enc?: string }).credential_enc || '');
+}
+
+/** 凭据列表（含脱敏值与「是否已填写」标记），供 overview 与凭据页展示 */
+export async function listCredentials(env: Env): Promise<DdnsCredentialDetail[]> {
+  const res = await env.DB.prepare(
+    'SELECT id, name, provider, credential_enc FROM ddns_credentials ORDER BY id ASC',
+  ).all();
+  const rows = (res.results || []) as unknown as DdnsCredentialRow[];
+  const out: DdnsCredentialDetail[] = [];
+  for (const r of rows) {
+    const cred = await decryptCredential(env, r.credential_enc);
+    out.push({
+      id: r.id, name: r.name, provider: r.provider,
+      filled: Object.keys(cred).length > 0,
+      masked: maskCredential(cred),
+    });
+  }
+  return out;
+}
+
+/** 按 id 取凭据行（含厂商，供连通测试用）；不存在返回 null */
+export async function getCredential(env: Env, id: number): Promise<DdnsCredentialRow | null> {
+  const row = await env.DB.prepare(
+    'SELECT id, name, provider, credential_enc FROM ddns_credentials WHERE id=?',
+  ).bind(id).first();
+  return row ? (row as unknown as DdnsCredentialRow) : null;
+}
+
+/** 按 id 解密凭据明文（连通测试用） */
+export async function readCredentialById(env: Env, id: number): Promise<Record<string, string>> {
+  const enc = await getCredentialEnc(env, id);
+  return enc === null ? {} : decryptCredential(env, enc);
+}
+
+/** 取第一条引用该凭据的解析记录（连通测试缺省 zone/host 时用） */
+export async function firstRecordUsingCredential(env: Env, id: number): Promise<DdnsRecord | null> {
+  const row = await env.DB.prepare(
+    'SELECT * FROM ddns_records WHERE credential_id=? ORDER BY id ASC LIMIT 1',
+  ).bind(id).first();
+  return row ? toRecord(row as unknown as DdnsRecordRow) : null;
+}
+
+export async function createCredential(env: Env, c: {
+  name: string; provider: string; credential: Record<string, string>;
+}): Promise<number> {
+  const enc = await encrypt(env, JSON.stringify(c.credential || {}));
+  const res = await env.DB.prepare(
+    'INSERT INTO ddns_credentials (name, provider, credential_enc) VALUES (?,?,?)',
+  ).bind(c.name, c.provider, enc).run();
+  return Number(res.meta?.last_row_id ?? 0);
+}
+
+/** 更新凭据；credential 为 undefined 时保留原密文（只改名称/厂商） */
+export async function updateCredential(env: Env, id: number, patch: {
+  name?: string; provider?: string; credential?: Record<string, string>;
+}): Promise<void> {
+  const sets: string[] = [];
+  const vals: (string | number)[] = [];
+  if (patch.name !== undefined) { sets.push('name=?'); vals.push(patch.name); }
+  if (patch.provider !== undefined) { sets.push('provider=?'); vals.push(patch.provider); }
+  if (patch.credential !== undefined) {
+    // 合并式更新：前端只提交改动的字段，其余字段保留原值（留空即不修改）
+    const existing = await decryptCredential(env, (await getCredentialEnc(env, id)) || '');
+    const merged = { ...existing, ...patch.credential };
+    sets.push('credential_enc=?');
+    vals.push(await encrypt(env, JSON.stringify(merged)));
+  }
+  if (sets.length === 0) return;
+  sets.push('updated_at=datetime(\'now\')');
+  vals.push(id);
+  await env.DB.prepare(`UPDATE ddns_credentials SET ${sets.join(',')} WHERE id=?`).bind(...vals).run();
+}
+
+/** 引用该凭据的解析记录条数（删除前校验用） */
+export async function countRecordsUsingCredential(env: Env, id: number): Promise<number> {
+  const row = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM ddns_records WHERE credential_id=?',
+  ).bind(id).first();
+  return Number((row as { n?: number })?.n || 0);
+}
+
+export async function deleteCredential(env: Env, id: number): Promise<void> {
+  // 解除引用后再删，避免留下悬空 credential_id
+  await env.DB.batch([
+    env.DB.prepare('UPDATE ddns_records SET credential_id=0 WHERE credential_id=?').bind(id),
+    env.DB.prepare('DELETE FROM ddns_credentials WHERE id=?').bind(id),
+  ]);
 }
 
 /** 读取凭据但不含明文（供前端展示脱敏） */

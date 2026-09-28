@@ -711,6 +711,43 @@
       .form-grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
 
+    /* ---------- DDNS 页内子标签 + 概览 ---------- */
+    .subtabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 18px; }
+    .subtab {
+      min-height: 34px; padding: 0 16px; border: 1px solid var(--border); border-radius: 999px;
+      background: var(--surface-2); color: var(--muted); font-size: 13.5px; font-weight: 600; cursor: pointer;
+      transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+    }
+    .subtab:hover { color: var(--text); border-color: var(--border-strong); }
+    .subtab[aria-selected="true"] {
+      color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+      background: color-mix(in srgb, var(--accent) 12%, transparent);
+    }
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+    .toolbar .spacer { flex: 1 1 auto; }
+    .ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+    .ov-card { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); padding: 14px 16px; }
+    .ov-card h4 { margin: 0; font-size: 15px; font-weight: 650; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .ov-card .ov-rows { margin: 10px 0 0; display: grid; gap: 6px; }
+    .ov-row { display: flex; gap: 8px; font-size: 13px; line-height: 1.5; }
+    .ov-row .k { color: var(--muted); flex: 0 0 72px; }
+    .ov-row .v { color: var(--text); flex: 1 1 auto; min-width: 0; word-break: break-word; }
+    .ov-card .ov-foot { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border); display: flex; gap: 8px; flex-wrap: wrap; }
+    td .row-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .mode-pill {
+      display: inline-flex; align-items: center; min-height: 24px; padding: 0 10px; border-radius: 999px;
+      font-size: 12px; font-weight: 600; white-space: nowrap;
+      border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2);
+    }
+    .mode-pill.interval { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    .cell-sub { display: block; font-size: 12px; color: var(--muted); margin-top: 3px; }
+    .mono-sm { font-family: var(--font-mono); font-size: 12.5px; }
+    .sched-table { width: 100%; border-collapse: collapse; }
+    .sched-table th, .sched-table td { padding: 8px 8px; }
+    .sched-table td { border-bottom: 1px solid var(--border); }
+    .sched-table tbody tr:last-child td { border-bottom: 0; }
+    @media (max-width: 720px) { .ov-grid { grid-template-columns: 1fr; } }
+
     /* 日志 */
     .log-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
     .log-toolbar .retention { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); }
@@ -1644,46 +1681,28 @@
         <div class="card-head">
           <div>
             <h2>DDNS 轮换解析</h2>
-            <p class="card-desc">多台机器轮流值班，自动把域名解析切到当前值班机器的 IP。支持「按天轮换」与「一天内按时段轮换」两种排班；一个分组可挂多个域名（允许跨厂商），它们始终解析到同一台值班机器。</p>
+            <p class="card-desc">多台机器轮流值班，自动把域名解析切到当前值班机器的 IP。支持「按天轮换」「基准时间 + 每 N 天」「一天内按时段轮换」「固定首台」四种排班；DNS 厂商凭据独立配置、可被多条记录复用；一个分组可挂多个域名（允许跨厂商），它们始终解析到同一台值班机器。</p>
           </div>
           <span class="spacer"></span>
           <button class="btn btn-primary btn-sm" type="button" id="ddns-sync">立即同步</button>
         </div>
         <div id="ddns-msg" class="inline-note"></div>
 
-        <div class="sub-block">
-          <div class="sub-head">
-            <div class="section-title">机器（值班候选）</div>
-            <p class="sub-note">开关机请在云厂商控制台设置，这里只登记「名称 + 公网 IP」用于切换解析</p>
-          </div>
-          <div id="ddns-machines" class="row-list"></div>
-          <div class="form-grid cols-3">
-            <div class="field">
-              <label for="ddns-m-name">名称</label>
-              <input id="ddns-m-name" class="control" placeholder="如 HK-01" />
-            </div>
-            <div class="field">
-              <label for="ddns-m-ip">公网 IP</label>
-              <input id="ddns-m-ip" class="control" placeholder="1.2.3.4" />
-            </div>
-            <div class="field">
-              <label for="ddns-m-remark">备注</label>
-              <input id="ddns-m-remark" class="control" placeholder="选填" />
-            </div>
-          </div>
-          <div class="form-actions">
-            <button class="btn btn-primary btn-sm" type="button" id="ddns-m-add">添加机器</button>
-          </div>
+        <div class="subtabs" id="ddns-subtabs" role="tablist" aria-label="DDNS 子页面">
+          <button class="subtab" type="button" role="tab" data-dsub="overview" aria-selected="true">概览</button>
+          <button class="subtab" type="button" role="tab" data-dsub="machines" aria-selected="false">机器</button>
+          <button class="subtab" type="button" role="tab" data-dsub="groups" aria-selected="false">分组排班</button>
+          <button class="subtab" type="button" role="tab" data-dsub="records" aria-selected="false">解析记录</button>
+          <button class="subtab" type="button" role="tab" data-dsub="credentials" aria-selected="false">DNS 凭据</button>
         </div>
 
-        <div class="sub-block">
-          <div class="sub-head">
-            <div class="section-title">分组（一组机器 + 若干域名）</div>
-            <button class="btn btn-ghost btn-sm" type="button" id="ddns-g-add">新增分组</button>
-          </div>
-          <div id="ddns-groups"></div>
-          <p class="hint">同步搭监控周期的便车执行（不额外占用 Cron 次数），且目标 IP 未变化时不调用厂商 API——按天轮换的分组一天最多真正写一次。</p>
-        </div>
+        <div class="dsub-panel" data-dpanel="overview"><div id="ddns-view-overview"></div></div>
+        <div class="dsub-panel hidden" data-dpanel="machines"><div id="ddns-view-machines"></div></div>
+        <div class="dsub-panel hidden" data-dpanel="groups"><div id="ddns-view-groups"></div></div>
+        <div class="dsub-panel hidden" data-dpanel="records"><div id="ddns-view-records"></div></div>
+        <div class="dsub-panel hidden" data-dpanel="credentials"><div id="ddns-view-credentials"></div></div>
+
+        <p class="hint" style="margin-top:18px">同步搭监控周期的便车执行（不额外占用 Cron 次数），且目标 IP 未变化时不调用厂商 API——按天/按基准时间轮换的分组一天最多真正写一次。</p>
       </div>
     </section>
 
@@ -1891,6 +1910,35 @@
         el.classList.toggle("hidden", !msg);
       }
 
+      /** 渲染单个弹窗字段；支持 text / number / password / select / textarea */
+      function modalFieldHtml(f, count) {
+        const id = "modal-f-" + f.key;
+        // 单字段弹窗占满整行，双栏只在真有多个字段时才生效
+        const cls = "field" + (count === 1 || f.full ? " full" : "");
+        const label = '<label for="' + id + '">' + esc(f.label) + "</label>";
+        const hint = f.hint ? '<p class="hint">' + esc(f.hint) + "</p>" : "";
+        const mk = ' data-mkey="' + esc(f.key) + '"';
+        const val = f.value == null ? "" : String(f.value);
+        let control;
+        if (f.type === "select") {
+          const opts = (f.options || []).map(function (o) {
+            const sel = String(o.value) === val ? " selected" : "";
+            return '<option value="' + esc(o.value) + '"' + sel + ">" + esc(o.label) + "</option>";
+          }).join("");
+          control = '<select id="' + id + '" class="control"' + mk + ">" + opts + "</select>";
+        } else if (f.type === "textarea") {
+          control = '<textarea id="' + id + '" class="control" rows="' + (f.rows || 3) + '"' + mk +
+            ' placeholder="' + esc(f.placeholder || "") + '">' + esc(val) + "</textarea>";
+        } else {
+          const type = f.type === "password" ? "password" : f.type === "number" ? "number" : "text";
+          const extra = f.type === "number" ? ' min="' + (f.min != null ? f.min : 0) + '"' : "";
+          control = '<input id="' + id + '" class="control" type="' + type + '"' + extra + mk +
+            ' value="' + esc(val) + '" placeholder="' + esc(f.placeholder || "") +
+            '" autocomplete="off" spellcheck="false" />';
+        }
+        return '<div class="' + cls + '">' + label + control + hint + "</div>";
+      }
+
       function openModal(opts) {
         opts = opts || {};
         modalOpts = opts;
@@ -1901,29 +1949,29 @@
         modalError("");
         const fields = opts.fields || [];
         const host = $("modal-fields");
-        host.className = "form-grid" + (fields.length ? "" : " hidden");
-        host.innerHTML = fields.map(function (f) {
-          const id = "modal-f-" + f.key;
-          const type = f.type === "password" ? "password" : f.type === "number" ? "number" : "text";
-          // 单字段弹窗（如「分组名称」）占满整行，双栏只在真有多个字段时才生效
-          const cls = "field" + (fields.length === 1 || f.full ? " full" : "");
-          return '<div class="' + cls + '">' +
-            '<label for="' + id + '">' + esc(f.label) + "</label>" +
-            '<input id="' + id + '" class="control" type="' + type + '" data-mkey="' + esc(f.key) + '"' +
-            ' value="' + esc(f.value == null ? "" : f.value) + '"' +
-            ' placeholder="' + esc(f.placeholder || "") + '" autocomplete="off" spellcheck="false" />' +
-            (f.hint ? '<p class="hint">' + esc(f.hint) + "</p>" : "") +
-            "</div>";
-        }).join("");
+        if (opts.html != null) {
+          // 自定义正文：调用方自行拼 HTML（数据键仍用 data-mkey，由统一收集逻辑读取）
+          host.className = opts.htmlClass || "";
+          host.innerHTML = opts.html;
+        } else {
+          host.className = "form-grid" + (fields.length ? "" : " hidden");
+          host.innerHTML = fields.map(function (f) { return modalFieldHtml(f, fields.length); }).join("");
+        }
         const ok = $("modal-ok");
         ok.textContent = opts.okText || "确定";
         ok.className = "btn " + (opts.danger ? "btn-danger" : "btn-primary");
-        $("modal-cancel").textContent = opts.cancelText || "取消";
+        const cancel = $("modal-cancel");
+        cancel.textContent = opts.cancelText || "取消";
+        cancel.classList.toggle("hidden", !!opts.hideCancel);
         return new Promise(function (resolve) {
           modalResolve = resolve;
           const dlg = $("modal");
           if (!dlg.open) dlg.showModal();
-          const first = host.querySelector("input");
+          // onMount：自定义正文需要自己挂监听时用（如按下拉切换动态字段）
+          if (typeof opts.onMount === "function") {
+            try { opts.onMount(host); } catch (e) { /* 挂载异常不影响弹窗可用 */ }
+          }
+          const first = host.querySelector("input, select, textarea");
           if (first) setTimeout(function () { first.focus(); if (first.select) first.select(); }, 40);
         });
       }
@@ -1953,7 +2001,10 @@
       $("modal-ok").addEventListener("click", function () {
         const values = {};
         $("modal-fields").querySelectorAll("[data-mkey]").forEach(function (el) {
-          values[el.getAttribute("data-mkey")] = String(el.value || "").trim();
+          // 复选框取 checked，其余取去空白的字符串值
+          values[el.getAttribute("data-mkey")] = el.type === "checkbox"
+            ? el.checked
+            : String(el.value || "").trim();
         });
         const fields = (modalOpts && modalOpts.fields) || [];
         for (const f of fields) {
@@ -3446,7 +3497,7 @@
        * 每次改动前端后手动更新此值。作用：部署后强刷页面（Ctrl+F5）时看页脚即可
        * 确认浏览器加载的是哪个构建，用于区分「线上已更新但浏览器缓存了旧 JS」——
        * 这是「保存无效 / 新功能不见」类问题的第一排查步骤。 */
-      const APP_BUILD = "20260928-2047";
+      const APP_BUILD = "20260928-2114";
       try {
         const el = document.createElement("div");
         el.style.cssText = "text-align:center;color:var(--muted);font-size:11px;padding:12px 0;opacity:.7";
@@ -3455,7 +3506,10 @@
       } catch { /* 无论如何不影响主流程 */ }
 
       /* ---------- DDNS 轮换解析 ---------- */
-      let ddnsState = { machines: [], groups: [], providers: [] };
+      /* ========== DDNS 轮换解析（页内子标签：概览 / 机器 / 分组排班 / 解析记录 / DNS 凭据） ========== */
+
+      let ddnsState = { machines: [], groups: [], credentials: [], providers: [] };
+      let ddnsSubTab = "overview";
 
       function escDdns(s) {
         return String(s == null ? "" : s)
@@ -3470,405 +3524,660 @@
       }
 
       function ddnsProvider(pid) {
-        const list = ddnsState.providers || [];
-        for (const p of list) if (p.id === pid) return p;
+        for (const p of (ddnsState.providers || [])) if (p.id === pid) return p;
         return null;
+      }
+      function ddnsProviderLabel(pid) { const p = ddnsProvider(pid); return p ? p.label : (pid || ""); }
+      function ddnsCredential(id) {
+        for (const c of (ddnsState.credentials || [])) if (c.id === Number(id)) return c;
+        return null;
+      }
+      function ddnsGroup(id) {
+        for (const g of (ddnsState.groups || [])) if (g.id === Number(id)) return g;
+        return null;
+      }
+      function ddnsMachine(id) {
+        for (const m of (ddnsState.machines || [])) if (m.id === Number(id)) return m;
+        return null;
+      }
+      function ddnsFullDomain(r) {
+        const z = String(r.zone || "").replace(/\.$/, "");
+        const h = String(r.host || "@").replace(/\.$/, "");
+        return h === "@" || h === "" ? z : h + "." + z;
+      }
+
+      const DDNS_MODE_LABEL = { rotate: "按天轮换", interval: "基准时间+每N天", window: "按在线时段", static: "固定首台" };
+      function ddnsModeLabel(mode) { return DDNS_MODE_LABEL[mode] || mode || "—"; }
+      function ddnsModePill(mode) {
+        return '<span class="mode-pill' + (mode === "interval" ? " interval" : "") + '">' + escDdns(ddnsModeLabel(mode)) + "</span>";
       }
 
       async function loadDdns() {
         const r = await apiJson("/api/v1/ddns/overview");
         if (!r.ok || !r.data) { ddnsMsg("读取 DDNS 配置失败：" + errText(r.data), "error"); return; }
-        ddnsState = r.data;
-        renderDdnsMachines();
-        renderDdnsGroups();
+        ddnsState = {
+          machines: r.data.machines || [],
+          groups: r.data.groups || [],
+          credentials: r.data.credentials || [],
+          providers: r.data.providers || [],
+        };
+        renderDdns();
+      }
+
+      /* ---- 子标签切换 ---- */
+      function switchDdnsSub(name) {
+        ddnsSubTab = name;
+        document.querySelectorAll("#ddns-subtabs .subtab").forEach(function (b) {
+          b.setAttribute("aria-selected", String(b.getAttribute("data-dsub") === name));
+        });
+        document.querySelectorAll("#tab-ddns .dsub-panel").forEach(function (p) {
+          p.classList.toggle("hidden", p.getAttribute("data-dpanel") !== name);
+        });
+        renderDdns();
+      }
+
+      function renderDdns() {
+        if (ddnsSubTab === "overview") renderDdnsOverview();
+        else if (ddnsSubTab === "machines") renderDdnsMachines();
+        else if (ddnsSubTab === "groups") renderDdnsGroups();
+        else if (ddnsSubTab === "records") renderDdnsRecords();
+        else if (ddnsSubTab === "credentials") renderDdnsCredentials();
+      }
+
+      function allRecords() {
+        const out = [];
+        (ddnsState.groups || []).forEach(function (g) {
+          (g.records || []).forEach(function (r) { out.push({ rec: r, group: g }); });
+        });
+        return out;
+      }
+      function findRecordEntry(id) {
+        return allRecords().filter(function (x) { return x.rec.id === Number(id); })[0] || null;
+      }
+
+      /* ---- 概览 ---- */
+      function renderDdnsOverview() {
+        const host = $("ddns-view-overview");
+        if (!host) return;
+        const groups = ddnsState.groups || [];
+        if (!groups.length) {
+          host.innerHTML = '<div class="empty"><h3>还没有分组</h3><p>先在「机器」登记机器，再到「分组排班」新建分组并挂上域名。</p>'
+            + '<button class="btn btn-primary btn-sm" type="button" data-act="g-add">新增分组</button></div>';
+          return;
+        }
+        host.innerHTML = '<div class="ov-grid">' + groups.map(buildOverviewCard).join("") + "</div>";
+      }
+
+      function buildOverviewCard(g) {
+        const members = g.members || [];
+        const records = g.records || [];
+        const curIp = records.length ? (records[0].current_ip || "") : "";
+        const hit = members.filter(function (m) { return m.ip === curIp; })[0];
+        const memberText = members.length
+          ? members.map(function (m) { return escDdns(m.name) + "（" + escDdns(m.ip) + "）"; }).join("、")
+          : "—";
+        const recText = records.length
+          ? records.map(function (r) { return escDdns(ddnsFullDomain(r)); }).join("、")
+          : "—";
+        let curHtml = "—";
+        if (curIp) {
+          curHtml = '<code class="mono-sm">' + escDdns(curIp) + "</code>"
+            + (hit ? " · " + escDdns(hit.name) : (g.fallback_ip && g.fallback_ip === curIp ? " · 兜底 IP" : ""));
+        }
+        const rows = [
+          ["时区", escDdns(g.timezone || "Asia/Shanghai")],
+          ["成员", memberText],
+          ["域名", recText],
+          ["当前指向", curHtml],
+          ["兜底 IP", g.fallback_ip ? '<code class="mono-sm">' + escDdns(g.fallback_ip) + "</code>" : "—"],
+        ];
+        return '<div class="ov-card"><h4>' + escDdns(g.name)
+          + (g.enabled ? "" : ' <span class="badge danger">已停用</span>')
+          + '<span class="spacer"></span>' + ddnsModePill(g.mode) + "</h4>"
+          + '<div class="ov-rows">' + rows.map(function (r) {
+            return '<div class="ov-row"><span class="k">' + r[0] + '</span><span class="v">' + r[1] + "</span></div>";
+          }).join("") + "</div>"
+          + '<div class="ov-foot">'
+          + '<button class="btn btn-primary btn-sm" type="button" data-act="g-sync" data-id="' + g.id + '">同步本组</button>'
+          + '<button class="btn btn-ghost btn-sm" type="button" data-act="g-edit" data-id="' + g.id + '">编辑</button>'
+          + '<button class="btn btn-ghost btn-sm" type="button" data-act="g-sched" data-id="' + g.id + '">排班</button>'
+          + '<button class="btn btn-ghost btn-sm" type="button" data-act="g-preview" data-id="' + g.id + '">7 天预览</button>'
+          + '<button class="btn btn-ghost btn-sm" type="button" data-act="r-add" data-id="' + g.id + '">+ 解析记录</button>'
+          + "</div></div>";
       }
 
       /* ---- 机器 ---- */
       function renderDdnsMachines() {
-        const host = $("ddns-machines");
+        const host = $("ddns-view-machines");
         if (!host) return;
         const list = ddnsState.machines || [];
-        if (!list.length) { host.innerHTML = '<p class="hint">尚未添加任何机器。先在下方填名称与公网 IP。</p>'; return; }
-        host.innerHTML = "";
-        list.forEach(function (m) {
-          const row = document.createElement("div");
-          row.className = "trigger-row";
-          row.innerHTML =
-            '<div class="trigger-main"><div class="trigger-name">' + escDdns(m.name) +
-            ' <code class="inline-code">' + escDdns(m.ip) + '</code></div>' +
-            '<div class="trigger-meta">' + (m.remark ? escDdns(m.remark) : "无备注") + '</div></div>' +
-            '<label class="toggle-switch"><input type="checkbox" data-menable="' + m.id + '"' +
-            (m.enabled ? " checked" : "") + ' /><span class="slider"></span><span class="label">' +
-            (m.enabled ? "启用" : "停用") + '</span></label>' +
-            '<button class="btn btn-danger btn-sm" type="button" data-mdel="' + m.id + '">删除</button>';
-          host.appendChild(row);
-        });
-        host.querySelectorAll("[data-menable]").forEach(function (el) {
-          el.addEventListener("change", async function () {
-            const m = list.find(function (x) { return x.id === Number(el.getAttribute("data-menable")); });
-            if (!m) return;
-            const r = await apiJson("/api/v1/ddns/machines/" + m.id, {
-              method: "PUT",
-              body: JSON.stringify({ name: m.name, ip: m.ip, remark: m.remark, enabled: el.checked }),
-            });
-            if (r.ok) { await loadDdns(); } else { el.checked = !el.checked; ddnsMsg(errText(r.data), "error"); }
-          });
-        });
-        host.querySelectorAll("[data-mdel]").forEach(function (el) {
-          el.addEventListener("click", async function () {
-            const m = list.find(function (x) { return x.id === Number(el.getAttribute("data-mdel")); });
-            const okDel = await confirmModal({
-              title: "删除机器",
-              desc: "删除「" + (m ? m.name : "该机器") + "」后，它会从所有分组的成员中一并移除。",
-              okText: "删除",
-            });
-            if (!okDel) return;
-            const r = await apiJson("/api/v1/ddns/machines/" + el.getAttribute("data-mdel"), { method: "DELETE" });
-            if (r.ok) { ddnsMsg("机器已删除", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
-          });
-        });
+        let html = '<div class="toolbar"><div class="section-title" style="margin:0">机器（值班候选）</div><span class="spacer"></span>'
+          + '<button class="btn btn-primary btn-sm" type="button" data-act="m-add">新增机器</button></div>';
+        if (!list.length) {
+          html += '<p class="hint">尚未添加任何机器。点「新增机器」登记「名称 + 公网 IP」。</p>';
+        } else {
+          html += '<div class="table-wrap"><table><thead><tr><th>名称</th><th>公网 IP</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>'
+            + list.map(function (m) {
+              return "<tr><td><strong>" + escDdns(m.name) + "</strong></td>"
+                + '<td><code class="mono-sm">' + escDdns(m.ip) + "</code></td>"
+                + "<td>" + (m.remark ? escDdns(m.remark) : '<span class="cell-sub" style="margin:0">—</span>') + "</td>"
+                + '<td><label class="nt-toggle"><input type="checkbox" data-mtoggle="' + m.id + '"' + (m.enabled ? " checked" : "") + " /> " + (m.enabled ? "启用" : "停用") + "</label></td>"
+                + '<td><div class="row-actions">'
+                + '<button class="btn btn-ghost btn-sm" type="button" data-act="m-edit" data-id="' + m.id + '">编辑</button>'
+                + '<button class="btn btn-danger btn-sm" type="button" data-act="m-del" data-id="' + m.id + '">删除</button>'
+                + "</div></td></tr>";
+            }).join("") + "</tbody></table></div>";
+        }
+        html += '<p class="hint" style="margin-top:12px">开关机请在云厂商控制台设置，这里只登记 IP 与备注。</p>';
+        host.innerHTML = html;
       }
 
-      /* ---- 分组 ---- */
+      /* ---- 分组排班 ---- */
       function renderDdnsGroups() {
-        const host = $("ddns-groups");
+        const host = $("ddns-view-groups");
         if (!host) return;
         const groups = ddnsState.groups || [];
-        if (!groups.length) { host.innerHTML = '<p class="hint">还没有分组。点下方「新增分组」开始。</p>'; return; }
-        host.innerHTML = "";
-        groups.forEach(function (g) { host.appendChild(buildDdnsGroupCard(g)); });
+        let html = '<div class="toolbar"><div class="section-title" style="margin:0">分组（一组机器 + 若干域名）</div><span class="spacer"></span>'
+          + '<button class="btn btn-primary btn-sm" type="button" data-act="g-add">新增分组</button></div>';
+        if (!groups.length) {
+          html += '<p class="hint">还没有分组。点「新增分组」开始，再点「排班」把机器加进来。</p>';
+        } else {
+          html += '<div class="table-wrap"><table><thead><tr><th>分组</th><th>模式</th><th>机器</th><th>域名记录</th><th>当前指向</th><th>兜底 IP</th><th>操作</th></tr></thead><tbody>'
+            + groups.map(buildGroupRow).join("") + "</tbody></table></div>";
+        }
+        host.innerHTML = html;
       }
 
-      function buildDdnsGroupCard(g) {
-        const wrap = document.createElement("div");
-        wrap.className = "group-block";
-        const isRotate = g.mode === "rotate";
-        const isWindow = g.mode === "window";
-
-        // 模式说明：直接告诉用户当前模式怎么算的，避免「配了却不知道为什么选它」
-        const modeHint = isRotate
-          ? "按天轮转：每台机器按「值班天数」轮流，到切换时刻才换班（切换前仍保留前一天的值班机器，避免与开机时间错位）。"
-          : isWindow
-            ? "按时段轮换：当前时间落在哪台机器的时段内就解析给谁，支持跨天（如 22:00-06:00）。"
-            : "固定首台：不轮换，始终解析到排序最靠前的可用机器。";
-
-        let html =
-          '<div class="sub-head">' +
-          '<div class="section-title">' + escDdns(g.name) + '</div>' +
-          '<div class="sub-head-actions">' +
-          '<label class="nt-toggle"><input type="checkbox" data-genable="' + g.id + '"' + (g.enabled ? " checked" : "") + ' /> 启用</label>' +
-          '<button class="btn btn-danger btn-sm" type="button" data-gdel="' + g.id + '">删除分组</button>' +
-          '</div></div>' +
-          '<div class="form-grid">' +
-          '<div class="field"><label>分组名称</label><input class="control" data-gname="' + g.id + '" value="' + escDdns(g.name) + '" /></div>' +
-          '<div class="field"><label>排班模式</label><select class="control" data-gmode="' + g.id + '">' +
-          '<option value="rotate"' + (isRotate ? " selected" : "") + '>按天轮换（rotate）</option>' +
-          '<option value="window"' + (isWindow ? " selected" : "") + '>一天内按时段轮换（window）</option>' +
-          '<option value="static"' + (g.mode === "static" ? " selected" : "") + '>固定首台（static）</option>' +
-          '</select></div>' +
-          '<div class="field"><label>时区</label><input class="control" data-gtz="' + g.id + '" value="' + escDdns(g.timezone) + '" placeholder="Asia/Shanghai" /></div>' +
-          '<div class="field"><label>每天切换时刻</label><input class="control" data-gswitch="' + g.id + '" value="' + escDdns(g.switch_time) + '" placeholder="03:00" /></div>' +
-          '<div class="field"><label>轮换基准日</label><input class="control" data-ganchor="' + g.id + '" value="' + escDdns(g.anchor_date) + '" placeholder="1970-01-01" /></div>' +
-          '<div class="field"><label>兜底 IP（无机器值班时）</label><input class="control" data-gfallback="' + g.id + '" value="' + escDdns(g.fallback_ip) + '" placeholder="留空则保持原解析" /></div>' +
-          '</div>' +
-          '<p class="hint">' + modeHint + '</p>';
-
-        // 成员
-        html += '<div class="section-title">成员与排班</div>';
+      function buildGroupRow(g) {
         const members = g.members || [];
-        if (!members.length) {
-          html += '<p class="hint">还没有成员，从下方机器池添加。</p>';
+        const records = g.records || [];
+        const curIp = records.length ? (records[0].current_ip || "") : "";
+        const hit = members.filter(function (m) { return m.ip === curIp; })[0];
+        const memText = members.length ? members.map(function (m) {
+          let suffix = "";
+          if (g.mode === "window") {
+            suffix = (m.windowStart && m.windowEnd) ? "（" + escDdns(m.windowStart) + "-" + escDdns(m.windowEnd) + "）" : "";
+          } else if (g.mode !== "static") {
+            suffix = "（" + (m.days || 1) + " 天）";
+          }
+          return escDdns(m.name) + suffix;
+        }).join("<br>") : '<span class="cell-sub" style="margin:0">未排班</span>';
+        const recText = records.length
+          ? records.map(function (r) { return '<span class="mono-sm">' + escDdns(ddnsFullDomain(r)) + "</span>"; }).join("<br>")
+          : '<span class="cell-sub" style="margin:0">无</span>';
+        return "<tr><td><strong>" + escDdns(g.name) + "</strong>" + (g.enabled ? "" : '<span class="cell-sub">已停用</span>') + "</td>"
+          + "<td>" + ddnsModePill(g.mode) + "</td>"
+          + "<td>" + memText + "</td>"
+          + "<td>" + recText + "</td>"
+          + "<td>" + (curIp ? '<code class="mono-sm">' + escDdns(curIp) + "</code>" + (hit ? '<span class="cell-sub">' + escDdns(hit.name) + "</span>" : "") : "—") + "</td>"
+          + "<td>" + (g.fallback_ip ? '<code class="mono-sm">' + escDdns(g.fallback_ip) + "</code>" : "—") + "</td>"
+          + '<td><div class="row-actions">'
+          + '<button class="btn btn-ghost btn-sm" type="button" data-act="g-edit" data-id="' + g.id + '">编辑</button>'
+          + '<button class="btn btn-ghost btn-sm" type="button" data-act="g-sched" data-id="' + g.id + '">排班</button>'
+          + '<button class="btn btn-ghost btn-sm" type="button" data-act="g-preview" data-id="' + g.id + '">7 天预览</button>'
+          + '<button class="btn btn-ghost btn-sm" type="button" data-act="g-sync" data-id="' + g.id + '">同步</button>'
+          + '<button class="btn btn-danger btn-sm" type="button" data-act="g-del" data-id="' + g.id + '">删除</button>'
+          + "</div></td></tr>";
+      }
+
+      /* ---- 解析记录 ---- */
+      function renderDdnsRecords() {
+        const host = $("ddns-view-records");
+        if (!host) return;
+        const rows = allRecords();
+        let html = '<div class="toolbar"><div class="section-title" style="margin:0">解析记录</div><span class="spacer"></span>'
+          + '<button class="btn btn-primary btn-sm" type="button" data-act="r-add">新增记录</button></div>';
+        if (!rows.length) {
+          html += '<p class="hint">还没有解析记录。点「新增记录」为某个分组挂上域名。</p>';
         } else {
-          members.forEach(function (m) {
-            html += '<div class="member-row" data-member="' + m.machineId + '">' +
-              '<div class="field"><label>机器</label>' +
-              '<div class="static-value">' + escDdns(m.name) +
-              ' <code class="inline-code">' + escDdns(m.ip) + '</code>' +
-              (m.machineEnabled ? '' : ' <span class="hint danger" style="margin:0">（已停用）</span>') + '</div></div>' +
-              (isRotate
-                ? '<div class="field f-num"><label>值班天数</label><input class="control" type="number" min="1" data-mdays="' + m.machineId + '" value="' + m.days + '" /></div>'
-                : '') +
-              (isWindow
-                ? '<div class="field f-time"><label>开始</label><input class="control" data-mstart="' + m.machineId + '" value="' + escDdns(m.windowStart) + '" placeholder="08:00" /></div>' +
-                  '<div class="field f-time"><label>结束</label><input class="control" data-mend="' + m.machineId + '" value="' + escDdns(m.windowEnd) + '" placeholder="14:00" /></div>'
-                : '') +
-              '<div class="field f-num"><label>排序</label><input class="control" type="number" data-morder="' + m.machineId + '" value="' + m.sortOrder + '" /></div>' +
-              '<div class="row-end"><button class="btn btn-ghost btn-sm" type="button" data-mremove="' + m.machineId + '" data-gid="' + g.id + '">移除</button></div>' +
-              '</div>';
-          });
+          html += '<div class="table-wrap"><table><thead><tr><th>分组</th><th>域名 / 主机记录</th><th>厂商</th><th>凭据</th><th>TTL</th><th>当前值</th><th>操作</th></tr></thead><tbody>'
+            + rows.map(function (x) {
+              const r = x.rec, cred = ddnsCredential(r.credential_id);
+              const credText = cred ? escDdns(cred.name)
+                : (r.credential_id ? '<span class="cell-sub" style="margin:0;color:var(--danger)">凭据已删除</span>'
+                  : '<span class="cell-sub" style="margin:0">未绑定</span>');
+              return "<tr><td>" + escDdns(x.group.name) + "</td>"
+                + '<td><span class="mono-sm">' + escDdns(ddnsFullDomain(r)) + "</span>" + (r.enabled ? "" : '<span class="cell-sub">已停用</span>') + "</td>"
+                + "<td>" + escDdns(ddnsProviderLabel(r.provider)) + "</td>"
+                + "<td>" + credText + "</td>"
+                + "<td>" + escDdns(String(r.ttl)) + "</td>"
+                + "<td>" + (r.current_ip ? '<code class="mono-sm">' + escDdns(r.current_ip) + "</code>" : "—")
+                  + (r.last_error ? '<span class="cell-sub" style="color:var(--danger)">' + escDdns(r.last_error) + "</span>" : "") + "</td>"
+                + '<td><div class="row-actions">'
+                + '<button class="btn btn-ghost btn-sm" type="button" data-act="r-push" data-id="' + r.id + '">下发</button>'
+                + '<button class="btn btn-ghost btn-sm" type="button" data-act="r-edit" data-id="' + r.id + '">编辑</button>'
+                + '<button class="btn btn-danger btn-sm" type="button" data-act="r-del" data-id="' + r.id + '">删除</button>'
+                + "</div></td></tr>";
+            }).join("") + "</tbody></table></div>";
+          html += '<p class="hint" style="margin-top:12px">「下发」会强制同步该记录所在的分组，忽略本地缓存重新比对厂商实际值。</p>';
         }
-        // 添加成员下拉（只列出尚未加入本组的机器）
+        host.innerHTML = html;
+      }
+
+      /* ---- DNS 凭据 ---- */
+      function renderDdnsCredentials() {
+        const host = $("ddns-view-credentials");
+        if (!host) return;
+        const list = ddnsState.credentials || [];
+        let html = '<div class="toolbar"><div class="section-title" style="margin:0">DNS 凭据</div><span class="spacer"></span>'
+          + '<button class="btn btn-primary btn-sm" type="button" data-act="c-add">新增凭据</button></div>';
+        if (!list.length) {
+          html += '<p class="hint">还没有凭据。先添加一条（如「阿里云主账号」），再让解析记录引用它。</p>';
+        } else {
+          html += '<div class="table-wrap"><table><thead><tr><th>名称</th><th>厂商</th><th>已填字段</th><th>操作</th></tr></thead><tbody>'
+            + list.map(function (c) {
+              const p = ddnsProvider(c.provider);
+              const fields = (p && p.fields ? p.fields : []).filter(function (f) { return c.masked && c.masked[f.key]; });
+              const filled = fields.length
+                ? fields.map(function (f) { return escDdns(f.label) + "：" + escDdns(c.masked[f.key]); }).join("、")
+                : (c.filled ? "已填写" : '<span style="color:var(--danger)">未填写</span>');
+              return "<tr><td><strong>" + escDdns(c.name) + "</strong></td>"
+                + "<td>" + escDdns(ddnsProviderLabel(c.provider)) + "</td>"
+                + '<td><span class="cell-sub" style="margin:0">' + filled + "</span></td>"
+                + '<td><div class="row-actions">'
+                + '<button class="btn btn-ghost btn-sm" type="button" data-act="c-edit" data-id="' + c.id + '">编辑</button>'
+                + '<button class="btn btn-ghost btn-sm" type="button" data-act="c-test" data-id="' + c.id + '">连通测试</button>'
+                + '<button class="btn btn-danger btn-sm" type="button" data-act="c-del" data-id="' + c.id + '">删除</button>'
+                + "</div></td></tr>";
+            }).join("") + "</tbody></table></div>";
+          html += '<p class="hint" style="margin-top:12px">凭据加密存储，可被多条解析记录复用；「连通测试」会用该凭据查询记录当前值以验证密钥。</p>';
+        }
+        host.innerHTML = html;
+      }
+
+      /* ---- 动作分发 ---- */
+      async function handleDdnsAction(act, id) {
+        if (act === "m-add") return openMachineModal(null);
+        if (act === "m-edit") return openMachineModal(ddnsMachine(id));
+        if (act === "m-del") return deleteMachine(id);
+        if (act === "g-add") return openGroupModal(null);
+        if (act === "g-edit") return openGroupModal(ddnsGroup(id));
+        if (act === "g-del") return deleteGroup(id);
+        if (act === "g-sched") return openScheduleModal(ddnsGroup(id));
+        if (act === "g-preview") return previewGroup(id);
+        if (act === "g-sync") return syncGroup(id);
+        if (act === "r-add") return openRecordModal(ddnsGroup(id), null);
+        if (act === "r-edit") { const e = findRecordEntry(id); return openRecordModal(e ? e.group : null, e ? e.rec : null); }
+        if (act === "r-del") return deleteRecord(id);
+        if (act === "r-push") return pushRecord(id);
+        if (act === "c-add") return openCredentialModal(null);
+        if (act === "c-edit") return openCredentialModal(ddnsCredential(id));
+        if (act === "c-del") return deleteCredential(id);
+        if (act === "c-test") return testCredential(id);
+      }
+
+      /* ---- 机器动作 ---- */
+      async function openMachineModal(m) {
+        const vals = await openModal({
+          title: m ? "编辑机器" : "新增机器",
+          okText: m ? "保存" : "添加",
+          fields: [
+            { key: "name", label: "名称", value: m ? m.name : "", placeholder: "如 HK-01", required: true },
+            { key: "ip", label: "公网 IP", value: m ? m.ip : "", placeholder: "1.2.3.4", required: true },
+            { key: "remark", label: "备注", value: m ? m.remark : "", placeholder: "选填" },
+          ],
+          validate: function (v) {
+            if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(v.ip || "")) return "IP 格式不正确，请填写 IPv4 地址";
+            return "";
+          },
+        });
+        if (!vals) return;
+        const body = { name: vals.name.trim(), ip: vals.ip.trim(), remark: vals.remark.trim(), enabled: m ? m.enabled : true };
+        const r = m
+          ? await apiJson("/api/v1/ddns/machines/" + m.id, { method: "PUT", body: JSON.stringify(body) })
+          : await apiJson("/api/v1/ddns/machines", { method: "POST", body: JSON.stringify(body) });
+        if (r.ok) { ddnsMsg(m ? "机器已保存" : "机器已添加", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+      }
+
+      async function toggleMachine(id, enabled, el) {
+        const m = ddnsMachine(id);
+        if (!m) return;
+        const r = await apiJson("/api/v1/ddns/machines/" + id, {
+          method: "PUT",
+          body: JSON.stringify({ name: m.name, ip: m.ip, remark: m.remark, enabled: enabled }),
+        });
+        if (r.ok) { await loadDdns(); } else { el.checked = !enabled; ddnsMsg(errText(r.data), "error"); }
+      }
+
+      async function deleteMachine(id) {
+        const m = ddnsMachine(id);
+        const sure = await confirmModal({
+          title: "删除机器",
+          desc: "删除「" + (m ? m.name : "该机器") + "」后，它会从所有分组的成员中一并移除（机器本身不受影响）。",
+          okText: "删除",
+        });
+        if (!sure) return;
+        const r = await apiJson("/api/v1/ddns/machines/" + id, { method: "DELETE" });
+        if (r.ok) { ddnsMsg("机器已删除", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+      }
+
+      /* ---- 分组动作 ---- */
+      async function openGroupModal(g) {
+        const vals = await openModal({
+          title: g ? "编辑分组" : "新增分组",
+          okText: g ? "保存" : "创建",
+          fields: [
+            { key: "name", label: "分组名称", value: g ? g.name : "", placeholder: "如「香港三台轮换」", required: true },
+            {
+              key: "mode", label: "排班模式", type: "select", value: g ? g.mode : "rotate", options: [
+                { value: "rotate", label: "按天轮换（每台机器各自值班 N 天）" },
+                { value: "interval", label: "基准时间 + 每 N 天（各自 N 天）" },
+                { value: "window", label: "一天内按时段轮换" },
+                { value: "static", label: "固定首台" },
+              ],
+            },
+            { key: "timezone", label: "时区", value: g ? g.timezone : "Asia/Shanghai", placeholder: "Asia/Shanghai", hint: "按此时区判断「今天 / 现在几点」" },
+            { key: "switchTime", label: "切换时刻（rotate）", value: g ? g.switch_time : "03:00", placeholder: "03:00" },
+            { key: "anchorDate", label: "轮换基准日（rotate）", value: g ? g.anchor_date : "1970-01-01", placeholder: "1970-01-01" },
+            { key: "anchorAt", label: "基准时间（interval）", value: g ? (g.anchor_at || "") : "", placeholder: "2026-01-01 03:00", hint: "interval 模式的轮换起点，精确到分钟" },
+            { key: "fallbackIp", label: "兜底 IP（无机器值班时）", value: g ? g.fallback_ip : "", placeholder: "留空则保持原解析" },
+          ],
+        });
+        if (!vals) return;
+        const body = {
+          name: vals.name.trim(), mode: vals.mode,
+          timezone: vals.timezone.trim() || "Asia/Shanghai",
+          switchTime: vals.switchTime.trim() || "03:00",
+          anchorDate: vals.anchorDate.trim() || "1970-01-01",
+          anchorAt: vals.anchorAt.trim(),
+          fallbackIp: vals.fallbackIp.trim(),
+          enabled: g ? g.enabled : true,
+        };
+        const r = g
+          ? await apiJson("/api/v1/ddns/groups/" + g.id, { method: "PUT", body: JSON.stringify(body) })
+          : await apiJson("/api/v1/ddns/groups", { method: "POST", body: JSON.stringify(body) });
+        if (r.ok) { ddnsMsg(g ? "分组已保存" : "分组已创建，请点「排班」加入机器", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+      }
+
+      async function openScheduleModal(g) {
+        if (!g) return;
+        const isWindow = g.mode === "window";
+        const isStatic = g.mode === "static";
+        const members = g.members || [];
         const inGroup = members.map(function (m) { return m.machineId; });
         const pool = (ddnsState.machines || []).filter(function (m) { return inGroup.indexOf(m.id) < 0; });
-        if (pool.length) {
-          html += '<div class="form-grid" style="margin-top:2px">' +
-            '<div class="field full"><label>添加机器到本组</label>' +
-            '<div class="inline-control">' +
-            '<select class="control" data-gaddpick="' + g.id + '">' +
-            pool.map(function (m) { return '<option value="' + m.id + '">' + escDdns(m.name) + '（' + escDdns(m.ip) + '）</option>'; }).join("") +
-            '</select>' +
-            '<button class="btn btn-ghost btn-sm" type="button" data-gadd="' + g.id + '">添加</button>' +
-            '</div></div></div>';
-        } else if (members.length) {
-          html += '<p class="hint">机器池里的机器都已加入本组。</p>';
-        }
 
-        // 解析记录
-        html += '<div class="section-title">解析记录（可多个域名 / 跨厂商）</div>';
-        const records = g.records || [];
-        if (!records.length) html += '<p class="hint">还没有解析记录，点下方「添加解析记录」。</p>';
-        records.forEach(function (r) {
-          const p = ddnsProvider(r.provider);
-          const fields = p ? p.fields : [];
-          const masked = r.credentialMasked || {};
-          html += '<div class="record-block">' +
-            '<div class="record-head">' +
-            '<strong>' + escDdns(r.host) + '.' + escDdns(r.zone) + '</strong>' +
-            '<span class="hint">' + escDdns(p ? p.label : r.provider) + '</span>' +
-            '<span class="spacer"></span>' +
-            '<label class="nt-toggle"><input type="checkbox" data-renable="' + r.id + '"' + (r.enabled ? " checked" : "") + ' /> 启用</label>' +
-            '<button class="btn btn-danger btn-sm" type="button" data-rdel="' + r.id + '">删除</button>' +
-            '</div>' +
-            '<div class="form-grid">' +
-            '<div class="field"><label>厂商</label><select class="control" data-rprovider="' + r.id + '">' +
-            (ddnsState.providers || []).map(function (pv) {
-              return '<option value="' + escDdns(pv.id) + '"' + (pv.id === r.provider ? " selected" : "") + '>' + escDdns(pv.label) + '</option>';
-            }).join("") + '</select></div>' +
-            '<div class="field"><label>域名 zone</label><input class="control" data-rzone="' + r.id + '" value="' + escDdns(r.zone) + '" placeholder="example.com" /></div>' +
-            '<div class="field"><label>主机记录</label><input class="control" data-rhost="' + r.id + '" value="' + escDdns(r.host) + '" placeholder="@ 或 www" /></div>' +
-            '<div class="field"><label>TTL（秒）</label><input class="control" type="number" min="60" data-rttl="' + r.id + '" value="' + r.ttl + '" /></div>' +
-            '</div>' +
-            '<div class="form-grid">' +
-            fields.map(function (f) {
-              return '<div class="field"><label>' + escDdns(f.label) + '</label>' +
-                '<input class="control" type="' + (f.secret ? "password" : "text") + '" data-rcred="' + r.id + '" data-rcredkey="' + escDdns(f.key) + '"' +
-                ' placeholder="' + escDdns(masked[f.key] || (f.placeholder || "")) + '" autocomplete="off" spellcheck="false" />' +
-                (f.hint ? '<p class="hint">' + escDdns(f.hint) + '</p>' : '') + '</div>';
-            }).join("") +
-            '</div>' +
-            '<p class="hint">当前解析：<code>' + escDdns(r.current_ip || "(未知)") + '</code>' +
-            (r.last_sync_at ? ' · 上次同步 ' + escDdns(r.last_sync_at) : '') +
-            (r.last_error ? ' · <span class="danger">错误：' + escDdns(r.last_error) + '</span>' : '') + '</p>' +
-            '</div>';
+        let rowsHtml = members.map(function (m) {
+          const dutyCell = isStatic
+            ? '<span class="cell-sub" style="margin:0">—</span>'
+            : (isWindow
+              ? '<input class="control" data-mkey="ws_' + m.machineId + '" value="' + escDdns(m.windowStart) + '" placeholder="08:00" style="max-width:92px" />'
+                + ' <input class="control" data-mkey="we_' + m.machineId + '" value="' + escDdns(m.windowEnd) + '" placeholder="14:00" style="max-width:92px" />'
+              : '<input class="control" type="number" min="1" data-mkey="days_' + m.machineId + '" value="' + (m.days || 1) + '" style="max-width:96px" />');
+          return "<tr><td><strong>" + escDdns(m.name) + '</strong><span class="cell-sub">' + escDdns(m.ip) + (m.machineEnabled ? "" : " · 已停用") + "</span></td>"
+            + "<td>" + dutyCell + "</td>"
+            + '<td><input class="control" type="number" data-mkey="so_' + m.machineId + '" value="' + m.sortOrder + '" style="max-width:80px" /></td>'
+            + '<td><label class="nt-toggle"><input type="checkbox" data-mkey="rm_' + m.machineId + '" /> 移除</label></td></tr>';
+        }).join("");
+        if (!members.length) rowsHtml = '<tr><td colspan="4"><span class="cell-sub" style="margin:0">还没有成员，从下方添加。</span></td></tr>';
+
+        const dutyCol = isStatic ? "值班" : (isWindow ? "在线时段" : (g.mode === "interval" ? "值班天数 N" : "值班天数"));
+        const html = '<div class="table-wrap"><table class="sched-table"><thead><tr><th>机器</th><th>' + dutyCol + "</th><th>排序</th><th>操作</th></tr></thead><tbody>" + rowsHtml + "</tbody></table></div>"
+          + (pool.length
+            ? '<div class="field" style="margin-top:14px"><label>添加机器到本组</label><select class="control" data-mkey="addpick"><option value="">（不添加）</option>'
+              + pool.map(function (m) { return '<option value="' + m.id + '">' + escDdns(m.name) + "（" + escDdns(m.ip) + "）</option>"; }).join("") + "</select></div>"
+            : '<p class="hint" style="margin-top:12px">机器池里的机器都已加入本组。</p>');
+
+        const desc = g.mode === "interval" ? "基准时间 + 每 N 天：为每台机器填连续值班天数。「基准时间」在分组编辑里设置。"
+          : g.mode === "rotate" ? "按天轮换：为每台机器填连续值班天数，到切换时刻才换班。"
+            : g.mode === "window" ? "按时段轮换：为每台机器填在线时段（HH:MM），支持跨天。"
+              : "固定首台：按排序取第一台可用机器。";
+        const vals = await openModal({
+          title: "排班 · " + g.name,
+          desc: desc,
+          okText: "保存排班",
+          html: html,
         });
-
-        html += '<div class="form-actions">' +
-          '<button class="btn btn-ghost btn-sm" type="button" data-radd="' + g.id + '">添加解析记录</button>' +
-          '<button class="btn btn-ghost btn-sm" type="button" data-gpreview="' + g.id + '">预览排班</button>' +
-          '<button class="btn btn-ghost btn-sm" type="button" data-gsync="' + g.id + '">同步本组</button>' +
-          '<span class="spacer"></span>' +
-          '<button class="btn btn-primary btn-sm" type="button" data-gsave="' + g.id + '">保存本组</button>' +
-          '</div>' +
-          '<div class="preview-out" data-gpreview-out="' + g.id + '"></div>';
-
-        wrap.innerHTML = html;
-        bindDdnsGroupEvents(wrap, g);
-        return wrap;
+        if (!vals) return;
+        const next = [];
+        members.forEach(function (m) {
+          if (vals["rm_" + m.machineId]) return;
+          next.push({
+            machineId: m.machineId,
+            days: Math.max(1, Number(vals["days_" + m.machineId]) || 1),
+            windowStart: String(vals["ws_" + m.machineId] || "").trim(),
+            windowEnd: String(vals["we_" + m.machineId] || "").trim(),
+            sortOrder: Number(vals["so_" + m.machineId]) || 0,
+          });
+        });
+        if (vals.addpick) {
+          next.push({ machineId: Number(vals.addpick), days: 1, windowStart: "", windowEnd: "", sortOrder: next.length });
+        }
+        const r = await apiJson("/api/v1/ddns/groups/" + g.id + "/members", { method: "PUT", body: JSON.stringify({ members: next }) });
+        if (r.ok) { ddnsMsg("排班已保存", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
       }
 
-      function bindDdnsGroupEvents(wrap, g) {
-        const gid = g.id;
-
-        wrap.querySelector('[data-genable="' + gid + '"]')?.addEventListener("change", async function () {
-          const payload = collectGroupPayload(wrap, g);
-          payload.enabled = this.checked;
-          const r = await apiJson("/api/v1/ddns/groups/" + gid, { method: "PUT", body: JSON.stringify(payload) });
-          if (r.ok) { await loadDdns(); } else { this.checked = !this.checked; ddnsMsg(errText(r.data), "error"); }
+      async function deleteGroup(id) {
+        const g = ddnsGroup(id);
+        const sure = await confirmModal({
+          title: "删除分组",
+          desc: "分组「" + (g ? g.name : "") + "」的成员关系与解析记录会一并删除（机器本身保留）。",
+          okText: "删除",
         });
+        if (!sure) return;
+        const r = await apiJson("/api/v1/ddns/groups/" + id, { method: "DELETE" });
+        if (r.ok) { ddnsMsg("分组已删除", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+      }
 
-        wrap.querySelector('[data-gdel="' + gid + '"]')?.addEventListener("click", async function () {
-          const okDel = await confirmModal({
-            title: "删除分组",
-            desc: "分组「" + g.name + "」的成员关系与解析记录会一并删除（机器本身保留）。",
-            okText: "删除",
-          });
-          if (!okDel) return;
-          const r = await apiJson("/api/v1/ddns/groups/" + gid, { method: "DELETE" });
-          if (r.ok) { ddnsMsg("分组已删除", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
-        });
-
-        // 模式切换立即重绘：window 与 rotate 的成员字段完全不同，不及时重绘会让人以为字段丢了
-        wrap.querySelector('[data-gmode="' + gid + '"]')?.addEventListener("change", async function () {
-          const payload = collectGroupPayload(wrap, g);
-          const r = await apiJson("/api/v1/ddns/groups/" + gid, { method: "PUT", body: JSON.stringify(payload) });
-          if (r.ok) { await loadDdns(); } else ddnsMsg(errText(r.data), "error");
-        });
-
-        wrap.querySelector('[data-gsave="' + gid + '"]')?.addEventListener("click", async function () {
-          const payload = collectGroupPayload(wrap, g);
-          const r1 = await apiJson("/api/v1/ddns/groups/" + gid, { method: "PUT", body: JSON.stringify(payload) });
-          if (!r1.ok) { ddnsMsg("保存分组失败：" + errText(r1.data), "error"); return; }
-
-          // 成员全量保存
-          const members = [];
-          wrap.querySelectorAll("[data-member]").forEach(function (row) {
-            const mid = Number(row.getAttribute("data-member"));
-            const daysEl = row.querySelector("[data-mdays]");
-            const startEl = row.querySelector("[data-mstart]");
-            const endEl = row.querySelector("[data-mend]");
-            const orderEl = row.querySelector("[data-morder]");
-            members.push({
-              machineId: mid,
-              days: daysEl ? Number(daysEl.value) || 1 : 1,
-              windowStart: startEl ? startEl.value.trim() : "",
-              windowEnd: endEl ? endEl.value.trim() : "",
-              sortOrder: orderEl ? Number(orderEl.value) || 0 : 0,
-            });
-          });
-          const r2 = await apiJson("/api/v1/ddns/groups/" + gid + "/members", {
-            method: "PUT", body: JSON.stringify({ members: members }),
-          });
-          if (!r2.ok) { ddnsMsg("保存成员失败：" + errText(r2.data), "error"); return; }
-
-          // 记录逐条保存（凭据留空表示不修改，后端会剔除含 **** 的掩码值）
-          let recOk = true;
-          for (const rec of (g.records || [])) {
-            const patch = { provider: val(wrap, "rprovider", rec.id), zone: val(wrap, "rzone", rec.id), host: val(wrap, "rhost", rec.id) };
-            const ttlEl = wrap.querySelector('[data-rttl="' + rec.id + '"]');
-            if (ttlEl) patch.ttl = Number(ttlEl.value) || 600;
-            const enEl = wrap.querySelector('[data-renable="' + rec.id + '"]');
-            if (enEl) patch.enabled = enEl.checked;
-            const cred = {};
-            wrap.querySelectorAll('[data-rcred="' + rec.id + '"]').forEach(function (inp) {
-              const v = String(inp.value || "").trim();
-              if (v) cred[inp.getAttribute("data-rcredkey")] = v;
-            });
-            if (Object.keys(cred).length) patch.credential = cred;
-            const rr = await apiJson("/api/v1/ddns/records/" + rec.id, { method: "PUT", body: JSON.stringify(patch) });
-            if (!rr.ok) { recOk = false; ddnsMsg("保存记录失败：" + errText(rr.data), "error"); break; }
-          }
-          if (recOk) ddnsMsg("分组「" + g.name + "」已保存", "ok");
+      async function syncGroup(id) {
+        const g = ddnsGroup(id);
+        ddnsMsg("正在同步" + (g ? "「" + g.name + "」" : "") + "…");
+        const r = await apiJson("/api/v1/ddns/sync", { method: "POST", body: JSON.stringify({ groupId: id, force: true }) });
+        if (r.ok && r.data) {
+          ddnsMsg("同步完成：切换 " + r.data.changed + " 条，失败 " + r.data.failed + " 条，跳过 " + r.data.skipped + " 条"
+            + (r.data.failed ? "（详情见日志页）" : ""), r.data.failed ? "error" : "ok");
           await loadDdns();
-        });
+        } else ddnsMsg("同步失败：" + errText(r.data), "error");
+      }
 
-        wrap.querySelectorAll("[data-mremove]").forEach(function (btn) {
-          btn.addEventListener("click", async function () {
-            const mid = Number(btn.getAttribute("data-mremove"));
-            const members = (g.members || []).filter(function (m) { return m.machineId !== mid; })
-              .map(function (m) {
-                return { machineId: m.machineId, days: m.days, windowStart: m.windowStart, windowEnd: m.windowEnd, sortOrder: m.sortOrder };
-              });
-            const r = await apiJson("/api/v1/ddns/groups/" + gid + "/members", { method: "PUT", body: JSON.stringify({ members: members }) });
-            if (r.ok) { await loadDdns(); } else ddnsMsg(errText(r.data), "error");
-          });
-        });
+      async function previewGroup(id) {
+        const g = ddnsGroup(id);
+        const r = await apiJson("/api/v1/ddns/preview?group_id=" + id + "&days=7");
+        if (!r.ok || !r.data) { ddnsMsg("预览失败：" + errText(r.data), "error"); return; }
+        const rows = r.data.rows || [];
+        const html = '<div class="table-wrap"><table><thead><tr><th>日期</th><th>值班机器</th><th>IP</th></tr></thead><tbody>'
+          + rows.map(function (x) {
+            return "<tr><td>" + escDdns(x.date) + "</td><td>" + escDdns(x.machineName)
+              + '</td><td><code class="mono-sm">' + escDdns(x.ip) + "</code></td></tr>";
+          }).join("") + "</tbody></table></div>";
+        await openModal({ title: "7 天预览 · " + (g ? g.name : ""), html: html, okText: "关闭", hideCancel: true });
+      }
 
-        const addBtn = wrap.querySelector('[data-gadd="' + gid + '"]');
-        if (addBtn) {
-          addBtn.addEventListener("click", async function () {
-            const sel = wrap.querySelector('[data-gaddpick="' + gid + '"]');
-            if (!sel || !sel.value) return;
-            const members = (g.members || []).map(function (m) {
-              return { machineId: m.machineId, days: m.days, windowStart: m.windowStart, windowEnd: m.windowEnd, sortOrder: m.sortOrder };
-            });
-            members.push({ machineId: Number(sel.value), days: 1, windowStart: "", windowEnd: "", sortOrder: members.length });
-            const r = await apiJson("/api/v1/ddns/groups/" + gid + "/members", { method: "PUT", body: JSON.stringify({ members: members }) });
-            if (r.ok) { await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+      /* ---- 解析记录动作 ---- */
+      async function openRecordModal(preGroup, rec) {
+        const creds = ddnsState.credentials || [];
+        const groups = ddnsState.groups || [];
+        if (!groups.length) { ddnsMsg("请先新建分组", "error"); return; }
+        if (!creds.length) {
+          ddnsMsg("请先在「DNS 凭据」添加一条凭据", "error");
+          switchDdnsSub("credentials");
+          return;
+        }
+        const fields = [];
+        if (!rec) {
+          const curGroupId = preGroup ? preGroup.id : groups[0].id;
+          fields.push({
+            key: "groupId", label: "所属分组", type: "select", value: String(curGroupId),
+            options: groups.map(function (g) { return { value: String(g.id), label: g.name }; }),
           });
         }
-
-        wrap.querySelector('[data-radd="' + gid + '"]')?.addEventListener("click", async function () {
-          const vals = await openModal({
-            title: "添加解析记录",
-            desc: "一个分组可以挂多个域名（允许跨厂商），它们始终指向同一台值班机器。添加后在记录块里填厂商凭据并「保存本组」生效。",
-            okText: "添加",
-            fields: [
-              {
-                key: "zone", label: "域名 zone", placeholder: "example.com", required: true,
-                hint: "主域名本身，如 example.com；不要带主机记录前缀",
-              },
-              {
-                key: "host", label: "主机记录", value: "@", placeholder: "@ 或 www", required: true,
-                hint: "@ 表示根域名，www 表示 www 子域",
-              },
-            ],
-          });
-          if (!vals) return;
-          const first = (ddnsState.providers || [])[0];
-          const r = await apiJson("/api/v1/ddns/records", {
-            method: "POST",
-            body: JSON.stringify({ groupId: gid, provider: first ? first.id : "cloudflare", zone: vals.zone, host: vals.host, ttl: 600, credential: {} }),
-          });
-          if (r.ok) { ddnsMsg("记录已添加，请填写厂商凭据后保存", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+        fields.push(
+          {
+            key: "provider", label: "DNS 厂商", type: "select", value: rec ? rec.provider : ((ddnsState.providers[0] || {}).id || ""),
+            options: (ddnsState.providers || []).map(function (p) { return { value: p.id, label: p.label }; }),
+          },
+          {
+            key: "credentialId", label: "凭据", type: "select",
+            value: rec ? String(rec.credential_id || "") : String((creds[0] || {}).id || ""),
+            options: [{ value: "", label: "（不绑定）" }].concat(creds.map(function (c) {
+              return { value: String(c.id), label: c.name + "（" + ddnsProviderLabel(c.provider) + "）" };
+            })),
+          },
+          { key: "zone", label: "域名 zone", value: rec ? rec.zone : "", placeholder: "example.com", required: true, hint: "主域名本身，不要带主机记录前缀" },
+          { key: "host", label: "主机记录", value: rec ? rec.host : "@", placeholder: "@ 或 www", hint: "@ 表示根域名" },
+          { key: "ttl", label: "TTL（秒）", type: "number", min: 60, value: rec ? String(rec.ttl) : "600" },
+        );
+        const vals = await openModal({
+          title: rec ? "编辑解析记录" : "新增解析记录",
+          desc: rec ? "所属分组：「" + (ddnsGroup(rec.group_id) || {}).name + "」（如需换组请删除后重建）" : "一个分组可挂多个域名，它们始终指向同一台值班机器。",
+          okText: rec ? "保存" : "添加",
+          fields: fields,
         });
-
-        wrap.querySelectorAll("[data-rdel]").forEach(function (btn) {
-          btn.addEventListener("click", async function () {
-            const okDel = await confirmModal({
-              title: "删除解析记录",
-              desc: "删除后该域名将不再随本组轮换。云上已写入的解析不会被回滚，需要时请到厂商控制台手动改。",
-              okText: "删除",
-            });
-            if (!okDel) return;
-            const r = await apiJson("/api/v1/ddns/records/" + btn.getAttribute("data-rdel"), { method: "DELETE" });
-            if (r.ok) { await loadDdns(); } else ddnsMsg(errText(r.data), "error");
-          });
-        });
-
-        wrap.querySelector('[data-gpreview="' + gid + '"]')?.addEventListener("click", async function () {
-          const out = wrap.querySelector('[data-gpreview-out="' + gid + '"]');
-          const r = await apiJson("/api/v1/ddns/preview?group_id=" + gid + "&days=7");
-          if (!r.ok || !r.data) { if (out) out.innerHTML = '<p class="hint danger">预览失败：' + escDdns(errText(r.data)) + '</p>'; return; }
-          const rows = r.data.rows || [];
-          if (out) {
-            out.innerHTML = '<div class="table-wrap"><table><thead><tr><th>日期</th><th>值班机器</th><th>IP</th></tr></thead><tbody>' +
-              rows.map(function (x) {
-                return '<tr><td>' + escDdns(x.date) + '</td><td>' + escDdns(x.machineName) + '</td><td><code>' + escDdns(x.ip) + '</code></td></tr>';
-              }).join("") + '</tbody></table></div>';
-          }
-        });
-
-        wrap.querySelector('[data-gsync="' + gid + '"]')?.addEventListener("click", async function () {
-          ddnsMsg("正在同步本组…");
-          const r = await apiJson("/api/v1/ddns/sync", { method: "POST", body: JSON.stringify({ groupId: gid, force: true }) });
-          if (r.ok && r.data) {
-            const d = r.data;
-            ddnsMsg("同步完成：切换 " + d.changed + " 条，失败 " + d.failed + " 条，跳过 " + d.skipped + " 条"
-              + (d.failed ? "（详情见日志页）" : ""), d.failed ? "error" : "ok");
-            await loadDdns();
-          } else ddnsMsg("同步失败：" + errText(r.data), "error");
-        });
-      }
-
-      /** 取分组卡片里某个字段的当前值 */
-      function val(wrap, key, id) {
-        const el = wrap.querySelector('[data-' + key + '="' + id + '"]');
-        return el ? String(el.value || "").trim() : "";
-      }
-
-      function collectGroupPayload(wrap, g) {
-        const gid = g.id;
-        const modeEl = wrap.querySelector('[data-gmode="' + gid + '"]');
-        return {
-          name: val(wrap, "gname", gid) || g.name,
-          mode: modeEl ? modeEl.value : g.mode,
-          timezone: val(wrap, "gtz", gid) || g.timezone,
-          switchTime: val(wrap, "gswitch", gid) || g.switch_time,
-          anchorDate: val(wrap, "ganchor", gid) || g.anchor_date,
-          fallbackIp: val(wrap, "gfallback", gid),
-          enabled: g.enabled,
+        if (!vals) return;
+        const payload = {
+          provider: vals.provider,
+          credentialId: Number(vals.credentialId) || 0,
+          zone: vals.zone.trim(),
+          host: vals.host.trim() || "@",
+          ttl: Math.max(60, Number(vals.ttl) || 600),
         };
+        const r = rec
+          ? await apiJson("/api/v1/ddns/records/" + rec.id, { method: "PUT", body: JSON.stringify(Object.assign({ enabled: rec.enabled }, payload)) })
+          : await apiJson("/api/v1/ddns/records", { method: "POST", body: JSON.stringify(Object.assign({ groupId: Number(vals.groupId) }, payload)) });
+        if (r.ok) { ddnsMsg(rec ? "记录已保存" : "记录已添加", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
       }
 
-      /* ---- 顶部按钮 ---- */
-      $("ddns-m-add")?.addEventListener("click", async function () {
-        const name = ($("ddns-m-name").value || "").trim();
-        const ip = ($("ddns-m-ip").value || "").trim();
-        const remark = ($("ddns-m-remark").value || "").trim();
-        if (!name || !ip) { ddnsMsg("请填写机器名称与公网 IP", "error"); return; }
-        const r = await apiJson("/api/v1/ddns/machines", { method: "POST", body: JSON.stringify({ name: name, ip: ip, remark: remark }) });
-        if (r.ok) {
-          $("ddns-m-name").value = ""; $("ddns-m-ip").value = ""; $("ddns-m-remark").value = "";
-          ddnsMsg("机器已添加", "ok");
+      async function deleteRecord(id) {
+        const sure = await confirmModal({
+          title: "删除解析记录",
+          desc: "删除后该域名将不再随本组轮换。云上已写入的解析不会回滚，需要时请到厂商控制台手动修改。",
+          okText: "删除",
+        });
+        if (!sure) return;
+        const r = await apiJson("/api/v1/ddns/records/" + id, { method: "DELETE" });
+        if (r.ok) { ddnsMsg("记录已删除", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+      }
+
+      async function pushRecord(id) {
+        const entry = findRecordEntry(id);
+        if (!entry) return;
+        ddnsMsg("正在下发…");
+        const r = await apiJson("/api/v1/ddns/sync", { method: "POST", body: JSON.stringify({ groupId: entry.group.id, force: true }) });
+        if (r.ok && r.data) {
+          ddnsMsg("已下发分组「" + entry.group.name + "」：切换 " + r.data.changed + " 条，失败 " + r.data.failed + " 条", r.data.failed ? "error" : "ok");
           await loadDdns();
-        } else ddnsMsg(errText(r.data), "error");
+        } else ddnsMsg("下发失败：" + errText(r.data), "error");
+      }
+
+      /* ---- 凭据动作 ---- */
+      function credFieldsHtml(providerId, masked) {
+        const p = ddnsProvider(providerId);
+        const fields = (p && p.fields) ? p.fields : [];
+        if (!fields.length) return '<p class="hint" style="margin:0">该厂商无需填写凭据字段。</p>';
+        return fields.map(function (f) {
+          const ph = (masked && masked[f.key]) ? String(masked[f.key]) : (f.placeholder || "");
+          return '<div class="field"><label for="cf-' + escDdns(f.key) + '">' + escDdns(f.label) + "</label>"
+            + '<input id="cf-' + escDdns(f.key) + '" class="control" type="' + (f.secret ? "password" : "text")
+            + '" data-mkey="cf_' + escDdns(f.key) + '" placeholder="' + escDdns(ph) + '" autocomplete="off" spellcheck="false" />'
+            + (f.hint ? '<p class="hint">' + escDdns(f.hint) + "</p>" : "") + "</div>";
+        }).join("");
+      }
+
+      async function openCredentialModal(cred) {
+        const providers = ddnsState.providers || [];
+        if (!providers.length) { ddnsMsg("厂商列表未加载，请刷新页面", "error"); return; }
+        const curProvider = cred ? cred.provider : providers[0].id;
+        const masked = cred ? (cred.masked || {}) : {};
+        const html = '<div class="form-grid">'
+          + '<div class="field"><label for="cred-name">名称</label><input id="cred-name" class="control" data-mkey="name" value="'
+            + escDdns(cred ? cred.name : "") + '" placeholder="如「阿里云主账号」" autocomplete="off" /></div>'
+          + '<div class="field"><label for="cred-provider">厂商</label><select id="cred-provider" class="control" data-mkey="provider">'
+            + providers.map(function (p) {
+              return '<option value="' + escDdns(p.id) + '"' + (p.id === curProvider ? " selected" : "") + ">" + escDdns(p.label) + "</option>";
+            }).join("")
+          + "</select></div></div>"
+          + '<div class="form-grid" id="cred-fields" style="margin-top:14px">' + credFieldsHtml(curProvider, masked) + "</div>"
+          + (cred ? '<p class="hint" style="margin-top:10px">留空的字段保持原值不变。</p>' : "");
+
+        const vals = await openModal({
+          title: cred ? "编辑凭据" : "新增凭据",
+          okText: cred ? "保存" : "添加",
+          html: html,
+          onMount: function (host) {
+            const sel = host.querySelector("#cred-provider");
+            const box = host.querySelector("#cred-fields");
+            sel.addEventListener("change", function () {
+              const prev = {};
+              host.querySelectorAll("[data-mkey^='cf_']").forEach(function (i) {
+                if (i.value) prev[i.getAttribute("data-mkey")] = i.value;
+              });
+              box.innerHTML = credFieldsHtml(sel.value, {});
+              box.querySelectorAll("[data-mkey]").forEach(function (i) {
+                const k = i.getAttribute("data-mkey");
+                if (prev[k]) i.value = prev[k];
+              });
+            });
+          },
+        });
+        if (!vals) return;
+        const credential = {};
+        Object.keys(vals).forEach(function (k) {
+          if (k.indexOf("cf_") === 0) {
+            const v = String(vals[k] || "").trim();
+            if (v && v.indexOf("****") < 0) credential[k.slice(3)] = v;
+          }
+        });
+        const name = String(vals.name || "").trim();
+        if (!name) { ddnsMsg("凭据名称不能为空", "error"); return; }
+        if (!cred && Object.keys(credential).length === 0) { ddnsMsg("请至少填写一个凭据字段", "error"); return; }
+        const body = { name: name, provider: vals.provider, credential: credential };
+        const r = cred
+          ? await apiJson("/api/v1/ddns/credentials/" + cred.id, { method: "PUT", body: JSON.stringify(body) })
+          : await apiJson("/api/v1/ddns/credentials", { method: "POST", body: JSON.stringify(body) });
+        if (r.ok) { ddnsMsg(cred ? "凭据已保存" : "凭据已添加", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+      }
+
+      async function testCredential(id) {
+        const c = ddnsCredential(id);
+        if (!c) return;
+        const vals = await openModal({
+          title: "连通测试 · " + c.name,
+          desc: "用该凭据查询一条解析记录的当前值，验证密钥与域名是否匹配。留空则自动取第一条引用它的记录。",
+          okText: "测试",
+          fields: [
+            { key: "zone", label: "域名 zone（选填）", placeholder: "example.com" },
+            { key: "host", label: "主机记录（选填）", placeholder: "@ 或 www" },
+          ],
+        });
+        if (!vals) return;
+        ddnsMsg("正在测试「" + c.name + "」…");
+        const r = await apiJson("/api/v1/ddns/credentials/" + id + "/test", {
+          method: "POST", body: JSON.stringify({ zone: vals.zone.trim(), host: vals.host.trim() }),
+        });
+        if (r.ok && r.data && r.data.ok) {
+          ddnsMsg("连通正常：" + (r.data.zone || "") + " 当前解析 = " + (r.data.ip || "(记录不存在)"), "ok");
+        } else {
+          ddnsMsg("连通失败：" + ((r.data && r.data.error) || errText(r.data)), "error");
+        }
+      }
+
+      async function deleteCredential(id) {
+        const c = ddnsCredential(id);
+        const sure = await confirmModal({
+          title: "删除凭据",
+          desc: "删除「" + (c ? c.name : "") + "」？若仍有解析记录引用它，将无法删除。",
+          okText: "删除",
+        });
+        if (!sure) return;
+        const r = await apiJson("/api/v1/ddns/credentials/" + id, { method: "DELETE" });
+        if (r.ok) { ddnsMsg("凭据已删除", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+      }
+
+      /* ---- 事件绑定 ---- */
+      $("ddns-subtabs")?.addEventListener("click", function (e) {
+        const b = e.target.closest("[data-dsub]");
+        if (b) switchDdnsSub(b.getAttribute("data-dsub"));
       });
 
-      $("ddns-g-add")?.addEventListener("click", async function () {
-        const vals = await openModal({ title: "新增分组", okText: "创建", fields: [{ key: "name", label: "分组名称", placeholder: "如「香港三台轮换」", required: true }] });
-        if (!vals || !vals.name) return;
-        const r = await apiJson("/api/v1/ddns/groups", { method: "POST", body: JSON.stringify({ name: vals.name.trim(), mode: "rotate" }) });
-        if (r.ok) { ddnsMsg("分组已创建，请添加成员与解析记录", "ok"); await loadDdns(); } else ddnsMsg(errText(r.data), "error");
+      $("tab-ddns")?.addEventListener("click", function (e) {
+        const btn = e.target.closest("[data-act]");
+        if (!btn) return;
+        handleDdnsAction(btn.getAttribute("data-act"), Number(btn.getAttribute("data-id") || 0));
+      });
+
+      $("tab-ddns")?.addEventListener("change", function (e) {
+        const t = e.target.closest("[data-mtoggle]");
+        if (t) toggleMachine(Number(t.getAttribute("data-mtoggle")), t.checked, t);
       });
 
       $("ddns-sync")?.addEventListener("click", async function () {

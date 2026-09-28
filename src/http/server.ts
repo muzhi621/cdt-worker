@@ -15,7 +15,7 @@ import {
 import { formatWallClock } from '../engine/time';
 import { runDdnsSync, previewGroups } from '../ddns/sync';
 import * as ddnsStore from '../ddns/store';
-import { listProviders } from '../ddns/providers';
+import { listProviders, getProvider } from '../ddns/providers';
 import type { Account } from '../provider/aliyun';
 import indexHtml from '../web/index.html';
 
@@ -170,6 +170,11 @@ const routes: { method: string; pattern: string; scope?: string; handler: (ctx: 
   { method: 'PUT', pattern: '/api/v1/ddns/groups/:id', scope: 'admin', handler: ddnsUpdateGroup },
   { method: 'DELETE', pattern: '/api/v1/ddns/groups/:id', scope: 'admin', handler: ddnsDeleteGroup },
   { method: 'PUT', pattern: '/api/v1/ddns/groups/:id/members', scope: 'admin', handler: ddnsSaveMembers },
+  { method: 'GET', pattern: '/api/v1/ddns/credentials', scope: 'admin', handler: ddnsListCredentials },
+  { method: 'POST', pattern: '/api/v1/ddns/credentials', scope: 'admin', handler: ddnsCreateCredential },
+  { method: 'PUT', pattern: '/api/v1/ddns/credentials/:id', scope: 'admin', handler: ddnsUpdateCredential },
+  { method: 'DELETE', pattern: '/api/v1/ddns/credentials/:id', scope: 'admin', handler: ddnsDeleteCredential },
+  { method: 'POST', pattern: '/api/v1/ddns/credentials/:id/test', scope: 'admin', handler: ddnsTestCredential },
   { method: 'POST', pattern: '/api/v1/ddns/records', scope: 'admin', handler: ddnsCreateRecord },
   { method: 'PUT', pattern: '/api/v1/ddns/records/:id', scope: 'admin', handler: ddnsUpdateRecord },
   { method: 'DELETE', pattern: '/api/v1/ddns/records/:id', scope: 'admin', handler: ddnsDeleteRecord },
@@ -1236,21 +1241,13 @@ function ddnsId(ctx: Context): number {
 async function ddnsOverview(ctx: Context): Promise<Response> {
   const machines = await ddnsStore.listMachines(ctx.env);
   const groups = await ddnsStore.listGroups(ctx.env);
-  const outGroups = [];
-  for (const g of groups) {
-    const records = [];
-    for (const r of g.records) {
-      const cred = await ddnsStore.readCredential(ctx.env, r);
-      records.push({
-        ...r,
-        credential_enc: '', // 密文不外传：前端拿不到也就无法误泄露
-        credentialMasked: ddnsStore.maskCredential(cred),
-        credentialFilled: Object.keys(cred).length > 0,
-      });
-    }
-    outGroups.push({ ...g, records });
-  }
-  return json({ machines, groups: outGroups, providers: listProviders() });
+  // 凭据独立成表后，记录只携带 credential_id；凭据明文/密文均不外传，只回脱敏值
+  const credentials = await ddnsStore.listCredentials(ctx.env);
+  const outGroups = groups.map((g) => ({
+    ...g,
+    records: g.records.map((r) => ({ ...r, credential_enc: '' })),
+  }));
+  return json({ machines, groups: outGroups, credentials, providers: listProviders() });
 }
 
 /* ---- 机器 ---- */
@@ -1297,16 +1294,20 @@ function parseGroupBody(b: Record<string, any>) {
     timezone: String(b.timezone ?? 'Asia/Shanghai').trim() || 'Asia/Shanghai',
     switchTime: String(b.switchTime ?? '03:00').trim() || '03:00',
     anchorDate: String(b.anchorDate ?? '1970-01-01').trim() || '1970-01-01',
+    anchorAt: String(b.anchorAt ?? '').trim(),
     fallbackIp: String(b.fallbackIp ?? '').trim(),
     enabled: b.enabled !== false,
   };
 }
 
+/** 合法排班模式：rotate 按天轮换 / interval 基准时间+每N天 / window 时段 / static 固定首台 */
+const DDNS_MODES = ['rotate', 'interval', 'window', 'static'];
+
 async function ddnsCreateGroup(ctx: Context): Promise<Response> {
   const b = await ddnsBody(ctx);
   const g = parseGroupBody(b);
   if (!g.name) return error('invalid_input', '分组名称不能为空', 400);
-  if (!['rotate', 'window', 'static'].includes(g.mode)) return error('invalid_input', '排班模式只能是 rotate / window / static', 400);
+  if (!DDNS_MODES.includes(g.mode)) return error('invalid_input', '排班模式只能是 rotate / interval / window / static', 400);
   const id = await ddnsStore.createGroup(ctx.env, g);
   await store.addLog(ctx.env, 'audit', `新增 DDNS 分组「${g.name}」（模式 ${g.mode}）`);
   return json({ ok: true, id }, 201);
@@ -1318,7 +1319,7 @@ async function ddnsUpdateGroup(ctx: Context): Promise<Response> {
   const b = await ddnsBody(ctx);
   const g = parseGroupBody(b);
   if (!g.name) return error('invalid_input', '分组名称不能为空', 400);
-  if (!['rotate', 'window', 'static'].includes(g.mode)) return error('invalid_input', '排班模式只能是 rotate / window / static', 400);
+  if (!DDNS_MODES.includes(g.mode)) return error('invalid_input', '排班模式只能是 rotate / interval / window / static', 400);
   await ddnsStore.updateGroup(ctx.env, id, g);
   return json({ ok: true });
 }
@@ -1365,7 +1366,7 @@ async function ddnsCreateRecord(ctx: Context): Promise<Response> {
     zone,
     host: String(b.host ?? '@').trim() || '@',
     ttl: Math.max(60, Math.floor(Number(b.ttl) || 600)),
-    credential: (b.credential && typeof b.credential === 'object') ? b.credential as Record<string, string> : {},
+    credentialId: Math.max(0, Math.floor(Number(b.credentialId) || 0)),
     enabled: b.enabled !== false,
   });
   await store.addLog(ctx.env, 'audit', `新增 DDNS 解析记录 ${zone}（厂商 ${provider}）`);
@@ -1390,16 +1391,9 @@ async function ddnsUpdateRecord(ctx: Context): Promise<Response> {
   if (b.host !== undefined) patch.host = String(b.host).trim() || '@';
   if (b.ttl !== undefined) patch.ttl = Math.max(60, Math.floor(Number(b.ttl) || 600));
   if (b.enabled !== undefined) patch.enabled = !!b.enabled;
-  // 凭据只在显式传来对象时才覆盖：前端「只改 TTL」时不该把密钥清空
-  if (b.credential !== undefined && b.credential && typeof b.credential === 'object') {
-    const cred = b.credential as Record<string, string>;
-    // 前端会把未修改的脱敏值（含 ****）回传，这里剔除掉，避免把掩码写进库里
-    const clean: Record<string, string> = {};
-    for (const [k, v] of Object.entries(cred)) {
-      const s = String(v ?? '').trim();
-      if (s && !s.includes('****')) clean[k] = s;
-    }
-    if (Object.keys(clean).length > 0) patch.credential = clean;
+  // 凭据改为引用独立实体：显式传 credentialId 才覆盖（0 表示解绑）
+  if (b.credentialId !== undefined) {
+    patch.credentialId = Math.max(0, Math.floor(Number(b.credentialId) || 0));
   }
   await ddnsStore.updateRecord(ctx.env, id, patch);
   return json({ ok: true });
@@ -1410,6 +1404,108 @@ async function ddnsDeleteRecord(ctx: Context): Promise<Response> {
   if (!id) return error('invalid_input', '记录 ID 无效', 400);
   await ddnsStore.deleteRecord(ctx.env, id);
   return json({ ok: true });
+}
+
+/* ---- DNS 凭据 ---- */
+
+async function ddnsListCredentials(ctx: Context): Promise<Response> {
+  const credentials = await ddnsStore.listCredentials(ctx.env);
+  return json({ credentials, providers: listProviders() });
+}
+
+/**
+ * 从请求体提取凭据字段。
+ * 前端「编辑」时会把脱敏值（含 ****）原样回传，这里剔除，避免把掩码写进库。
+ */
+function parseCredentialFields(b: Record<string, any>): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (b.credential && typeof b.credential === 'object') {
+    for (const [k, v] of Object.entries(b.credential as Record<string, unknown>)) {
+      const s = String(v ?? '').trim();
+      if (s && !s.includes('****')) out[k] = s;
+    }
+  }
+  return out;
+}
+
+async function ddnsCreateCredential(ctx: Context): Promise<Response> {
+  const b = await ddnsBody(ctx);
+  const name = String(b.name ?? '').trim();
+  const provider = String(b.provider ?? '').trim();
+  if (!name) return error('invalid_input', '凭据名称不能为空', 400);
+  if (!listProviders().some((p) => p.id === provider)) return error('invalid_input', `不支持的 DNS 厂商：${provider}`, 400);
+  const credential = parseCredentialFields(b);
+  if (Object.keys(credential).length === 0) return error('invalid_input', '请至少填写一个凭据字段', 400);
+  const id = await ddnsStore.createCredential(ctx.env, { name, provider, credential });
+  await store.addLog(ctx.env, 'audit', `新增 DDNS 凭据「${name}」（厂商 ${provider}）`);
+  return json({ ok: true, id }, 201);
+}
+
+async function ddnsUpdateCredential(ctx: Context): Promise<Response> {
+  const id = ddnsId(ctx);
+  if (!id) return error('invalid_input', '凭据 ID 无效', 400);
+  const b = await ddnsBody(ctx);
+  const patch: Parameters<typeof ddnsStore.updateCredential>[2] = {};
+  if (b.name !== undefined) {
+    const name = String(b.name).trim();
+    if (!name) return error('invalid_input', '凭据名称不能为空', 400);
+    patch.name = name;
+  }
+  if (b.provider !== undefined) {
+    const provider = String(b.provider).trim();
+    if (!listProviders().some((p) => p.id === provider)) return error('invalid_input', `不支持的 DNS 厂商：${provider}`, 400);
+    patch.provider = provider;
+  }
+  // credential 仅在显式传入且含真实值（非脱敏回传）时才覆盖
+  if (b.credential !== undefined) {
+    const credential = parseCredentialFields(b);
+    if (Object.keys(credential).length > 0) patch.credential = credential;
+  }
+  await ddnsStore.updateCredential(ctx.env, id, patch);
+  return json({ ok: true });
+}
+
+async function ddnsDeleteCredential(ctx: Context): Promise<Response> {
+  const id = ddnsId(ctx);
+  if (!id) return error('invalid_input', '凭据 ID 无效', 400);
+  const used = await ddnsStore.countRecordsUsingCredential(ctx.env, id);
+  if (used > 0) return error('in_use', `该凭据仍被 ${used} 条解析记录引用，请先改绑或删除这些记录`, 409);
+  await ddnsStore.deleteCredential(ctx.env, id);
+  await store.addLog(ctx.env, 'audit', `删除 DDNS 凭据 #${id}`);
+  return json({ ok: true });
+}
+
+/**
+ * 连通测试：用该凭据查询一条解析记录的当前值，验证密钥与域名是否匹配。
+ * 未指定 zone 时自动取第一条引用该凭据的记录。
+ * 失败以 200 + {ok:false,error} 返回，便于前端把厂商错误原样展示（不是接口异常）。
+ */
+async function ddnsTestCredential(ctx: Context): Promise<Response> {
+  const id = ddnsId(ctx);
+  if (!id) return error('invalid_input', '凭据 ID 无效', 400);
+  const b = await ddnsBody(ctx);
+  const credRow = await ddnsStore.getCredential(ctx.env, id);
+  if (!credRow) return error('not_found', '凭据不存在', 404);
+  const provider = getProvider(credRow.provider);
+  if (!provider) return error('invalid_input', `未知的 DNS 厂商：${credRow.provider}`, 400);
+
+  let zone = String(b.zone ?? '').trim();
+  let host = String(b.host ?? '').trim();
+  const ttl = Math.max(60, Math.floor(Number(b.ttl) || 600));
+  if (!zone) {
+    const rec = await ddnsStore.firstRecordUsingCredential(ctx.env, id);
+    if (rec) { zone = rec.zone; host = host || rec.host; }
+  }
+  if (!zone) return error('invalid_input', '请填写要测试的域名（zone），或先让某条解析记录引用该凭据', 400);
+
+  const cred = await ddnsStore.readCredentialById(ctx.env, id);
+  const target = { zone, host: host || '@', ttl };
+  try {
+    const cur = await provider.query(target, cred);
+    return json({ ok: true, ip: cur.ip || '', zone, host: target.host });
+  } catch (err) {
+    return json({ ok: false, error: err instanceof Error ? err.message : String(err), zone, host: target.host });
+  }
 }
 
 /* ---- 同步 / 预览 ---- */

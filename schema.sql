@@ -123,3 +123,79 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_login_ip ON login_attempts(ip, created_at);
+
+-- ─────────────────────────── DDNS 轮换解析 ───────────────────────────
+-- 与 src/store/schema.ts 保持一致（运行时 ensureSchema 也会幂等建表）
+
+-- 分组（一组机器 + 若干域名记录，同组域名永远指向同一台值班机器）
+-- mode: rotate 按天轮换 / interval 基准时间+每N天 / window 一天内时段 / static 固定首台
+CREATE TABLE IF NOT EXISTS ddns_groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'rotate',
+  timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+  switch_time TEXT NOT NULL DEFAULT '03:00',
+  anchor_date TEXT NOT NULL DEFAULT '1970-01-01',
+  anchor_at TEXT NOT NULL DEFAULT '',
+  fallback_ip TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 机器池（只关心「名称 + 公网 IP」，开关机由云厂商控制台负责）
+CREATE TABLE IF NOT EXISTS ddns_machines (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  ip TEXT NOT NULL,
+  remark TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 分组↔机器的成员关系与排班参数（days 用于 rotate/interval，window_* 用于 window）
+CREATE TABLE IF NOT EXISTS ddns_group_members (
+  group_id INTEGER NOT NULL,
+  machine_id INTEGER NOT NULL,
+  days INTEGER NOT NULL DEFAULT 1,
+  window_start TEXT NOT NULL DEFAULT '',
+  window_end TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (group_id, machine_id),
+  FOREIGN KEY (group_id) REFERENCES ddns_groups(id) ON DELETE CASCADE,
+  FOREIGN KEY (machine_id) REFERENCES ddns_machines(id) ON DELETE CASCADE
+);
+
+-- DNS 厂商凭据（可被多条解析记录复用；AES-GCM 加密存储）
+CREATE TABLE IF NOT EXISTS ddns_credentials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  credential_enc TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 解析记录：一个分组可挂多条（多域名/跨厂商），全部同步指向本组值班机器
+-- credential_id 引用 ddns_credentials；credential_enc 为历史遗留内嵌凭据（迁移后已弃用）
+CREATE TABLE IF NOT EXISTS ddns_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL,
+  provider TEXT NOT NULL,
+  zone TEXT NOT NULL,
+  host TEXT NOT NULL DEFAULT '@',
+  ttl INTEGER NOT NULL DEFAULT 60,
+  zone_id TEXT NOT NULL DEFAULT '',
+  record_id TEXT NOT NULL DEFAULT '',
+  credential_id INTEGER NOT NULL DEFAULT 0,
+  credential_enc TEXT NOT NULL DEFAULT '',
+  current_ip TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_sync_at TEXT,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (group_id) REFERENCES ddns_groups(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_ddns_records_group ON ddns_records(group_id);

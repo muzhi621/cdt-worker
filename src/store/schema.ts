@@ -106,6 +106,7 @@ const SCHEMA_STATEMENTS: string[] = [
     timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
     switch_time TEXT NOT NULL DEFAULT '03:00',
     anchor_date TEXT NOT NULL DEFAULT '1970-01-01',
+    anchor_at TEXT NOT NULL DEFAULT '',
     fallback_ip TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -143,6 +144,7 @@ const SCHEMA_STATEMENTS: string[] = [
     ttl INTEGER NOT NULL DEFAULT 60,
     zone_id TEXT NOT NULL DEFAULT '',
     record_id TEXT NOT NULL DEFAULT '',
+    credential_id INTEGER NOT NULL DEFAULT 0,
     credential_enc TEXT NOT NULL DEFAULT '',
     current_ip TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -153,6 +155,16 @@ const SCHEMA_STATEMENTS: string[] = [
     FOREIGN KEY (group_id) REFERENCES ddns_groups(id) ON DELETE CASCADE
   )`,
   `CREATE INDEX IF NOT EXISTS idx_ddns_records_group ON ddns_records(group_id)`,
+  // DNS 厂商凭据（可被多条解析记录复用，与参考项目 ddns-rotation 的 credentials 对齐）
+  // 凭据密文 AES-GCM 加密存储；记录通过 credential_id 引用，不再各自内嵌一份
+  `CREATE TABLE IF NOT EXISTS ddns_credentials (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    credential_enc TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
 ];
 
 // 已部署库的增量迁移（ALTER 在列已存在时会报错，需逐条容错执行）
@@ -161,6 +173,10 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE accounts ADD COLUMN shutdown_mode TEXT NOT NULL DEFAULT ''`,
   // jobs 表早已零引用（通知走 notification_outbox、账单走 billing_cache），直接回收
   `DROP TABLE IF EXISTS jobs`,
+  // 解析记录改为引用独立凭据：新增 credential_id（0 表示尚未绑定凭据）
+  `ALTER TABLE ddns_records ADD COLUMN credential_id INTEGER NOT NULL DEFAULT 0`,
+  // 分组新增「基准时间」（interval 模式：精确到分钟的轮换起点）
+  `ALTER TABLE ddns_groups ADD COLUMN anchor_at TEXT NOT NULL DEFAULT ''`,
 ];
 
 // 默认设置项：首次部署写入；已部署库仅补齐缺失的键（INSERT OR IGNORE 不覆盖现有值）。
@@ -181,6 +197,37 @@ const DEFAULT_SETTINGS: [string, string][] = [
   ['enable_status_change_notify', DEFAULT_CONFIG.enableStatusChangeNotify ? '1' : '0'],
 ];
 
+/**
+ * 把历史上「每条解析记录内嵌一份凭据」的旧数据，迁移为独立的 ddns_credentials
+ * 记录并通过 credential_id 引用。
+ *
+ * 直接复制密文（credential_enc）而不再解密重加密：同一把密钥、同一套 AES-GCM，
+ * 密文可直接搬移，避免迁移期间的加解密开销与失败面。
+ *
+ * 幂等：仅处理 credential_id=0 且 credential_enc 非空的记录；迁移后 credential_id>0，
+ * 重复执行不会再次命中。
+ */
+async function migrateInlineCredentials(env: Env): Promise<void> {
+  const res = await env.DB.prepare(
+    `SELECT id, provider, zone, credential_enc FROM ddns_records
+     WHERE credential_id = 0 AND credential_enc <> ''`,
+  ).all();
+  const rows = (res.results || []) as unknown as {
+    id: number; provider: string; zone: string; credential_enc: string;
+  }[];
+  if (!rows.length) return;
+  for (const r of rows) {
+    const name = `${r.provider} · ${r.zone}`;
+    const ins = await env.DB.prepare(
+      'INSERT INTO ddns_credentials (name, provider, credential_enc) VALUES (?,?,?)',
+    ).bind(name, r.provider, r.credential_enc).run();
+    const cid = Number(ins.meta?.last_row_id ?? 0);
+    if (cid > 0) {
+      await env.DB.prepare('UPDATE ddns_records SET credential_id=? WHERE id=?').bind(cid, r.id).run();
+    }
+  }
+}
+
 let schemaReady = false;
 
 // 幂等建表 + 增量迁移 + 默认值补齐，多次调用只真正执行一次（进程内标记）
@@ -194,6 +241,10 @@ export async function ensureSchema(env: Env): Promise<void> {
       await env.DB.prepare(sql).run();
     } catch { /* 已应用过，忽略 */ }
   }
+  // 数据迁移：把历史上内嵌在解析记录里的凭据提升为独立凭据并回填引用
+  try {
+    await migrateInlineCredentials(env);
+  } catch { /* 迁移失败不影响启动，下次请求重试 */ }
   // 补齐缺失的设置默认值（已存在的不覆盖）
   try {
     await env.DB.batch(
