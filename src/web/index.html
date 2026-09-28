@@ -1701,35 +1701,38 @@
     </section>
   </div>
 
-<!-- 账号配置编辑弹窗 -->
-    <dialog id="edit-dialog">
+<!-- 统一弹窗：账号编辑弹窗（.wide）与通用询问/确认弹窗（#modal）共用同一套 .modal 外壳 -->
+    <dialog id="edit-dialog" class="modal wide">
       <form id="edit-form" novalidate autocomplete="off" method="dialog">
-        <h3 style="margin:0 0 4px;font-size:17px">编辑账号配置</h3>
-        <p class="hint" style="margin:0 0 14px">AccessKey 留空表示保持不变；修改仅影响本地配置，不会触碰云上实例</p>
-        <div class="form-grid">
-          <div class="field">
-            <label for="ed-remark">备注</label>
-            <input id="ed-remark" class="control" placeholder="例如：香港生产机" autocomplete="off" />
-          </div>
-          <div class="field">
-            <label for="ed-max">流量上限（GB）</label>
-            <input id="ed-max" class="control" type="number" min="1" step="1" inputmode="numeric" />
-          </div>
-          <div class="field">
-            <label for="ed-region">地域 ID</label>
-            <input id="ed-region" class="control" list="region-list" autocomplete="off" spellcheck="false" />
-          </div>
-          <div class="field">
-            <label for="ed-site">站点类型</label>
-            <select id="ed-site" class="control">
-              <option value="china">中国站</option>
-              <option value="international">国际站</option>
-            </select>
-          </div>
-          <div class="field full">
-            <label for="ed-instance">实例 ID</label>
-            <input id="ed-instance" class="control" placeholder="i-2ze..." autocomplete="off" spellcheck="false" />
-          </div>
+        <div class="modal-head">
+          <h3>编辑账号配置</h3>
+          <p class="modal-desc">AccessKey 留空表示保持不变；修改仅影响本地配置，不会触碰云上实例</p>
+        </div>
+        <div class="modal-body">
+          <div class="form-grid">
+            <div class="field">
+              <label for="ed-remark">备注</label>
+              <input id="ed-remark" class="control" placeholder="例如：香港生产机" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label for="ed-max">流量上限（GB）</label>
+              <input id="ed-max" class="control" type="number" min="1" step="1" inputmode="numeric" />
+            </div>
+            <div class="field">
+              <label for="ed-region">地域 ID</label>
+              <input id="ed-region" class="control" list="region-list" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label for="ed-site">站点类型</label>
+              <select id="ed-site" class="control">
+                <option value="china">中国站</option>
+                <option value="international">国际站</option>
+              </select>
+            </div>
+            <div class="field full">
+              <label for="ed-instance">实例 ID</label>
+              <input id="ed-instance" class="control" placeholder="i-2ze..." autocomplete="off" spellcheck="false" />
+            </div>
             <div class="field">
               <label for="ed-shutdown">停机模式（优先全局）</label>
               <select id="ed-shutdown" class="control">
@@ -1760,23 +1763,42 @@
                 意外停机时自动开机（需设置页总开关同时开启；关闭后该账号允许手动关机）
               </label>
             </div>
-          <div class="field full">
-            <label for="ed-akid">AccessKey ID（留空保持不变）</label>
-            <input id="ed-akid" class="control" placeholder="LTAI5t..." autocomplete="off" spellcheck="false" />
-          </div>
-          <div class="field full">
-            <label for="ed-aksecret">AccessKey Secret（留空保持不变）</label>
-            <div class="input-wrap">
-              <input id="ed-aksecret" class="control" type="password" autocomplete="new-password" placeholder="加密存储" />
-              <button type="button" class="toggle-eye" data-eye="ed-aksecret" aria-label="显示密码" aria-pressed="false">
-                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
-              </button>
+            <div class="field full">
+              <label for="ed-akid">AccessKey ID（留空保持不变）</label>
+              <input id="ed-akid" class="control" placeholder="LTAI5t..." autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field full">
+              <label for="ed-aksecret">AccessKey Secret（留空保持不变）</label>
+              <div class="input-wrap">
+                <input id="ed-aksecret" class="control" type="password" autocomplete="new-password" placeholder="加密存储" />
+                <button type="button" class="toggle-eye" data-eye="ed-aksecret" aria-label="显示密码" aria-pressed="false">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
             </div>
           </div>
         </div>
-        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
-          <button class="btn btn-ghost" type="button" id="edit-cancel" style="width:auto">取消</button>
-          <button class="btn btn-primary" type="button" id="edit-save" style="width:auto">保存修改</button>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" type="button" id="edit-cancel">取消</button>
+          <button class="btn btn-primary" type="button" id="edit-save">保存修改</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- 通用弹窗：全站的「输入」与「确认」都走这里，不再使用原生 prompt / confirm -->
+    <dialog id="modal" class="modal">
+      <form id="modal-form" novalidate autocomplete="off" method="dialog">
+        <div class="modal-head">
+          <h3 id="modal-title"></h3>
+          <p class="modal-desc hidden" id="modal-desc"></p>
+        </div>
+        <div class="modal-body">
+          <div class="form-grid hidden" id="modal-fields"></div>
+          <div class="inline-note error hidden" id="modal-error"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" type="button" id="modal-cancel">取消</button>
+          <button class="btn btn-primary" type="button" id="modal-ok">确定</button>
         </div>
       </form>
     </dialog>
@@ -1799,7 +1821,11 @@
       }
       readCsrfCookie();
       let logTimer = null;
-      const TABS = ["status", "accounts", "settings", "notify", "logs", "apikeys", "ddns"];
+      // 主导航：数组顺序 = 桌面 Tab 与移动端底部导航的渲染顺序，「日志」固定在最右。
+      // 「密钥」不再是独立入口，已并入设置页（见 TAB_ALIAS 与 #apikey-card）。
+      const TABS = ["status", "accounts", "settings", "notify", "ddns", "logs"];
+      // 历史深链别名：老书签 / 文档里的 #apikeys 仍可用，落到设置页并高亮密钥卡片
+      const TAB_ALIAS = { apikeys: { tab: "settings", focus: "apikey-card" } };
 
       /* ---------- 主题 ---------- */
       const themeBtn = $("theme-toggle");
@@ -1824,6 +1850,105 @@
         $("toast-host").appendChild(el);
         setTimeout(() => el.remove(), 2600);
       }
+
+      /* ---------- 统一弹窗 ----------
+       * 全站只有 #modal 一个通用弹窗外壳，替代原生 prompt / confirm：原生弹窗样式来自
+       * 浏览器、无法跟随主题（深色下刺眼），且被部分环境屏蔽后功能会「静默失效」。
+       * openModal(opts) → Promise<values|null>：null 表示取消。
+       *   opts = { title, desc, fields:[{key,label,value,placeholder,hint,type,required}],
+       *            okText, cancelText, danger, validate(values)->错误文案|null }
+       * confirmModal(opts) → Promise<boolean>。
+       */
+      let modalOpts = null;
+      let modalResolve = null;
+
+      function modalError(msg) {
+        const el = $("modal-error");
+        el.textContent = msg || "";
+        el.classList.toggle("hidden", !msg);
+      }
+
+      function openModal(opts) {
+        opts = opts || {};
+        modalOpts = opts;
+        $("modal-title").textContent = opts.title || "";
+        const descEl = $("modal-desc");
+        descEl.textContent = opts.desc || "";
+        descEl.classList.toggle("hidden", !opts.desc);
+        modalError("");
+        const fields = opts.fields || [];
+        const host = $("modal-fields");
+        host.className = "form-grid" + (fields.length ? "" : " hidden");
+        host.innerHTML = fields.map(function (f) {
+          const id = "modal-f-" + f.key;
+          const type = f.type === "password" ? "password" : f.type === "number" ? "number" : "text";
+          // 单字段弹窗（如「分组名称」）占满整行，双栏只在真有多个字段时才生效
+          const cls = "field" + (fields.length === 1 || f.full ? " full" : "");
+          return '<div class="' + cls + '">' +
+            '<label for="' + id + '">' + esc(f.label) + "</label>" +
+            '<input id="' + id + '" class="control" type="' + type + '" data-mkey="' + esc(f.key) + '"' +
+            ' value="' + esc(f.value == null ? "" : f.value) + '"' +
+            ' placeholder="' + esc(f.placeholder || "") + '" autocomplete="off" spellcheck="false" />' +
+            (f.hint ? '<p class="hint">' + esc(f.hint) + "</p>" : "") +
+            "</div>";
+        }).join("");
+        const ok = $("modal-ok");
+        ok.textContent = opts.okText || "确定";
+        ok.className = "btn " + (opts.danger ? "btn-danger" : "btn-primary");
+        $("modal-cancel").textContent = opts.cancelText || "取消";
+        return new Promise(function (resolve) {
+          modalResolve = resolve;
+          const dlg = $("modal");
+          if (!dlg.open) dlg.showModal();
+          const first = host.querySelector("input");
+          if (first) setTimeout(function () { first.focus(); if (first.select) first.select(); }, 40);
+        });
+      }
+
+      /** 关闭并兑现 Promise；result === null 表示取消 */
+      function closeModal(result) {
+        const r = modalResolve;
+        modalResolve = null;
+        modalOpts = null;
+        const dlg = $("modal");
+        if (dlg.open) dlg.close();
+        if (r) r(result);
+      }
+
+      function confirmModal(opts) {
+        opts = opts || {};
+        return openModal({
+          title: opts.title,
+          desc: opts.desc,
+          okText: opts.okText || "确定",
+          cancelText: opts.cancelText,
+          danger: opts.danger !== false,
+          fields: [],
+        }).then(function (v) { return v !== null; });
+      }
+
+      $("modal-ok").addEventListener("click", function () {
+        const values = {};
+        $("modal-fields").querySelectorAll("[data-mkey]").forEach(function (el) {
+          values[el.getAttribute("data-mkey")] = String(el.value || "").trim();
+        });
+        const fields = (modalOpts && modalOpts.fields) || [];
+        for (const f of fields) {
+          if (f.required && !values[f.key]) { modalError((f.label || "该项") + "不能为空"); return; }
+        }
+        if (modalOpts && typeof modalOpts.validate === "function") {
+          const msg = modalOpts.validate(values);
+          if (msg) { modalError(msg); return; }
+        }
+        closeModal(values);
+      });
+      $("modal-cancel").addEventListener("click", function () { closeModal(null); });
+      // 回车提交：表单默认 method="dialog" 会直接关闭，必须拦下并走上面的校验流程
+      $("modal-form").addEventListener("submit", function (e) { e.preventDefault(); $("modal-ok").click(); });
+      // Esc 关闭：默认会绕过 Promise，改成走 closeModal 统一兑现
+      $("modal").addEventListener("cancel", function (e) { e.preventDefault(); closeModal(null); });
+      // 兜底：任何其他方式关闭（如浏览器行为）也要兑现，避免调用方永久 pending
+      $("modal").addEventListener("close", function () { if (modalResolve) closeModal(null); });
 
       /* ---------- 网络 ---------- */
       async function api(path, opts) {
