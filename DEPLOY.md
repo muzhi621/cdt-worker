@@ -41,7 +41,9 @@ npx wrangler d1 create cdt-monitor-db
 
 ---
 
-## 2. 创建 KV 命名空间
+## 2. 创建 KV 命名空间（当前版本可跳过）
+
+> ⚠️ **当前版本已不使用 KV**：代码未引用 KV，`wrangler.toml` 已无 KV 绑定。本节为历史遗留，直接跳到第 4 步即可。
 
 ```bash
 npx wrangler kv namespace create CACHE
@@ -215,7 +217,7 @@ curl -H "X-Cron-Secret: 你的密钥" https://你的地址/__cron
 
 - [ ] `wrangler login` 成功
 - [ ] D1 数据库已创建，ID 已填入 wrangler.toml
-- [ ] KV 命名空间已创建，ID 已填入 wrangler.toml
+- [ ] （可选，当前版本不需要）KV 命名空间
 - [ ] `schema.sql` 已执行（d1 execute）
 - [ ] `CDT_MASTER_KEY` 已设置并备份
 - [ ] `wrangler deploy` 成功

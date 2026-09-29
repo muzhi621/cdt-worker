@@ -1,13 +1,13 @@
 # CDT-Monitor · Cloudflare Worker 版
 
-> 基于 **Cloudflare Workers + D1 + KV** 的阿里云 **CDT 流量监控 / ECS 控制 / 费用观察** 服务，并内置 **DDNS 轮换解析**。
-> 单文件内联前端、无外部运维依赖、对免费额度友好。
+> 基于 **Cloudflare Workers + D1** 的阿里云 **CDT 流量监控 / ECS 控制 / 费用观察** 服务，并内置 **DDNS 轮换解析**。
+> 单文件内联前端、无外部运维依赖、对免费额度友好、**无需绑定 KV**。
 
 ---
 
 ## 一、项目简介
 
-CDT-Monitor 原本是一个 Go 项目，本仓库是其 **Cloudflare Worker 移植版**：把后端逻辑用 TypeScript 写在 Worker 里，数据落在 D1（SQLite 边缘数据库），缓存落在 KV，前端是一个内联在 `src/web/index.html` 的单页应用（无需独立托管）。
+CDT-Monitor 原本是一个 Go 项目，本仓库是其 **Cloudflare Worker 移植版**：把后端逻辑用 TypeScript 写在 Worker 里，数据全部落在 D1（SQLite 边缘数据库），前端是一个内联在 `src/web/index.html` 的单页应用（无需独立托管）。**不使用 KV**——所有"缓存"要么是 isolate 内存 Map，要么是 D1 的 `billing_cache` 表。
 
 核心目标：**盯住阿里云 CDT（云数据传输）流量用量，逼近上限时自动停机 ECS 实例以规避超额费用**，并按多渠道通知告警；同时提供 DDNS 轮换解析，把域名自动指向当前在线的机器。
 
@@ -41,12 +41,12 @@ CDT-Monitor 原本是一个 Go 项目，本仓库是其 **Cloudflare Worker 移�
                          │  src/notify/*   通知投递                    │
                          │  src/ddns/*     DDNS 轮换解析              │
                          │  src/security/* 安全工具                   │
-                         └───────────────┬───────────────┬───────────┘
-                                         │               │
-                                    D1 (DB)           KV (CACHE)
+                         └───────────────────────┬───────────────────┘
+                                                 │
+                                            D1 (DB)
 ```
 
-- **栈**：Cloudflare Workers（TypeScript，`nodejs_compat`）+ D1 + KV + 内联前端
+- **栈**：Cloudflare Workers（TypeScript，`nodejs_compat`）+ D1 + 内联前端（无需 KV）
 - **调度**：默认**外部定时服务**请求 `/__cron`（需 `CRON_SECRET`）；可选增强为 Cloudflare 原生 Cron（`scheduled()`，无需密钥）。两条链路共用内部防抖与原子抢占，多源并发只跑一轮。
 - **建表**：`schema.sql` 可在部署后手动执行；运行时 `ensureSchema` 也会**幂等自动建表**（新增表无需手工迁移）。
 
@@ -66,7 +66,7 @@ cdt-worker/
 │   └── web/index.html      # 单文件内联前端
 ├── docs/                   # DDNS / 自建触发 / 架构 / 审查等详细文档
 ├── schema.sql              # D1 建表语句
-├── wrangler.toml          # 部署配置（D1/KV 绑定、Cron）
+├── wrangler.toml          # 部署配置（D1 绑定、Cron）
 ├── selfhost/               # 自建触发驱动（install.sh / driver.mjs）
 └── .github/workflows/      # GitHub Actions 定时触发
 ```
@@ -90,19 +90,15 @@ npx wrangler login          # 浏览器授权（无浏览器见下方「常见�
    npx wrangler d1 create cdt-monitor-db
    # 记下输出的 database_id
    ```
-2. **创建 KV 命名空间**
-   ```bash
-   npx wrangler kv namespace create CACHE
-   # 记下输出的 id
-   ```
-3. **回填 ID**：把 `wrangler.toml` 中的 `database_name` / `CACHE` 绑定指向你刚创建的（最新 wrangler 可只填 `database_name` 自动匹配云端资源，无需手写 id）。
-4. **初始化表结构**
+2. **回填 ID**：把 `wrangler.toml` 中的 `database_name` / `database_id` 指向你刚创建的库（最新 wrangler 可只填 `database_name` 幂等匹配云端资源，无需手写 id）。
+   > **不需要创建 KV 命名空间**——代码未使用 KV，`wrangler.toml` 也没有 KV 绑定。
+3. **初始化表结构**
    ```bash
    npx wrangler d1 execute cdt-monitor-db --remote --file=./schema.sql
    ```
    > 也可省略此步：Worker 首次请求时 `ensureSchema` 会幂等自动建表。
-5. **设置主密钥**（见下文「环境变量与密钥」）。
-6. **部署**
+4. **设置主密钥**（见下文「环境变量与密钥」）。
+5. **部署**
    ```bash
    npx wrangler deploy
    ```
@@ -111,7 +107,7 @@ npx wrangler login          # 浏览器授权（无浏览器见下方「常见�
 ### 方式 B：Cloudflare 连接 GitHub（几乎纯前台，无需本地环境）
 
 1. Cloudflare 控制台 → **Workers 和 Pages** → **创建** → 连接到 Git → 授权并选择 `muzhi621/cdt-worker`，生产分支 `main`，框架预设选 **Workers**，构建命令留空。
-2. 前台创建 **D1**（`cdt-monitor-db`）与 **KV**（`CACHE`），把两个 ID 回填进 `wrangler.toml`（可用网页编辑器改仓库文件，或让 AI 助手代改）。
+2. 前台创建 **D1**（`cdt-monitor-db`），把数据库名/ID 回填进 `wrangler.toml`（可用网页编辑器改仓库文件，或让 AI 助手代改）。**无需创建 KV**。
 3. 设置主密钥、初始化表结构（D1 控制台逐条执行 `schema.sql`，或依赖 `ensureSchema` 自动建表）。
 4. 保存并部署。
 
@@ -139,7 +135,8 @@ MailChannels 免费 API 要求发件域名经 Cloudflare DNS 验证：添加 SPF
 | `CRON_SECRET` | 推荐 | `/__cron` 外部触发密钥；两端（触发方 / Worker）须一致 |
 | `ADMIN_PASSWORD` | 可选 | 忘记管理员密码时用于登录并重置（登录成功后同步为 D1 密码） |
 | `DB`（D1 绑定） | 必填 | 数据库名 `cdt-monitor-db` |
-| `CACHE`（KV 绑定） | 必填 | 命名空间 `CACHE` |
+
+> **KV 不需要绑定**：`Env` 接口只声明了 `DB`，全源码无任何 `KVNamespace` 引用；早期文档中的「创建 KV / CACHE」步骤为历史遗留，可安全跳过。已存在的 KV 命名空间留着不影响，也可删除。
 
 > ⚠️ **切勿把任何密钥写进仓库文件**（包括 README）。`CDT_MASTER_KEY` 通过 `wrangler secret put` 或 Cloudflare 控制台的 Secrets 设置。
 
@@ -300,7 +297,7 @@ npm test           # vitest run
 | 资源 | 限制 | 应对 |
 | --- | --- | --- |
 | 单次请求 subrequest | **50** | 每轮 cron 估算 subrequest 数，超额会 1101 中断整轮 |
-| D1 读 | 5M 行/天 | 聚合查询、缓存结果到 KV |
+| D1 读 | 5M 行/天 | 聚合查询、结果存 D1 `billing_cache` 表减少重复读 |
 | CPU | 10ms/请求（Free） | 监控周期拆分为幂等小步，避免单次超时 |
 
 DDNS 同步、通知投递均设计为低 subrequest、幂等、失败隔离，确保不挤占主监控预算。
@@ -331,7 +328,10 @@ Cloudflare Secret 修改后需**重新部署一次**才生效。
 授权时勾选「所有仓库」或把 `cdt-worker` 加入授权范围后刷新。
 
 **Q8：构建失败？**
-确认 `wrangler.toml` 中 D1/KV 的真实 ID 已填入；查看部署详情页构建日志。
+确认 `wrangler.toml` 中 D1 的真实 ID/库名已填入；查看部署详情页构建日志。
+
+**Q9：需要绑定 KV（CACHE）吗？**
+**不需要**。代码只使用 D1，`Env` 接口无 KV 声明，`wrangler.toml` 也没有 KV 绑定。部分旧文档（`DEPLOY.md` / `DEPLOY-DASHBOARD.md`）里的 KV 步骤是历史遗留，可跳过；已创建的 KV 留着不影响，也可删除以保持账号整洁。
 
 ---
 
@@ -339,7 +339,6 @@ Cloudflare Secret 修改后需**重新部署一次**才生效。
 
 - [ ] `wrangler login`（或 API Token）成功
 - [ ] D1 数据库 `cdt-monitor-db` 已创建并绑定
-- [ ] KV 命名空间 `CACHE` 已创建并绑定
 - [ ] `schema.sql` 已执行（或依赖 `ensureSchema` 自动建表）
 - [ ] `CDT_MASTER_KEY` 已设置并**备份**
 - [ ] `CRON_SECRET` 已设置（如使用外部触发）
