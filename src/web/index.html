@@ -1249,7 +1249,7 @@
             </div>
             <div class="field" data-page-node-id="xHmiUhVFABNyR5CDdU6B6p">
               <label for="set-interval" data-page-node-id="oFmiaaDVlVjl1ZXhc5ixMD">API 间隔（秒）</label>
-              <input id="set-interval" class="control" type="number" min="10" step="5" placeholder="600" inputmode="numeric" data-page-node-id="ieSXYkb66ePsq2fbooeLwx" />
+              <input id="set-interval" class="control" type="number" min="60" max="86400" step="5" placeholder="600" inputmode="numeric" data-page-node-id="ieSXYkb66ePsq2fbooeLwx" />
             </div>
             <div class="field" data-page-node-id="35ePzoGgNiGEDdDtayw1ON">
               <label for="set-action" data-page-node-id="dYsGffRCNIzpdIRJwihYSl">阈值动作</label>
@@ -1767,7 +1767,7 @@
           <span id="logs-count" class="hint" style="margin:0" data-page-node-id="7GX6AUURENH1rf6wobWUdk"></span>
           <span class="spacer" data-page-node-id="LOGRET-SPACER"></span>
           <label class="retention" data-page-node-id="LOGRET-LABEL">日志保留
-            <input id="log-retention" class="control" type="number" min="1" max="3650" inputmode="numeric" style="width:74px" data-page-node-id="LOGRET-INPUT" /> 天
+            <input id="log-retention" class="control" type="number" min="1" max="365" inputmode="numeric" style="width:74px" data-page-node-id="LOGRET-INPUT" /> 天
             <button class="btn btn-ghost btn-sm" type="button" id="save-retention" data-page-node-id="LOGRET-SAVE">保存</button>
           </label>
         </div>
@@ -1897,6 +1897,7 @@
       const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
       let csrf = "";
+      let appReady = false; // 登录态标记：401/403 时只弹一次登录框，避免重复跳转
       // CSRF token 双提交：cookie 里存了一份（cdt_csrf，非 HttpOnly），页面刷新后
       // csrf 变量会被清空，这里从 cookie 恢复，保证刷新后写操作仍能通过后端校验
       function readCsrfCookie() {
@@ -1905,6 +1906,7 @@
       }
       readCsrfCookie();
       let logTimer = null;
+      let currentTab = "status"; // 当前所在 Tab；日志自动刷新只在「日志页且页面可见」时轮询
       // 主导航：数组顺序 = 桌面 Tab 与移动端底部导航的渲染顺序，「日志」固定在最右。
       // 「密钥」不再是独立入口，已并入设置页（见 TAB_ALIAS 与 #apikey-card）。
       const TABS = ["status", "accounts", "settings", "notify", "ddns", "logs"];
@@ -1995,6 +1997,10 @@
         else if (part === "d") for (let i = 1; i <= 31; i++) list.push(pad2(i));
         else if (part === "h") for (let i = 0; i < 24; i++) list.push(pad2(i));
         else for (let i = 0; i < 60; i++) list.push(pad2(i));
+        // P0-R5-1：当前值超出候选区间（如 rotate 分组的 anchor_date=1970-01-01）时必须补进
+        // 列表，否则 <select> 没有任何 <option selected> 会静默回落第一项（如 2023），用户一改
+        // 月/日就把「轮换基准日」从 1970 改写成区间首年，导致 DNS 指向错误机器。
+        if (cur != null && cur !== "" && list.indexOf(String(cur)) < 0) list.unshift(String(cur));
         return list.map(function (v) {
           return '<option value="' + v + '"' + (v === cur ? " selected" : "") + ">" + v + "</option>";
         }).join("");
@@ -2261,6 +2267,17 @@
         const res = await api(path, opts);
         let data = {};
         try { data = await res.json(); } catch (e) { data = {}; }
+        // P1-R5-2：会话过期（24h）或改密码吊销后，写操作会返回 401/403。此前前端无统一处理，
+        // 用户只看到一句 toast、页面仍停在控制台，误以为服务坏了。这里统一跳回登录。
+        // 排除「当前密码错误」这类业务性 401（error.code === invalid_credentials）。
+        const code = data && data.error && data.error.code;
+        if (appReady && (res.status === 401 || res.status === 403) && code !== "invalid_credentials") {
+          appReady = false;
+          stopLogTimer();
+          csrf = "";
+          showView("auth");
+          showAlert(errText(data) || "登录状态已失效，请重新登录");
+        }
         return { ok: res.ok, status: res.status, data };
       }
       function errText(data) {
@@ -2512,6 +2529,7 @@
       }
 
       function enterApp() {
+        appReady = true;
         $("login-password").value = "";
         $("setup-password").value = "";
         ["pwd-current", "pwd-new", "pwd-confirm"].forEach((id) => { $(id).value = ""; });
@@ -2548,6 +2566,7 @@
 
       function switchTab(tab, opts) {
         opts = opts || {};
+        currentTab = tab;
         TABS.forEach((t) => {
           const on = t === tab;
           const panel = $("tab-" + t);
@@ -2761,7 +2780,10 @@
         const input = $("ak-region");
         const current = input.value.trim();
         if (current) {
-          const opt = document.querySelector('#region-list option[value="' + current.replace(/"/g, '\\"') + '"]');
+          const opt = Array.prototype.filter.call(
+            document.querySelectorAll("#region-list option"),
+            function (o) { return o.value === current; }
+          )[0];
           if (opt && opt.disabled) input.value = "";
         }
       }
@@ -2810,6 +2832,21 @@
         else setFieldError("ak-secret", "err-ak-secret", "");
         if (!(account.maxTraffic > 0)) { setFieldError("ak-max", "err-ak-max", "流量上限需为大于 0 的数字"); bad = true; }
         else setFieldError("ak-max", "err-ak-max", "");
+        // P1-R5-4：与后端 scheduleTooClose 同源校验。否则后端 400 时前端整单保存失败、
+        // 用户只看到一句错误 toast 却不知原因（这是我上轮引入的回归）。
+        if (account.scheduleEnabled) {
+          const gap = (function (s, e) {
+            const a = hmMin(s), b = hmMin(e);
+            if (a === null || b === null) return 999;
+            let d = Math.abs(a - b);
+            if (d > 12 * 60) d = 24 * 60 - d;
+            return d;
+          })(account.startTime, account.stopTime);
+          if (gap < 120) {
+            toast("开机与关机时间间隔需大于 120 分钟，否则会与 2 小时命中窗口重叠导致实例反复启停", "err");
+            return;
+          }
+        }
         if (bad) return;
 
         const btn = $("account-submit");
@@ -2907,6 +2944,20 @@
         if (!id) return;
         const maxTraffic = parseInt($("ed-max").value, 10);
         if (!(maxTraffic > 0)) { toast("流量上限需为大于 0 的数字", "err"); return; }
+        // P1-R5-4：与后端 scheduleTooClose 同源校验（编辑弹窗同样需要，否则保存莫名 400）
+        if ($("ed-schedule").checked) {
+          const gap = (function (s, e) {
+            const a = hmMin(s), b = hmMin(e);
+            if (a === null || b === null) return 999;
+            let d = Math.abs(a - b);
+            if (d > 12 * 60) d = 24 * 60 - d;
+            return d;
+          })($("ed-start").value || "08:00", $("ed-stop").value || "23:00");
+          if (gap < 120) {
+            toast("开机与关机时间间隔需大于 120 分钟，否则会与 2 小时命中窗口重叠导致实例反复启停", "err");
+            return;
+          }
+        }
         const acc = {
           id,
           remark: $("ed-remark").value.trim(),
@@ -3008,7 +3059,7 @@
           const checked = !!triggerState.sources?.[key];
           row.innerHTML = `
             <div class="trigger-main">
-              <div class="trigger-name">${labels[key]}</div>
+              <div class="trigger-name">${escHtml(labels[key])}</div>
               <div class="trigger-meta ${stale ? "danger" : ""}">上次触发：${relTime(seen)}${stale ? " · 已断档，请检查该渠道" : ""}</div>
             </div>
             <label class="toggle-switch" title="${checked ? "已开启" : "已关闭"}">
@@ -3178,7 +3229,7 @@
           ? block
           : '<div class="code-wrap">' +
           '<button class="copy-btn" type="button" data-copy-text="' + escAttr(cmd) + '" aria-label="复制一键命令">' + copyIcon + '</button>' +
-          '<pre><code>' + cmd.replace(/</g, "&lt;") + '</code></pre>' +
+          '<pre><code>' + escHtml(cmd) + '</code></pre>' +
           '</div>' +
           '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">' +
           '<button class="btn btn-ghost btn-sm" type="button" data-copy-text="' + escAttr(d) + '">复制 driver 下载链接</button>' +
@@ -3188,7 +3239,7 @@
           '<div class="hint" style="margin:12px 0 6px">卸载自建驱动（停服务、清 crontab、删文件，不影响其他触发源）：</div>' +
           '<div class="code-wrap">' +
           '<button class="copy-btn" type="button" data-copy-text="' + escAttr(uninstallCmd) + '" aria-label="复制卸载命令">' + copyIcon + '</button>' +
-          '<pre><code>' + uninstallCmd.replace(/</g, "&lt;") + '</code></pre>' +
+          '<pre><code>' + escHtml(uninstallCmd) + '</code></pre>' +
           '</div>';
         box.innerHTML = cmdBlock;
         box.querySelectorAll("[data-copy-text]").forEach(function (btn) {
@@ -3471,11 +3522,13 @@
       $("save-settings").addEventListener("click", async () => {
         const threshold = parseInt($("set-threshold").value, 10);
         const monitor = parseInt($("set-monitor").value, 10);
+        const apiInterval = parseInt($("set-interval").value, 10) || 60;
         if (!(threshold >= 1 && threshold <= 100)) { toast("流量阈值需在 1–100 之间", "err"); return; }
         if (!(monitor >= 1 && monitor <= 1440)) { toast("监控间隔需在 1–1440 分钟之间", "err"); return; }
+        if (!(apiInterval >= 60 && apiInterval <= 86400)) { toast("API 刷新间隔需在 60–86400 秒之间", "err"); return; }
         const settings = {
           trafficThreshold: threshold,
-          apiInterval: parseInt($("set-interval").value, 10) || 60,
+          apiInterval: apiInterval,
           thresholdAction: $("set-action").value,
           shutdownMode: $("set-shutdown").value,
           keepAlive: $("set-keepalive").checked,
@@ -3492,7 +3545,7 @@
       // 日志保留天数：独立保存（写回 D1 settings）
       $("save-retention").addEventListener("click", async () => {
         const days = parseInt($("log-retention").value, 10);
-        if (!(days >= 1 && days <= 3650)) { toast("保留天数需在 1–3650 之间", "err"); return; }
+        if (!(days >= 1 && days <= 365)) { toast("保留天数需在 1–365 之间", "err"); return; }
         const r = await apiJson("/api/v1/config", { method: "PUT", body: JSON.stringify({ logRetentionDays: days }) });
         toast(r.ok ? "日志保留天数已保存，将在下次监控周期生效" : errText(r.data), r.ok ? "ok" : "err");
         if (r.ok) loadConfig();
@@ -3505,7 +3558,7 @@
 
       /* ---------- API 密钥 ---------- */
       function escHtml(s) {
-        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
       }
       function relFromNow(iso) {
         const d = parseDbTime(iso);
@@ -3578,6 +3631,11 @@
         if ($("apikey-scope-ctrl").checked) scopes.push("instance:control");
         if (scopes.length === 0) { toast("请至少勾选一个权限", "err"); return; }
         const expires = $("apikey-expire").value.trim();
+        // m8：与后端同源校验——0/-1 等非法值在后端会被拒，前端提前拦截避免莫名 400
+        if (expires !== "" && !(parseInt(expires, 10) >= 1 && parseInt(expires, 10) <= 3650)) {
+          toast("有效期需为 1~3650 天之间的数字（留空为长期有效）", "err");
+          return;
+        }
         const r = await apiJson("/api/v1/system/api-keys", {
           method: "POST",
           body: JSON.stringify({ name, scopes, expiresDays: expires === "" ? null : parseInt(expires, 10) }),
@@ -3708,11 +3766,22 @@
         logPage = 1;
         loadLogs();
       });
+      // P1-R5-1：日志轮询只看「日志页且页面可见」。原逻辑 TABS.indexOf("logs")>=0 恒真、
+      // 且无 document.hidden 判断，后台标签页仍每 10s 打一次带 COUNT 扫描的请求，
+      // 免费额度下约 7h 可吃满 D1 5M 行/天读配额。
+      function startLogTimer() {
+        stopLogTimer();
+        logTimer = setInterval(function () {
+          if (document.hidden || currentTab !== "logs") return;
+          loadLogs();
+        }, 10000);
+      }
       $("logs-auto").addEventListener("change", function () {
-        if (this.checked && TABS.indexOf("logs") >= 0) {
-          stopLogTimer();
-          logTimer = setInterval(loadLogs, 10000);
-        } else stopLogTimer();
+        if (this.checked) startLogTimer(); else stopLogTimer();
+      });
+      document.addEventListener("visibilitychange", function () {
+        // 切回前台且开着自动刷新时重新起定时器（隐藏期间 stopLogTimer 已被调用也不影响）
+        if (!document.hidden && $("logs-auto").checked) startLogTimer();
       });
       function stopLogTimer() { if (logTimer) { clearInterval(logTimer); logTimer = null; } }
 
@@ -3720,7 +3789,7 @@
        * 每次改动前端后手动更新此值。作用：部署后强刷页面（Ctrl+F5）时看页脚即可
        * 确认浏览器加载的是哪个构建，用于区分「线上已更新但浏览器缓存了旧 JS」——
        * 这是「保存无效 / 新功能不见」类问题的第一排查步骤。 */
-      const APP_BUILD = "20260928-2204";
+      const APP_BUILD = "20260929-2003";
       try {
         const el = document.createElement("div");
         el.style.cssText = "text-align:center;color:var(--muted);font-size:11px;padding:12px 0;opacity:.7";
@@ -3736,7 +3805,7 @@
 
       function escDdns(s) {
         return String(s == null ? "" : s)
-          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
       }
 
       function ddnsMsg(text, kind) {
@@ -4100,7 +4169,7 @@
             { key: "note-static", type: "note", full: true, text: "固定使用排序最靠前的可用机器，无需其他排班参数。", showIf: modeIs("static") },
             { key: "timezone", label: "时区", value: g ? g.timezone : "Asia/Shanghai", placeholder: "Asia/Shanghai", hint: "按此时区判断「今天 / 现在几点」" },
             { key: "switchTime", label: "切换时刻", type: "time", value: g ? g.switch_time : "03:00", hint: "当天的换班时刻；早于它仍算前一天值班的机器", showIf: modeIs("rotate") },
-            { key: "anchorDate", label: "轮换基准日", type: "date", full: true, value: g ? g.anchor_date : todayStr(), hint: "轮换周期从这天算起，改动可改变当前值班机器", showIf: modeIs("rotate") },
+            { key: "anchorDate", label: "轮换基准日", type: "date", full: true, value: g ? (g.anchor_date || "1970-01-01") : todayStr(), hint: "轮换周期从这天算起，改动可改变当前值班机器", showIf: modeIs("rotate") },
             { key: "anchorAt", label: "轮换起点", type: "datetime", full: true, value: g ? (g.anchor_at || "") : nowMinuteStr(), hint: "轮换起点，精确到分钟；留空视为 1970-01-01 00:00", showIf: modeIs("interval") },
             { key: "fallbackIp", label: "兜底 IP（无机器值班时）", value: g ? g.fallback_ip : "", placeholder: "留空则保持原解析" },
           ],
@@ -4124,7 +4193,11 @@
           // 与当前模式无关的字段可能未渲染：回退到原值，避免切模式时把已存参数清掉
           switchTime: ((vals.switchTime || (g ? g.switch_time : "")) || "03:00").trim() || "03:00",
           anchorDate: ((vals.anchorDate || (g ? g.anchor_date : "")) || "1970-01-01").trim() || "1970-01-01",
-          anchorAt: (vals.anchorAt !== undefined ? vals.anchorAt : (g ? (g.anchor_at || "") : "")).trim(),
+          // P1-R5-6：非 interval 模式不提交 anchorAt。modalApplyVisibility 只加 hidden class、
+          // 不清空值，rotate 新建时会把残留的「今天 HH:MM」误写进 anchor_at；这里强制回退原值。
+          anchorAt: vals.mode === "interval"
+            ? (vals.anchorAt !== undefined ? vals.anchorAt : (g ? (g.anchor_at || "") : "")).trim()
+            : (g ? (g.anchor_at || "") : ""),
           fallbackIp: (vals.fallbackIp || "").trim(),
           enabled: g ? g.enabled : true,
         };
@@ -4165,7 +4238,7 @@
             + '<div class="field"><label for="sched-switchTime">切换时刻</label>'
             + dtControlHtml("sched-switchTime", "switchTime", g.switch_time || "03:00", "time") + "</div>"
             + '<div class="field"><label for="sched-anchorDate">轮换基准日</label>'
-            + dtControlHtml("sched-anchorDate", "anchorDate", g.anchor_date || todayStr(), "date") + "</div>"
+            + dtControlHtml("sched-anchorDate", "anchorDate", g.anchor_date || "1970-01-01", "date") + "</div>"
             + '</div><p class="sub-note" style="margin:-4px 0 14px">机器按各自「天数」依次轮转；早于切换时刻仍算前一天值班的机器。</p>';
         } else if (isInterval) {
           params = '<div style="margin-bottom:14px"><div class="field">'
@@ -4273,7 +4346,7 @@
           const st = String(vals.switchTime || "").trim();
           const ad = String(vals.anchorDate || "").trim();
           if (st && st !== (g.switch_time || "")) patch.switchTime = st;
-          if (ad && ad !== (g.anchor_date || "")) patch.anchorDate = ad;
+          if (ad && ad !== (g.anchor_date || "1970-01-01")) patch.anchorDate = ad;
         }
         if (isInterval) {
           const at = String(vals.anchorAt || "").trim();

@@ -168,7 +168,7 @@ const SCHEMA_STATEMENTS: string[] = [
 ];
 
 // 已部署库的增量迁移（ALTER 在列已存在时会报错，需逐条容错执行）
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: string[] = [
   // 账号级停机模式：'' 表示跟随系统全局设置，StopCharging/KeepCharging 覆盖全局
   `ALTER TABLE accounts ADD COLUMN shutdown_mode TEXT NOT NULL DEFAULT ''`,
   // jobs 表早已零引用（通知走 notification_outbox、账单走 billing_cache），直接回收
@@ -181,6 +181,11 @@ const MIGRATIONS: string[] = [
   // 而 updated_at 每次重试都会被刷成当前时间，于是 age 实际衡量的是「距上次重试」——
   // 重试间隔 300s 远小于放弃阈值 24h，记录永远不会被放弃，失败通知会无限重试下去。
   `ALTER TABLE notification_outbox ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0`,
+  // P0-R5-2（修复本轮引入的回归）：上一行只加了列没回填。存量老行 created_at=0 →
+  // NULLIF 得 NULL → COALESCE 退回 updated_at=0 → unixepoch()-0 巨大 → markOutboxRetry
+  // 的放弃判定直接命中 → 部署当口的待发通知首次失败即被标记为 failed、再无重试机会。
+  // 存量行用真实 updated_at（若非 0）回填入队时间，都没有则视作刚入队（unixepoch()）。
+  `UPDATE notification_outbox SET created_at = COALESCE(NULLIF(updated_at, 0), unixepoch()) WHERE created_at = 0`,
 ];
 
 /**

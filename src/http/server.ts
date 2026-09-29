@@ -558,6 +558,20 @@ async function saveConfig(ctx: Context): Promise<Response> {
     // 仅在确实涉及定时字段时才读库（配置保存是低频操作，不为它付常驻开销）。
     let existing: Map<number, Account> | null = null;
     for (const a of b.accounts as Partial<Account>[]) {
+      // P1-R5-3：后端独立校验账号字段。前端已有同名校验，但 /config 是公开写入入口，
+      // 绕过前端直接 POST 可写脏值；其中 maxTraffic=0 会让阈值永不触发、超额不停机。
+      if (a.accessKeyId !== undefined && a.accessKeyId !== '' && !/^LTAI/i.test(String(a.accessKeyId))) {
+        return error('invalid_input', `AccessKey ID 通常以 LTAI 开头：${String(a.accessKeyId).slice(0, 16)}`, 400);
+      }
+      if (a.maxTraffic !== undefined) {
+        const mt = Number(a.maxTraffic);
+        if (!Number.isFinite(mt) || mt <= 0 || mt > 1_000_000) {
+          return error('invalid_input', `流量上限必须是 1~1000000 之间的数字：${a.maxTraffic}`, 400);
+        }
+      }
+      if (a.regionId !== undefined && !String(a.regionId).trim()) {
+        return error('invalid_input', '地域 ID 不能为空', 400);
+      }
       if (a.id) {
         if (a.startTime !== undefined || a.stopTime !== undefined || a.scheduleEnabled !== undefined) {
           if (!existing) {
@@ -677,9 +691,12 @@ async function createApiKeyHandler(ctx: Context): Promise<Response> {
   let expiresAt: string | null = null;
   if (b.expiresDays != null && b.expiresDays !== '') {
     const days = parseInt(String(b.expiresDays), 10);
-    if (Number.isFinite(days) && days > 0) {
-      expiresAt = new Date(Date.now() + days * 86_400_000).toISOString();
+    // m8：0/-1 等非法值不能在「静默降级为永不过期」——安全语义与用户预期相反。
+    // 显式拒绝；合法范围 1~3650 天。不传该字段则保持默认（永不过期）。
+    if (!Number.isFinite(days) || days <= 0 || days > 3650) {
+      return error('invalid_input', 'API Key 有效期必须为 1~3650 天之间的数字', 400);
     }
+    expiresAt = new Date(Date.now() + days * 86_400_000).toISOString();
   }
 
   const tokenPlain = 'cdt_' + newToken(24);
