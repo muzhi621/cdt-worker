@@ -339,17 +339,60 @@ export async function processAccount(
   // （首个相位取配置的初始状态 cycleStartOn，之后每 N 天翻转一次）。
   // 只在「当前状态与目标不符」时下发指令，并用「相位边界 + 动作」幂等键保证同一相位只成功执行
   // 一次；失败删键、下一轮自动重试（与每日定时的补偿语义一致）。
-  // 断档容忍：即使监控在相位切换点宕机，恢复后只要状态与目标不符就会补执行，不会漏掉整个相位。
+  // 断档容忍：相位是持续态（不像每日定时依赖 ±2h 窗口），监控在切换点宕机后恢复，
+  // 只要状态与目标不符就会补执行，不会漏掉整段相位。
   // 放在刷新之后执行，用的是本轮最新的实例状态（与两个补偿块同源）。
   if (cycle && cycle.started && !statusChangedBySchedule && (status === StatusRunning || status === StatusStopped)) {
     const wantStart = cycle.on;
     const mismatched = wantStart ? status === StatusStopped : status === StatusRunning;
     if (mismatched) {
-      const changed = await executeCycleAction(env, config, account, wantStart ? 'start' : 'stop', cycle, now);
-      if (changed) {
+      const action = wantStart ? 'start' : 'stop';
+      const outcome = await executeCycleAction(env, config, account, action, cycle, now);
+      if (outcome === 'done') {
         actions.push(wantStart ? 'cycle_start' : 'cycle_stop');
         status = wantStart ? StatusStarting : StatusStopping;
         statusChangedBySchedule = true; // 抑制本轮保活，避免与刚下发的循环指令冲突
+      } else if (outcome === 'duplicate') {
+        // 本相位已成功执行过一次（幂等键命中），但状态仍偏离目标：期间被手动开/关机，
+        // 或指令发出后并未真正生效。若只靠相位级幂等键，这种偏离会一直挂着直到下一个相位
+        // （与上面「断档补执行」的设计意图相悖，且界面上表现为「循环没按时执行」）。
+        // 故再给一次收敛机会：按「相位 + 日期」去重，同一相位每天最多补发一次，
+        // 既不会每分钟狂发指令，也不会让实例在整个相位里一直停着/开着。
+        const ymd = `${localFields.year}${String(localFields.month).padStart(2, '0')}${String(localFields.day).padStart(2, '0')}`;
+        const fixKey = `cycle-fix:${account.id}:${cycle.boundaryKey}:${action}:${ymd}`;
+        const fresh = await store.recordActionEvent(env, fixKey, account.id, 'cycle_fix_' + action, 'attempting', '');
+        if (fresh) {
+          try {
+            await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
+            status = wantStart ? StatusStarting : StatusStopping;
+            statusChangedBySchedule = true;
+            actions.push(wantStart ? 'cycle_start_fixed' : 'cycle_stop_fixed');
+            await store.addLog(env, 'warning',
+              `循环相位内状态偏离已修正 [${masked(account.accessKeyId)}]：本相位目标为${wantStart ? '开机' : '关机'}，补发${wantStart ? '开机' : '关机'}指令（相位起始 ${cycle.boundaryDate}，每 ${account.cycleDays || 10} 天交替）`);
+          } catch (err) {
+            await store.deleteActionEvent(env, fixKey); // 失败删键，下一轮可再试
+            await store.addLog(env, 'error', `循环相位修正失败 [${masked(account.accessKeyId)}]: ${err}`);
+          }
+        }
+      }
+      // outcome === 'failed'：本轮执行失败，键已删除，下一轮自动重试
+    }
+  }
+
+  // 循环参数非法（脏数据 / 绕过前端直接写 API）时会静默失效：用户以为配好了，
+  // 实际一次都不会执行，且日志里毫无痕迹——这是最难排查的一类「循环没生效」报障。
+  // 按天去抖告警一次，提示去修正基准时间或周期天数。
+  if (account.cycleEnabled && cycle && !cycle.started) {
+    const anchorOk = /^(\d{4})-(\d{2})-(\d{2})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?$/.test(String(account.cycleAnchor || '').trim());
+    const daysOk = Number(account.cycleDays) >= 1;
+    if (!anchorOk || !daysOk) {
+      const ymd = `${localFields.year}${String(localFields.month).padStart(2, '0')}${String(localFields.day).padStart(2, '0')}`;
+      const badKey = `cycle-badcfg:${account.id}:${ymd}`;
+      const fresh = await store.recordActionEvent(env, badKey, account.id, 'cycle_bad_config', 'detected',
+        `anchor=${account.cycleAnchor || ''} days=${account.cycleDays}`);
+      if (fresh) {
+        await store.addLog(env, 'warning',
+          `账号「${account.remark || account.name || masked(account.accessKeyId)}」已启用 N 天循环开关机，但基准时间或周期天数无效，循环不会执行，请到账号配置里修正`);
       }
     }
   }
@@ -573,16 +616,18 @@ async function executeCycleAction(
   action: 'start' | 'stop',
   phase: CyclePhase,
   now: Date,
-): Promise<boolean> {
+): Promise<'done' | 'duplicate' | 'failed'> {
   const key = `cycle:${account.id}:${phase.boundaryKey}:${action}`;
   const fresh = await store.recordActionEvent(env, key, account.id, 'cycle_' + action, 'attempting', '');
-  if (!fresh) return false;
+  // 区分「本相位已执行过」与「本次执行失败」：前者需要走按天去抖的收敛补发，
+  // 后者键已被删除、下一轮重试即可，两者混为一谈会导致失败后同轮重复下发指令。
+  if (!fresh) return 'duplicate';
   try {
     await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
   } catch (err) {
     await store.deleteActionEvent(env, key); // 失败删键，下一轮重试
     await store.addLog(env, 'error', `循环${action === 'start' ? '开机' : '关机'}失败 [${masked(account.accessKeyId)}]: ${err}`);
-    return false;
+    return 'failed';
   }
   const status = action === 'start' ? StatusStarting : StatusStopping;
   await store.updateRuntime(env, account.id, account.trafficUsed, status, new Date().toISOString());
@@ -597,7 +642,7 @@ async function executeCycleAction(
     });
     await store.addOutbox(env, 'notify', event);
   }
-  return true;
+  return 'done';
 }
 
 // 手动控制，等价 control()
