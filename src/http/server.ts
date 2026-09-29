@@ -884,15 +884,24 @@ async function route(env: Env, request: Request): Promise<Response> {
     const expected = await store.resolveCronSecret(env);
     let authorized = false;
     let viaSecret = false;
-    if (expected) {
-      const provided = request.headers.get('X-Cron-Secret') || '';
-      authorized = !!provided && (await constantTimeEqual(expected, provided));
+    // 提到外层：鉴权失败分支要靠它区分「配置好的外部渠道密钥不对」与「无凭证扫描流量」
+    const provided = request.headers.get('X-Cron-Secret') || '';
+    if (expected && provided) {
+      authorized = await constantTimeEqual(expected, provided);
       viaSecret = authorized;
     }
     if (!authorized) {
       // 密钥通道未通过 → 退回管理员会话鉴权
       const principal = await authenticate(env, request);
       if (!principal?.admin) {
+        // 鉴权失败留痕：过去这里完全不打日志，导致「渠道在调但密钥不对」与「渠道根本没调」
+        // 在日志页长得一模一样（都只表现为断档），排障只能靠挨个试。只对「带了密钥来」的
+        // 调用留痕——不带密钥的绝大多数是扫描流量，留痕会被刷爆 D1 写与日志页。
+        if (provided) {
+          await noteCronAuthFailed(env, normalizeSource(
+            url.searchParams.get('source') || request.headers.get('X-Trigger-Source'),
+          ));
+        }
         return error('unauthorized', 'cron 触发需要有效密钥或管理员登录', 401);
       }
       authorized = true;
@@ -1167,6 +1176,21 @@ async function testTrigger(ctx: Context): Promise<Response> {
   });
 }
 
+// 鉴权失败留痕（每渠道每小时至多一条）：
+// 场景是「外部渠道配的密钥与当前 CRON_SECRET 不一致」——典型成因是管理台改过密钥但
+// 渠道侧没同步、或函数/容器重建后环境变量丢失（CDT_SECRET 变空串 → 必 401）。
+// 这时渠道其实一直在按点调用，只是全被 401 挡回，trigger_seen 永不刷新，UI 上只表现为
+// 「断档」，与「渠道彻底没调」完全无法区分，本函数就是补这个可观测性缺口。
+export async function noteCronAuthFailed(env: Env, source: TriggerSource): Promise<void> {
+  const hour = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH
+  const key = `trigger_authfail:${source}:${hour}`;
+  if (await store.recordActionEvent(env, key, 0, 'trigger', 'authfail', '')) {
+    await store.addLog(env, 'warning',
+      `触发源「${TRIGGER_LABELS[source]}」调用了监控接口但密钥校验失败（已 401 拒绝）：` +
+      '请核对该渠道配置的密钥是否与当前触发密钥一致（改过密钥后所有渠道都需手动同步，旧值会立即 401）');
+  }
+}
+
 // 渠道被关闭时的留痕（每个渠道每小时至多一条，避免刷屏）
 export async function noteTriggerDisabled(env: Env, source: TriggerSource): Promise<void> {
   const hour = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH
@@ -1215,7 +1239,14 @@ export async function runMonitorCycle(
   const nowSec = Math.floor(Date.now() / 1000);
   const sinceLastRun = state.lastRun > 0 ? nowSec - state.lastRun : Infinity;
   if (!force && sinceLastRun < debounceSeconds) {
-    return json({ monitored: 0, skipped: true, next_in_seconds: debounceSeconds - sinceLastRun });
+    // 回显 source：跳过响应原本看不出「这轮是谁叫起来的、记到了哪个渠道」，
+    // 排障时无法自证（本次华为渠道断档排查就卡在这里）。与成功分支的 source 字段对齐。
+    return json({
+      monitored: 0,
+      skipped: true,
+      source: source ?? 'manual',
+      next_in_seconds: debounceSeconds - sinceLastRun,
+    });
   }
 
   // 断档告警门控：只在「整点 / 半点」检查。
@@ -1228,7 +1259,7 @@ export async function runMonitorCycle(
   // 原子抢占监控槽位：并发触发（外部服务 + 原生 Cron + 前台按钮同时打过来）时
   // 只有一个能把 last_monitor_run 写成当前时间，其余在此返回 skipped。
   if (!(await store.tryAcquireMonitorSlot(env, force ? 0 : debounceSeconds))) {
-    return json({ monitored: 0, skipped: true, next_in_seconds: 0 });
+    return json({ monitored: 0, skipped: true, source: source ?? 'manual', next_in_seconds: 0 });
   }
   const config = await store.getConfig(env);
   const started = Date.now();
