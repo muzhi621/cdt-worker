@@ -20,6 +20,9 @@ export interface Account {
   cycleEnabled: boolean;
   cycleAnchor: string;
   cycleDays: number;
+  // 循环首个相位的状态：true=开机（默认）/ false=关机。之后每 N 天交替。
+  // 没有它就无法确定基准时刻是「开机起点」还是「关机起点」，首个相位行为不确定。
+  cycleStartOn: boolean;
   keepAlive: boolean;
   // 账号级停机模式：'' 跟随系统全局设置；'KeepCharging'|'StopCharging' 覆盖全局
   shutdownMode: string;

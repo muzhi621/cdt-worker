@@ -406,6 +406,12 @@ export async function listAccounts(env: Env): Promise<Account[]> {
       cycleEnabled: getBool(r, 'cycle_enabled'),
       cycleAnchor: getString(r, 'cycle_anchor'),
       cycleDays: getNumber(r, 'cycle_days') || 10,
+      // 缺省必须按「开机」解释：该列由 MIGRATIONS 后加，若冷启动尚未跑到迁移（或未来
+      // 有人手工建表漏列），getBool 会把 undefined 读成 false，于是已配置的循环账号被
+      // 静默反相（首个 N 天本该开机却变成关机）——这是最难排查的一类线上事故。
+      cycleStartOn: r.cycle_start_on === undefined || r.cycle_start_on === null
+        ? true
+        : !!r.cycle_start_on,
       keepAlive: getBool(r, 'keep_alive'),
       shutdownMode: getString(r, 'shutdown_mode'),
       instanceStatus: getString(r, 'instance_status'),
@@ -428,14 +434,16 @@ export async function saveAccount(env: Env, account: Omit<Account, 'id'> & { id?
   // keepAlive 未显式指定时默认开启：账号级保活是「全局开关之上的收窄」，默认跟随全局。
   // 之前前端不提交该字段，统一被写成 0，导致账号级开关形同虚设。
   const keepAlive = account.keepAlive === undefined ? true : account.keepAlive;
+  const cycleStartOn = account.cycleStartOn === undefined ? true : account.cycleStartOn;
   if (account.id) {
     await env.DB.prepare(
-      `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, access_key_id_enc=?, access_key_secret_enc=?, site_type=?, max_traffic=?, start_time=?, stop_time=?, schedule_enabled=?, cycle_enabled=?, cycle_anchor=?, cycle_days=?, keep_alive=?, shutdown_mode=?, updated_at=? WHERE id=?`,
+      `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, access_key_id_enc=?, access_key_secret_enc=?, site_type=?, max_traffic=?, start_time=?, stop_time=?, schedule_enabled=?, cycle_enabled=?, cycle_anchor=?, cycle_days=?, cycle_start_on=?, keep_alive=?, shutdown_mode=?, updated_at=? WHERE id=?`,
     ).bind(
       name, remark, account.regionId, instanceId,
       akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
       account.scheduleEnabled ? 1 : 0,
       account.cycleEnabled ? 1 : 0, account.cycleAnchor ?? '', account.cycleDays ?? 10,
+      cycleStartOn ? 1 : 0,
       keepAlive ? 1 : 0, account.shutdownMode ?? '',
       // 统一用带 Z 后缀的 ISO：datetime('now') 写入的是 UTC 无后缀字符串，前端 new Date
       // 会按浏览器本地时区解析，东八区恰好差 8 小时（账号卡片「更新 15:30」实为 23:30）
@@ -444,12 +452,13 @@ export async function saveAccount(env: Env, account: Omit<Account, 'id'> & { id?
     return account.id;
   }
   const result = await env.DB.prepare(
-    `INSERT INTO accounts (name, remark, region_id, instance_id, access_key_id_enc, access_key_secret_enc, site_type, max_traffic, start_time, stop_time, schedule_enabled, cycle_enabled, cycle_anchor, cycle_days, keep_alive, shutdown_mode, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO accounts (name, remark, region_id, instance_id, access_key_id_enc, access_key_secret_enc, site_type, max_traffic, start_time, stop_time, schedule_enabled, cycle_enabled, cycle_anchor, cycle_days, cycle_start_on, keep_alive, shutdown_mode, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).bind(
     name, remark, account.regionId, instanceId,
     akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
     account.scheduleEnabled ? 1 : 0,
     account.cycleEnabled ? 1 : 0, account.cycleAnchor ?? '', account.cycleDays ?? 10,
+    cycleStartOn ? 1 : 0,
     keepAlive ? 1 : 0, account.shutdownMode ?? '',
     new Date().toISOString(),
   ).run();
@@ -476,12 +485,14 @@ export async function updateAccountConfig(env: Env, a: Partial<Account> & { id: 
   const hasCycleEnabled = a.cycleEnabled !== undefined;
   const hasCycleAnchor = a.cycleAnchor !== undefined;
   const hasCycleDays = a.cycleDays !== undefined;
+  const hasCycleStartOn = a.cycleStartOn !== undefined;
   const sql =
     `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, site_type=?, max_traffic=?, schedule_enabled=?, start_time=?, stop_time=?, shutdown_mode=?` +
     (hasKeepAlive ? ', keep_alive=?' : '') +
     (hasCycleEnabled ? ', cycle_enabled=?' : '') +
     (hasCycleAnchor ? ', cycle_anchor=?' : '') +
     (hasCycleDays ? ', cycle_days=?' : '') +
+    (hasCycleStartOn ? ', cycle_start_on=?' : '') +
     (akEnc ? ', access_key_id_enc=?' : '') +
     (skEnc ? ', access_key_secret_enc=?' : '') +
     // updated_at 与 updateRuntime 一致用带 Z 的 ISO；datetime('now') 是 UTC 无后缀，
@@ -495,6 +506,7 @@ export async function updateAccountConfig(env: Env, a: Partial<Account> & { id: 
   if (hasCycleEnabled) vals.push(a.cycleEnabled ? 1 : 0);
   if (hasCycleAnchor) vals.push(a.cycleAnchor ?? '');
   if (hasCycleDays) vals.push(a.cycleDays ?? 10);
+  if (hasCycleStartOn) vals.push(a.cycleStartOn === false ? 0 : 1);
   if (akEnc) vals.push(akEnc);
   if (skEnc) vals.push(skEnc);
   // updated_at 排在全部动态列之后，与 SQL 拼接顺序一致

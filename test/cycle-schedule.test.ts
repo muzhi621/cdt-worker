@@ -60,6 +60,32 @@ describe('cyclePhase（基准时间 + N 天循环开关机）', () => {
     expect(at.boundaryDate).toBe('2026-10-10');
   });
 
+  it('初始状态=关机 时，首个 N 天为关机相位（基准时间决定「从哪个状态起步」）', () => {
+    const off = cyclePhase(sh(2026, 9, 30, 0, 0), TZ, anchor, 10, false);
+    expect(off.started).toBe(true);
+    expect(off.on).toBe(false); // 首段关机
+    expect(off.boundaryDate).toBe('2026-09-30');
+    // 第 2 个 N 天翻转为开机
+    const second = cyclePhase(sh(2026, 10, 10, 0, 0), TZ, anchor, 10, false);
+    expect(second.on).toBe(true);
+    expect(second.boundaryDate).toBe('2026-10-10');
+    // 第 3 个 N 天再回到关机
+    expect(cyclePhase(sh(2026, 10, 20, 0, 0), TZ, anchor, 10, false).on).toBe(false);
+  });
+
+  it('初始状态同一时刻下完全反相（开/关互为取反）', () => {
+    for (const d of [0, 1, 9, 10, 19, 20, 29]) {
+      const t = sh(2026, 9, 30 + d, 12, 0);
+      expect(cyclePhase(t, TZ, anchor, 10, true).on)
+        .toBe(!cyclePhase(t, TZ, anchor, 10, false).on);
+    }
+  });
+
+  it('未传初始状态时默认开机（与数据库 DEFAULT 1 / 引擎缺省一致）', () => {
+    expect(cyclePhase(sh(2026, 9, 30, 0, 0), TZ, anchor, 10).on).toBe(true);
+    expect(cyclePhase(sh(2026, 10, 10, 0, 0), TZ, anchor, 10).on).toBe(false);
+  });
+
   it('N=1 时逐日交替', () => {
     expect(cyclePhase(sh(2026, 9, 30, 12, 0), TZ, anchor, 1).on).toBe(true);
     expect(cyclePhase(sh(2026, 10, 1, 12, 0), TZ, anchor, 1).on).toBe(false);

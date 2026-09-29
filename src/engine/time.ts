@@ -140,7 +140,7 @@ function zonedDay(date: Date, timezone: string): { date: string; minutes: number
 export interface CyclePhase {
   /** 是否已到达基准时间（未到达时引擎不做任何启停） */
   started: boolean;
-  /** 当前相位是否应为「开机」状态（第 1 相位为开机，之后每 N 天交替） */
+  /** 当前相位是否应为「开机」状态（首个相位取配置的初始状态，之后每 N 天交替） */
   on: boolean;
   /** 当前相位起点的日期 YYYYMMDD，用于幂等键（同一相位边界只执行一次） */
   boundaryKey: string;
@@ -156,15 +156,26 @@ const EMPTY_CYCLE_PHASE: CyclePhase = { started: false, on: false, boundaryKey: 
  * 「基准时间 + N 天循环开关机」相位判定（纯函数，无 D1 / cloudflare 依赖，可独立单测）。
  *
  * 语义：从 anchor（"YYYY-MM-DD HH:mm[:ss]"，按配置时区解释）起，以 N 天为一个相位，
- * **开机 / 关机交替**：第 1 个 N 天为开机相位，第 2 个为关机相位，第 3 个再开机……如此循环。
- * 例：anchor = 2026-09-30 00:00、N = 10 →
+ * **开机 / 关机交替**。首个相位（第 1 个 N 天）的状态由 startOn 决定：
+ *   startOn = true  → 09-30 起开机 N 天，然后关机 N 天，再开机……（默认）
+ *   startOn = false → 09-30 起关机 N 天，然后开机 N 天，再关机……
+ * 例：anchor = 2026-09-30 00:00、N = 10、startOn = true →
  *   09-30 ~ 10-09 开机、10-10 ~ 10-19 关机、10-20 ~ 10-29 开机……（转换点每 10 天一次，落在 anchor 的时刻上）
+ *
+ * 为什么需要 startOn：只给「基准时间 + N 天」无法定义循环从哪个状态起步——
+ * 基准时刻到底是「开机起点」还是「关机起点」必须有显式约定，否则首个相位的行为不确定。
  *
  * 时区：按传入的 IANA 时区判定「今天是哪天 / 现在几点」，与每日定时一致，避免 UTC 错位整天。
  *
  * 早于基准时间（含基准日当天但未到基准时刻）→ started = false，引擎保持现状不动作。
  */
-export function cyclePhase(now: Date, timezone: string, anchor: string, days: number): CyclePhase {
+export function cyclePhase(
+  now: Date,
+  timezone: string,
+  anchor: string,
+  days: number,
+  startOn = true,
+): CyclePhase {
   const n = Math.floor(Number(days));
   if (!Number.isFinite(n) || n < 1) return { ...EMPTY_CYCLE_PHASE };
   const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/.exec(String(anchor || '').trim());
@@ -182,7 +193,8 @@ export function cyclePhase(now: Date, timezone: string, anchor: string, days: nu
   if (offsetDays < 0) return { ...EMPTY_CYCLE_PHASE };
 
   const k = Math.floor(offsetDays / n);
-  const on = k % 2 === 0; // 第 0 相位（首个 N 天）开机，之后交替
+  // 第 0 相位（首个 N 天）取初始状态 startOn，之后每 N 天翻转一次
+  const on = (k % 2 === 0) === startOn;
   const boundaryDayMs = anchorMs + k * n * 86400000;
   const boundaryDate = new Date(boundaryDayMs).toISOString().slice(0, 10);
   return {

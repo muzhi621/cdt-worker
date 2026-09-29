@@ -25,6 +25,7 @@ const SCHEMA_STATEMENTS: string[] = [
     cycle_enabled INTEGER NOT NULL DEFAULT 0,
     cycle_anchor TEXT NOT NULL DEFAULT '',
     cycle_days INTEGER NOT NULL DEFAULT 10,
+    cycle_start_on INTEGER NOT NULL DEFAULT 1,
     keep_alive INTEGER NOT NULL DEFAULT 0,
     instance_status TEXT NOT NULL DEFAULT 'Unknown',
     traffic_used REAL NOT NULL DEFAULT 0,
@@ -186,6 +187,9 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE accounts ADD COLUMN cycle_enabled INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE accounts ADD COLUMN cycle_anchor TEXT NOT NULL DEFAULT ''`,
   `ALTER TABLE accounts ADD COLUMN cycle_days INTEGER NOT NULL DEFAULT 10`,
+  // 循环首个相位的状态：1=开机（默认）/ 0=关机。默认 1 保证老数据升级后行为不变
+  // （历史语义就是「首个 N 天开机」），不会被静默反相。
+  `ALTER TABLE accounts ADD COLUMN cycle_start_on INTEGER NOT NULL DEFAULT 1`,
   // jobs 表早已零引用（通知走 notification_outbox、账单走 billing_cache），直接回收
   `DROP TABLE IF EXISTS jobs`,
   // 解析记录改为引用独立凭据：新增 credential_id（0 表示尚未绑定凭据）

@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   cycle_enabled INTEGER NOT NULL DEFAULT 0,   -- 基准时间+N天循环开关机（与每日定时互斥）
   cycle_anchor TEXT NOT NULL DEFAULT '',      -- 基准时间 "YYYY-MM-DD HH:mm:ss"（按全局时区解释）
   cycle_days INTEGER NOT NULL DEFAULT 10,     -- 一个相位的天数
+  cycle_start_on INTEGER NOT NULL DEFAULT 1,   -- 循环首个相位状态：1=开机（默认）/ 0=关机
   keep_alive INTEGER NOT NULL DEFAULT 0,
   instance_status TEXT NOT NULL DEFAULT 'Unknown',
   traffic_used REAL NOT NULL DEFAULT 0,

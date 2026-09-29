@@ -1155,11 +1155,19 @@
                 <input type="checkbox" id="ak-cycle" data-page-node-id="AK-CYCLE-INPUT" />
                 按基准时间每 N 天交替开/关机
               </label>
-              <p class="hint">与「每日定时开关机」互斥，只能启用其一。首个 N 天为开机，之后每 N 天在开/关机之间交替。</p>
+              <p class="hint">与「每日定时开关机」互斥，只能启用其一。首个 N 天为「循环初始状态」，之后每 N 天在开/关机之间交替。</p>
             </div>
             <div class="field" id="ak-cycle-anchor-field" data-page-node-id="AK-CYCLE-ANCHOR-BLOCK">
               <label for="ak-cycle-anchor" data-page-node-id="AK-CYCLE-ANCHOR-LBL">循环基准时间（按配置时区）</label>
               <input id="ak-cycle-anchor" class="control" type="datetime-local" step="1" data-page-node-id="AK-CYCLE-ANCHOR-INPUT" />
+            </div>
+            <div class="field" id="ak-cycle-initial-field" data-page-node-id="AK-CYCLE-INITIAL-BLOCK">
+              <label for="ak-cycle-initial" data-page-node-id="AK-CYCLE-INITIAL-LBL">循环初始状态（基准时间所在相位）</label>
+              <select id="ak-cycle-initial" class="control" data-page-node-id="AK-CYCLE-INITIAL-INPUT">
+                <option value="on" selected>开机</option>
+                <option value="off">关机</option>
+              </select>
+              <p class="hint">决定循环从哪个状态起步：基准时间起的第 1 个 N 天为该状态，之后每 N 天交替。</p>
             </div>
             <div class="field" id="ak-cycle-days-field" data-page-node-id="AK-CYCLE-DAYS-BLOCK">
               <label for="ak-cycle-days" data-page-node-id="AK-CYCLE-DAYS-LBL">循环周期（天）</label>
@@ -1862,11 +1870,19 @@
                 <input type="checkbox" id="ed-cycle" />
                 按基准时间每 N 天交替开/关机
               </label>
-              <p class="hint">与「每日定时开关机」互斥，只能启用其一。首个 N 天为开机，之后每 N 天在开/关机之间交替。</p>
+              <p class="hint">与「每日定时开关机」互斥，只能启用其一。首个 N 天为「循环初始状态」，之后每 N 天在开/关机之间交替。</p>
             </div>
             <div class="field" id="ed-cycle-anchor-field">
               <label for="ed-cycle-anchor">循环基准时间（按配置时区）</label>
               <input id="ed-cycle-anchor" class="control" type="datetime-local" step="1" />
+            </div>
+            <div class="field" id="ed-cycle-initial-field">
+              <label for="ed-cycle-initial">循环初始状态（基准时间所在相位）</label>
+              <select id="ed-cycle-initial" class="control">
+                <option value="on" selected>开机</option>
+                <option value="off">关机</option>
+              </select>
+              <p class="hint">决定循环从哪个状态起步：基准时间起的第 1 个 N 天为该状态，之后每 N 天交替。</p>
             </div>
             <div class="field" id="ed-cycle-days-field">
               <label for="ed-cycle-days">循环周期（天）</label>
@@ -2867,6 +2883,7 @@
         $("ak-start-field").style.display = daily ? "" : "none";
         $("ak-stop-field").style.display = daily ? "" : "none";
         $("ak-cycle-anchor-field").style.display = cyc ? "" : "none";
+        $("ak-cycle-initial-field").style.display = cyc ? "" : "none";
         $("ak-cycle-days-field").style.display = cyc ? "" : "none";
         if (cyc && !$("ak-cycle-anchor").value) $("ak-cycle-anchor").value = nowLocalDatetime();
       }
@@ -2876,6 +2893,7 @@
         $("ed-start-field").style.display = daily ? "" : "none";
         $("ed-stop-field").style.display = daily ? "" : "none";
         $("ed-cycle-anchor-field").style.display = cyc ? "" : "none";
+        $("ed-cycle-initial-field").style.display = cyc ? "" : "none";
         $("ed-cycle-days-field").style.display = cyc ? "" : "none";
         if (cyc && !$("ed-cycle-anchor").value) $("ed-cycle-anchor").value = nowLocalDatetime();
       }
@@ -2909,6 +2927,7 @@
           paintRegionList($("ak-site").value);
           $("ak-cycle").checked = false;
           $("ak-cycle-anchor").value = nowLocalDatetime();
+          $("ak-cycle-initial").value = "on";
           $("ak-cycle-days").value = "10";
           syncScheduleFields();
         }, 0);
@@ -2929,6 +2948,8 @@
           stopTime: $("ak-stop").value || "23:00",
           cycleEnabled: $("ak-cycle").checked,
           cycleAnchor: dtLocalToStore($("ak-cycle-anchor").value),
+          // 初始状态决定首个 N 天是开机还是关机，缺省「开机」（与后端默认值一致）
+          cycleStartOn: $("ak-cycle-initial").value !== "off",
           cycleDays: parseInt($("ak-cycle-days").value, 10) || 10,
           remark: $("ak-remark").value.trim(),
         };
@@ -2990,7 +3011,7 @@
         tbody.innerHTML = list.map((a) => {
           const sched = a.cycleEnabled
             ? '<span style="color:var(--accent);font-weight:600">循环 ' + esc(String(a.cycleDays || 10)) + " 天</span>"
-              + '<div class="mono" style="font-size:11.5px;color:var(--muted)">' + esc(a.cycleAnchor || "") + "</div>"
+              + '<div class="mono" style="font-size:11.5px;color:var(--muted)">' + esc(a.cycleAnchor || "") + " 起 · 首段" + (a.cycleStartOn === false ? "关机" : "开机") + "</div>"
             : a.scheduleEnabled
               ? '<span style="color:var(--success);font-weight:600">' + esc(a.startTime || "08:00") + " → " + esc(a.stopTime || "23:00") + "</span>"
               : '<span style="color:var(--muted)">未启用</span>';
@@ -3047,6 +3068,8 @@
         // 方便用户编辑已有账号时直接勾选启用（日期时间取当前打开时间，可再调整）。
         $("ed-cycle").checked = !!a.cycleEnabled;
         $("ed-cycle-anchor").value = dtStoreToLocal(a.cycleAnchor) || nowLocalDatetime();
+        // 初始状态：老数据无该字段时按「开机」解释，与后端 DEFAULT 1 / 引擎缺省语义一致
+        $("ed-cycle-initial").value = a.cycleStartOn === false ? "off" : "on";
         $("ed-cycle-days").value = String(a.cycleDays || 10);
         // 老数据可能没有该字段：跟随全局保活策略视为开启，避免升级后某账号被静默关掉保活
         $("ed-keepalive").checked = a.keepAlive !== false;
@@ -3103,6 +3126,7 @@
           stopTime: $("ed-stop").value || "23:00",
           cycleEnabled,
           cycleAnchor,
+          cycleStartOn: $("ed-cycle-initial").value !== "off",
           cycleDays,
           // AK/SK 留空 → 后端保留旧值
           accessKeyId: $("ed-akid").value.trim(),
@@ -3921,7 +3945,7 @@
        * 每次改动前端后手动更新此值。作用：部署后强刷页面（Ctrl+F5）时看页脚即可
        * 确认浏览器加载的是哪个构建，用于区分「线上已更新但浏览器缓存了旧 JS」——
        * 这是「保存无效 / 新功能不见」类问题的第一排查步骤。 */
-      const APP_BUILD = "20260929-2310";
+      const APP_BUILD = "20260929-2330";
       try {
         const el = document.createElement("div");
         el.style.cssText = "text-align:center;color:var(--muted);font-size:11px;padding:12px 0;opacity:.7";

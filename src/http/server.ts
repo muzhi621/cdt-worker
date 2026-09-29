@@ -625,6 +625,12 @@ async function saveConfig(ctx: Context): Promise<Response> {
           && !RE_CYCLE_ANCHOR.test(String(a.cycleAnchor).trim())) {
         return error('invalid_input', `循环基准时间格式应为 YYYY-MM-DD HH:mm:ss：${a.cycleAnchor}`, 400);
       }
+      // 循环首个相位的初始状态：API 客户端可能传字符串/0-1，统一归一化成布尔；
+      // 未传则不写库（保持原值），避免只改备注的请求把初始状态重置成「开」。
+      if (a.cycleStartOn !== undefined) {
+        const raw = a.cycleStartOn as unknown;
+        a.cycleStartOn = raw === true || raw === 'true' || raw === 1 || raw === '1';
+      }
       // 「每日定时」与「N 天循环」互斥：同一账号只能启用其一。
       // 两者同时为 true 视为误配直接拒绝；否则以本次显式开启的那个为准，自动关闭另一个。
       if (a.scheduleEnabled === true && a.cycleEnabled === true) {
@@ -869,6 +875,7 @@ async function notifyTestHandler(ctx: Context): Promise<Response> {
       '关机时间': sample.cycleEnabled ? `循环模式（每 ${sample.cycleDays || 10} 天交替）` : (sample.scheduleEnabled ? (sample.stopTime || '23:00') : '未启用'),
       '循环基准时间': sample.cycleEnabled ? (sample.cycleAnchor || '') : '',
       '循环周期(天)': sample.cycleEnabled ? String(sample.cycleDays || 10) : '',
+      '循环初始状态': sample.cycleEnabled ? (sample.cycleStartOn === false ? '关机' : '开机') : '',
       '已用流量': `${used.toFixed(2)} GB`,
       '流量上限': `${total.toFixed(2)} GB`,
       '剩余流量': `${Math.max(0, total - used).toFixed(2)} GB`,

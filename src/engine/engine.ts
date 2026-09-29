@@ -104,6 +104,7 @@ function accountVars(
     '关机时间': account.cycleEnabled ? `循环模式（每 ${account.cycleDays || 10} 天交替）` : (account.scheduleEnabled ? scheduleWindow(account).stop : '未启用'),
     '循环基准时间': account.cycleEnabled ? (account.cycleAnchor || '') : '',
     '循环周期(天)': account.cycleEnabled ? String(account.cycleDays || 10) : '',
+    '循环初始状态': account.cycleEnabled ? (account.cycleStartOn === false ? '关机' : '开机') : '',
     '已用流量': `${ctx.traffic.toFixed(2)} GB`,
     '流量上限': `${account.maxTraffic.toFixed(2)} GB`,
     '剩余流量': `${remaining.toFixed(2)} GB`,
@@ -163,8 +164,10 @@ export async function processAccount(
   // 「基准时间 + N 天循环开关机」当前相位（未启用则为 null）。
   // 与每日定时互斥（服务端在写入时保证不会同时开启），故两者最多只有一个生效。
   // 相位按配置时区判定，与每日定时「按配置时区开关机」语义一致。
+  // 首个相位的状态由账号配置决定（cycleStartOn，缺省开机）；只给「基准时间 + N 天」
+  // 无法定义循环从哪个状态起步，必须有这个显式初始状态。
   const cycle: CyclePhase | null = account.cycleEnabled
-    ? cyclePhase(now, config.timezone, account.cycleAnchor, account.cycleDays)
+    ? cyclePhase(now, config.timezone, account.cycleAnchor, account.cycleDays, account.cycleStartOn !== false)
     : null;
 
   // 定时开关机
@@ -332,7 +335,8 @@ export async function processAccount(
     }
   }
 
-  // 「基准时间 + N 天循环开关机」执行：目标状态由相位推导（偶数相位开机 / 奇数相位关机）。
+  // 「基准时间 + N 天循环开关机」执行：目标状态由相位推导
+  // （首个相位取配置的初始状态 cycleStartOn，之后每 N 天翻转一次）。
   // 只在「当前状态与目标不符」时下发指令，并用「相位边界 + 动作」幂等键保证同一相位只成功执行
   // 一次；失败删键、下一轮自动重试（与每日定时的补偿语义一致）。
   // 断档容忍：即使监控在相位切换点宕机，恢复后只要状态与目标不符就会补执行，不会漏掉整个相位。
@@ -696,6 +700,7 @@ export async function summary(env: Env) {
       cycleEnabled: !!account.cycleEnabled,
       cycleAnchor: account.cycleAnchor || '',
       cycleDays: account.cycleDays || 10,
+      cycleStartOn: account.cycleStartOn !== false,
       // 保活开启时后端会拒绝手动关机（config.keepAlive && 账号级保活未关），
       // 前端据此禁用按钮并给出原因，避免"点了没反应"的困惑
       keepAliveBlocked: isKeepAliveOn(config, account),
