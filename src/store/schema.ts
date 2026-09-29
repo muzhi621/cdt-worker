@@ -179,33 +179,57 @@ const SCHEMA_STATEMENTS: string[] = [
 ];
 
 // 已部署库的增量迁移（ALTER 在列已存在时会报错，需逐条容错执行）
-export const MIGRATIONS: string[] = [
+//
+// 为什么拆成 ADD_COLUMNS / OTHER_MIGRATIONS 两份：
+// ensureSchema 每次冷启动都要跑一遍迁移。加列类迁移对**已升级过的库**必然因「列已存在」
+// 失败并被 catch 吞掉——但失败的 ALTER 照样消耗一次 D1 调用。迁移条目累积到 10 条后，
+// 这笔固定开销会挤占单次请求 50 subrequest 的预算（cron 每 5 分钟一轮，isolate 常已回收）。
+// 故对加列类迁移先按表查一次 PRAGMA table_info 缓存列名，列已存在就整条跳过。
+//
+// 为什么 MIGRATIONS 仍由这两份拼装而成（而不是让调用方改用新结构）：
+// test/outbox-backfill.test.ts 直接 import MIGRATIONS 并断言「ADD COLUMN created_at 必须排在
+// 回填 UPDATE 之前」——顺序即正确性（先加列才能回填）。拼装保证数组内容与顺序不变，
+// 且 SQL 字符串仍只有这一份，不会两处维护后漂移。
+const ADD_COLUMNS: { sql: string; table: string; column: string }[] = [
   // 账号级停机模式：'' 表示跟随系统全局设置，StopCharging/KeepCharging 覆盖全局
-  `ALTER TABLE accounts ADD COLUMN shutdown_mode TEXT NOT NULL DEFAULT ''`,
+  { table: 'accounts', column: 'shutdown_mode', sql: `ALTER TABLE accounts ADD COLUMN shutdown_mode TEXT NOT NULL DEFAULT ''` },
   // 「基准时间 + N 天循环开关机」：与每日定时（schedule_enabled）互斥。
   // cycle_anchor 为基准时间 "YYYY-MM-DD HH:mm:ss"（按全局时区解释）；cycle_days 为一个相位的天数。
-  `ALTER TABLE accounts ADD COLUMN cycle_enabled INTEGER NOT NULL DEFAULT 0`,
-  `ALTER TABLE accounts ADD COLUMN cycle_anchor TEXT NOT NULL DEFAULT ''`,
-  `ALTER TABLE accounts ADD COLUMN cycle_days INTEGER NOT NULL DEFAULT 10`,
+  { table: 'accounts', column: 'cycle_enabled', sql: `ALTER TABLE accounts ADD COLUMN cycle_enabled INTEGER NOT NULL DEFAULT 0` },
+  { table: 'accounts', column: 'cycle_anchor', sql: `ALTER TABLE accounts ADD COLUMN cycle_anchor TEXT NOT NULL DEFAULT ''` },
+  { table: 'accounts', column: 'cycle_days', sql: `ALTER TABLE accounts ADD COLUMN cycle_days INTEGER NOT NULL DEFAULT 10` },
   // 循环首个相位的状态：1=开机（默认）/ 0=关机。默认 1 保证老数据升级后行为不变
   // （历史语义就是「首个 N 天开机」），不会被静默反相。
-  `ALTER TABLE accounts ADD COLUMN cycle_start_on INTEGER NOT NULL DEFAULT 1`,
-  // jobs 表早已零引用（通知走 notification_outbox、账单走 billing_cache），直接回收
-  `DROP TABLE IF EXISTS jobs`,
+  { table: 'accounts', column: 'cycle_start_on', sql: `ALTER TABLE accounts ADD COLUMN cycle_start_on INTEGER NOT NULL DEFAULT 1` },
   // 解析记录改为引用独立凭据：新增 credential_id（0 表示尚未绑定凭据）
-  `ALTER TABLE ddns_records ADD COLUMN credential_id INTEGER NOT NULL DEFAULT 0`,
+  { table: 'ddns_records', column: 'credential_id', sql: `ALTER TABLE ddns_records ADD COLUMN credential_id INTEGER NOT NULL DEFAULT 0` },
   // 分组新增「基准时间」（interval 模式：精确到分钟的轮换起点）
-  `ALTER TABLE ddns_groups ADD COLUMN anchor_at TEXT NOT NULL DEFAULT ''`,
+  { table: 'ddns_groups', column: 'anchor_at', sql: `ALTER TABLE ddns_groups ADD COLUMN anchor_at TEXT NOT NULL DEFAULT ''` },
   // P1-11：outbox 增加入队时间。此前「超过 24 小时放弃」用的是 updated_at，
   // 而 updated_at 每次重试都会被刷成当前时间，于是 age 实际衡量的是「距上次重试」——
   // 重试间隔 300s 远小于放弃阈值 24h，记录永远不会被放弃，失败通知会无限重试下去。
-  `ALTER TABLE notification_outbox ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0`,
+  { table: 'notification_outbox', column: 'created_at', sql: `ALTER TABLE notification_outbox ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0` },
+];
+
+// 非加列类迁移：无法用「列是否存在」跳过，仍需逐条容错执行。
+const OTHER_MIGRATIONS: string[] = [
+  // jobs 表早已零引用（通知走 notification_outbox、账单走 billing_cache），直接回收
+  `DROP TABLE IF EXISTS jobs`,
   // P0-R5-2（修复本轮引入的回归）：上一行只加了列没回填。存量老行 created_at=0 →
   // NULLIF 得 NULL → COALESCE 退回 updated_at=0 → unixepoch()-0 巨大 → markOutboxRetry
   // 的放弃判定直接命中 → 部署当口的待发通知首次失败即被标记为 failed、再无重试机会。
   // 存量行用真实 updated_at（若非 0）回填入队时间，都没有则视作刚入队（unixepoch()）。
+  // 顺序要求：必须排在 ADD_COLUMNS 的 created_at 之后（先有列才能回填）。
   `UPDATE notification_outbox SET created_at = COALESCE(NULLIF(updated_at, 0), unixepoch()) WHERE created_at = 0`,
 ];
+
+export const MIGRATIONS: string[] = [
+  ...ADD_COLUMNS.map((c) => c.sql),
+  ...OTHER_MIGRATIONS,
+];
+
+/** sql → 所属表/列，供 ensureSchema 决定能否跳过 */
+const ADD_COLUMN_BY_SQL = new Map(ADD_COLUMNS.map((c) => [c.sql, c]));
 
 /**
  * 默认设置项：首次部署写入；已部署库仅补齐缺失的键（INSERT OR IGNORE 不覆盖现有值）。
@@ -277,6 +301,37 @@ async function migrateInlineCredentials(env: Env): Promise<void> {
   ).run();
 }
 
+/**
+ * 查某表是否已存在指定列（结果按表缓存，一个 isolate 内每张表只查一次 PRAGMA）。
+ *
+ * 容错优先：PRAGMA 不被支持或查询失败时返回 **false**（当作「列不存在」），
+ * 于是调用方仍会照原样执行 ALTER，由 duplicate column 的 catch 兜住 ——
+ * 也就是说这条优化路径**只会省调用，不会漏建列**，最坏情况退化成改动前的行为。
+ *
+ * 表名全部来自 ADD_COLUMNS 常量（非用户输入），故 PRAGMA 拼接无注入面。
+ */
+async function hasColumn(
+  env: Env,
+  cache: Map<string, Set<string>>,
+  table: string,
+  column: string,
+): Promise<boolean> {
+  let cols = cache.get(table);
+  if (!cols) {
+    cols = new Set<string>();
+    try {
+      const res = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+      for (const r of (res.results ?? []) as { name?: unknown }[]) {
+        if (r && typeof r.name === 'string') cols.add(r.name);
+      }
+    } catch {
+      // 查不到就当作「不知道有哪些列」——缓存保持空集，后续一律走原 ALTER 逻辑
+    }
+    cache.set(table, cols);
+  }
+  return cols.has(column);
+}
+
 let schemaReady = false;
 // P2-R4-2：遗留凭据迁移的失败次数。迁移失败时**不置** schemaReady，让下个请求再试一次；
 // 达到上限后放弃重试，否则每个请求都会重跑一遍建表 batch，把 D1 写打满。
@@ -293,8 +348,13 @@ export async function ensureSchema(env: Env): Promise<void> {
   if (schemaReady) return;
   const statements = SCHEMA_STATEMENTS.map((sql) => env.DB.prepare(sql));
   await env.DB.batch(statements);
-  // 迁移逐条容错：列已存在（duplicate column）时忽略，不影响其他迁移
+  // 迁移逐条容错：列已存在（duplicate column）时忽略，不影响其他迁移。
+  // 加列类迁移先查列名缓存：列已在 → 整条跳过，省下一次必然失败的 D1 调用
+  // （失败的 ALTER 同样算一次查询，迁移累积后这笔固定开销会挤占 50 subrequest 预算）。
+  const tableColumns = new Map<string, Set<string>>();
   for (const sql of MIGRATIONS) {
+    const meta = ADD_COLUMN_BY_SQL.get(sql);
+    if (meta && await hasColumn(env, tableColumns, meta.table, meta.column)) continue;
     try {
       await env.DB.prepare(sql).run();
     } catch { /* 已应用过，忽略 */ }

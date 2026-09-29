@@ -623,7 +623,8 @@ async function saveConfig(ctx: Context): Promise<Response> {
       }
       if (a.cycleAnchor !== undefined && String(a.cycleAnchor).trim() !== ''
           && !RE_CYCLE_ANCHOR.test(String(a.cycleAnchor).trim())) {
-        return error('invalid_input', `循环基准时间格式应为 YYYY-MM-DD HH:mm:ss：${a.cycleAnchor}`, 400);
+        // 文案与 RE_CYCLE_ANCHOR 对齐：秒是可选的，只要求到分钟
+        return error('invalid_input', `循环基准时间格式应为 YYYY-MM-DD HH:mm 或 YYYY-MM-DD HH:mm:ss：${a.cycleAnchor}`, 400);
       }
       // 循环首个相位的初始状态：API 客户端可能传字符串/0-1，统一归一化成布尔；
       // 未传则不写库（保持原值），避免只改备注的请求把初始状态重置成「开」。

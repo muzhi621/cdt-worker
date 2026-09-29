@@ -342,7 +342,12 @@ export async function processAccount(
   // 断档容忍：相位是持续态（不像每日定时依赖 ±2h 窗口），监控在切换点宕机后恢复，
   // 只要状态与目标不符就会补执行，不会漏掉整段相位。
   // 放在刷新之后执行，用的是本轮最新的实例状态（与两个补偿块同源）。
-  if (cycle && cycle.started && !statusChangedBySchedule && (status === StatusRunning || status === StatusStopped)) {
+  // 超流量停机优先于循环开机：阈值停机是**止损**动作（键 threshold:{id}:active 不带日期，
+  // 只要仍超限就不会重复停机），若循环开机相位把它拉回来，实例会一直跑到流量自然回落为止，
+  // 直接违背「逼近上限自动停机规避超额费用」的核心目标。故超限期间循环相位一律不下发开机。
+  // overThreshold 定义在 engine.ts:230，与此处同作用域。
+  if (cycle && cycle.started && !statusChangedBySchedule && !overThreshold
+      && (status === StatusRunning || status === StatusStopped)) {
     const wantStart = cycle.on;
     const mismatched = wantStart ? status === StatusStopped : status === StatusRunning;
     if (mismatched) {

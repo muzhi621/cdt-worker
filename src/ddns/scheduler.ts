@@ -259,12 +259,21 @@ export function previewRotate(
   const switchMin = mode === 'interval'
     ? (parseHm(splitAnchorAt(opts.anchorAt).hm) ?? 0)
     : (parseHm(opts.switchTime) ?? 180);
+  // 取样点必须按**目标时区**的本地日计算。
+  // 旧写法是「UTC 日起点 + 切换分钟」：东八区下等价于北京时间 08:01 取样、日期标签却取 UTC 日，
+  // 整张预览表会与真实排班错开一天（预览是给人核对轮转顺序的，错一天反而更难排查）。
+  // 做法：先求 startMs 在本地时区的**当日 00:00** 所对应的 UTC 毫秒，再按天推进，
+  // 取样取本地切换时刻之后 1 分钟；日期标签直接取该取样点的本地日期，保证标签与取样同源。
+  const { minutes: startMinutes } = zonedParts(startMs, timeZone);
+  const day0Utc = startMs - startMinutes * 60000;
   for (let i = 0; i < days; i++) {
-    const dayStart = startMs + i * dayMs;
-    const sampleMs = dayStart + (switchMin + 1) * 60000;
+    // +24h 在夏令时切换日会落在本日 01:00 或 23:00，但取样时刻在切换点之后、
+    // 日期标签又取自取样点自身，故不会串日（最坏只是当天取样点偏移 1 小时）。
+    const sampleMs = day0Utc + i * dayMs + (switchMin + 1) * 60000;
     const r = pick(sampleMs);
+    const { date } = zonedParts(sampleMs, timeZone);
     out.push({
-      date: formatDate(dayStart),
+      date,
       machineName: r.machine ? r.machine.name : '(无)',
       ip: r.machine ? r.machine.ip : '',
     });

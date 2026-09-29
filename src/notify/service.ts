@@ -246,7 +246,11 @@ function replacements(event: NotificationEvent, text: string): Record<string, st
 function replaceTemplate(input: string, reps: Record<string, string>, urlEncode: boolean): string {
   let out = input;
   for (const [k, v] of Object.entries(reps)) {
-    out = out.split(k).join(urlEncode ? encodeURIComponent(v) : JSON.stringify(v).replace(/^"|"$/g, ''));
+    // 非 urlEncode（JSON body）分支：JSON.stringify 已经把 " \ 换行等都转义好了，
+    // 模板里占位符本身写在引号内（如 {"msg":"{{message}}"}}），所以只需剥掉首尾那对引号。
+    // 实测：值含引号/反斜杠/换行/制表符时，插入后 JSON.parse 均合法——**不要**在这里再做二次转义，
+    // 那会把 \" 变成 \\\" 反而破坏 JSON。slice 比 /^"|"$/g 更直白地表达「去首尾引号」。
+    out = out.split(k).join(urlEncode ? encodeURIComponent(v) : JSON.stringify(v).slice(1, -1));
   }
   return out;
 }

@@ -213,7 +213,9 @@ export async function resolveCronSecret(env: Env): Promise<string> {
     return cronSecretCache.value;
   }
   cronSecretCache = undefined; // 过期：清掉旧值，重新读库
-  const row = await env.DB.prepare(`SELECT value FROM settings WHERE key = '${CRON_SECRET_KEY}'`).first();
+  // 统一走 bind 参数化（此前是把常量 CRON_SECRET_KEY 拼进 SQL 字符串）：键现在是编译期常量
+  // 固然没有注入风险，但这类拼接一旦被复制到变量上就会变成真实注入面，且与全库风格不一致。
+  const row = await env.DB.prepare(`SELECT value FROM settings WHERE key = ?`).bind(CRON_SECRET_KEY).first();
   const stored = String((row as Record<string, unknown> | null)?.value ?? '');
   if (stored) {
     try {
@@ -233,21 +235,21 @@ export async function resolveCronSecret(env: Env): Promise<string> {
 // value 传空串 = 清除托管，鉴权回退到 Worker Secret
 export async function setCronSecret(env: Env, value: string): Promise<void> {
   if (!value) {
-    await env.DB.prepare(`DELETE FROM settings WHERE key = '${CRON_SECRET_KEY}'`).run();
+    await env.DB.prepare(`DELETE FROM settings WHERE key = ?`).bind(CRON_SECRET_KEY).run();
     // 清除托管后回退 env：缓存 env 值（isolate 内固定），下次 resolve 省一次 D1 读
     cronSecretCache = { value: (env as unknown as { CRON_SECRET?: string }).CRON_SECRET ?? '', at: Date.now() };
     return;
   }
   await env.DB
-    .prepare(`INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('${CRON_SECRET_KEY}', ?, datetime('now'))`)
-    .bind(await encrypt(env, value))
+    .prepare(`INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))`)
+    .bind(CRON_SECRET_KEY, await encrypt(env, value))
     .run();
   cronSecretCache = { value, at: Date.now() }; // 直接以明文更新缓存，省一次解密
 }
 
 // 是否已托管（只回布尔语义，不返回明文）：用于前端区分「托管值」与「Worker Secret」
 export async function hasStoredCronSecret(env: Env): Promise<boolean> {
-  const row = await env.DB.prepare(`SELECT 1 AS x FROM settings WHERE key = '${CRON_SECRET_KEY}'`).first();
+  const row = await env.DB.prepare(`SELECT 1 AS x FROM settings WHERE key = ?`).bind(CRON_SECRET_KEY).first();
   return !!row;
 }
 
