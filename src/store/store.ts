@@ -865,9 +865,11 @@ export async function markOutboxSent(env: Env, id: number): Promise<void> {
 // ① 判定基准改为 created_at（入队时间）。原先用 updated_at，而它每次重试都被刷成当前时间，
 //    age 实际是「距上次重试」——重试间隔 300s < 放弃阈值 24h，记录永远不会被放弃，
 //    失败通知会无限重试。COALESCE 兜底老数据（created_at=0 时退回 updated_at）。
-// ② 去掉了原来「先 SELECT 再 UPDATE」的那次读：flushOutbox 每轮最多 10 行，
-//    全部失败时多 10 个 subrequest。改为直接发一条带条件的 UPDATE，用 meta.changes 判断
-//    是否命中「放弃」分支；未命中再发重试 UPDATE。
+// ② 放弃判定改为「两段式 UPDATE」：先发一条带条件的放弃 UPDATE，再用它的 meta.changes
+//    判断是否命中「放弃」分支，未命中再发重试 UPDATE。相比原来「先 SELECT 是否放弃 + 再 UPDATE」，
+//    去掉了那次 SELECT 读，但多了一条重试 UPDATE，因此总 DB 调用数并未减少——
+//    两段式是为能用 changes 区分 failed / retry（若合成单条 CASE UPDATE，updated_at 恒变、
+//    changes 恒 > 0，就丢失了「已放弃」信号）。本函数真正修掉的是 ① 里的判定基准。
 export async function markOutboxRetry(env: Env, id: number, error: string, retrySeconds: number, giveUpSeconds: number): Promise<'retry' | 'failed'> {
   const giveUp = await env.DB.prepare(
     `UPDATE notification_outbox SET status = 'failed', error = ?, updated_at = unixepoch()

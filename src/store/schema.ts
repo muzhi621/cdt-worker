@@ -196,16 +196,13 @@ export const MIGRATIONS: string[] = [
  * P2-9：原来这份映射是裸数组，漏写一项照样编译通过，只能在运行时表现为
  * 「新设置项首次部署没写库 → 读不到 → 静默用默认值」，排查成本很高。
  * 改为 Record<SettingKey, ...>：SettingKey 由 Config 的标量字段自动推导
- * （排除 notifications / accounts 这两个不落 settings 表的复合字段），
+ * （排除 notifications / accounts 这两个不落 settings 表的复合字段，以及 adminPasswordHash 这个由初始化流程单独处理的字段），
  * 于是**给 Config 新增标量字段时，这里漏写会直接编译报错**。
  */
-type SettingKey = Exclude<keyof Config, 'notifications' | 'accounts'>;
+type SettingKey = Exclude<keyof Config, 'notifications' | 'accounts' | 'adminPasswordHash'>;
 
 const DEFAULT_SETTINGS_MAP: Record<SettingKey, [string, string]> = {
-  // adminPasswordHash 不落 settings 表（初始化流程单独处理），这里给一个不写入的占位映射，
-  // 只为满足 Record 的完整性要求；ensureSchema 只遍历 Object.values 里的表项，
-  // 因此需要在下面显式排除它。
-  adminPasswordHash: ['__skip_admin_password_hash__', ''],
+  // adminPasswordHash 已从 SettingKey 排除（见上方 type 的 Exclude），不落 settings 表、由初始化流程单独写入。
   trafficThreshold: ['traffic_threshold', String(DEFAULT_CONFIG.trafficThreshold)],
   shutdownMode: ['shutdown_mode', DEFAULT_CONFIG.shutdownMode],
   thresholdAction: ['threshold_action', DEFAULT_CONFIG.thresholdAction],
@@ -219,9 +216,8 @@ const DEFAULT_SETTINGS_MAP: Record<SettingKey, [string, string]> = {
   enableStatusChangeNotify: ['enable_status_change_notify', DEFAULT_CONFIG.enableStatusChangeNotify ? '1' : '0'],
 };
 
-// adminPasswordHash 由初始化流程单独写入，不参与 INSERT OR IGNORE 默认值补齐
-const DEFAULT_SETTINGS: [string, string][] = Object.values(DEFAULT_SETTINGS_MAP)
-  .filter(([k]) => !k.startsWith('__skip_'));
+// adminPasswordHash 已由 SettingKey 排除，DEFAULT_SETTINGS_MAP 不再含该占位键
+const DEFAULT_SETTINGS: [string, string][] = Object.values(DEFAULT_SETTINGS_MAP);
 
 /**
  * 把历史上「每条解析记录内嵌一份凭据」的旧数据，迁移为独立的 ddns_credentials

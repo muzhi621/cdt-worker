@@ -2264,7 +2264,14 @@
         return res;
       }
       async function apiJson(path, opts) {
-        const res = await api(path, opts);
+        let res;
+        try {
+          res = await api(path, opts);
+        } catch (e) {
+          // m5：网络层异常（断网 / CORS / 超时）不再抛出成为 unhandled rejection，
+          // 统一降级为「请求失败」，调用方按 !r.ok 弹 toast 反馈，用户不再面对静默无响应。
+          return { ok: false, status: 0, data: { error: { code: "network", message: (e && e.message) || "网络请求失败" } } };
+        }
         let data = {};
         try { data = await res.json(); } catch (e) { data = {}; }
         // P1-R5-2：会话过期（24h）或改密码吊销后，写操作会返回 401/403。此前前端无统一处理，
@@ -2479,7 +2486,14 @@
           if (probe.ok) { enterApp(); return; }
         } catch (e) { /* 网络异常时继续走登录流程 */ }
 
-        const r = await apiJson("/api/v1/system/init-status");
+        let r = { ok: false, data: {} };
+        try {
+          r = await apiJson("/api/v1/system/init-status");
+        } catch (e) {
+          // m6：Worker 未就绪 / 断网时兜底成「不可用」，走下面的错误提示，
+          // 避免 boot 抛错后停在登录骨架且无任何提示。
+          r = { ok: false, data: { error: { message: "无法连接后端" } } };
+        }
         // 注：envPasswordSet 已从该接口移除（防未登录信息泄露），
         // 环境变量密码提示改由登录失败响应的 env_password_available 驱动
         if (!r.ok) {
@@ -2528,7 +2542,7 @@
         }
       }
 
-      function enterApp() {
+      async function enterApp() {
         appReady = true;
         $("login-password").value = "";
         $("setup-password").value = "";
@@ -2536,8 +2550,8 @@
         clearPwdAlert();
         showView("app");
         loadStatus();
-        loadConfig();
-        loadAccountsManage();
+        const cfg = await loadConfig();
+        loadAccountsManage(cfg);
         fillCronUrl();
         applyHashTab();
       }
@@ -2705,7 +2719,12 @@
           b.addEventListener("click", () => openEditById(Number(b.dataset.config)));
         });
 
-        const lastUpdate = list.reduce((m, a) => (a.updatedAt > m ? a.updatedAt : m), "");
+        const lastUpdate = list.reduce(function (m, a) {
+          const ta = parseDbTime(a.updatedAt), tm = parseDbTime(m);
+          if (!ta) return m;
+          if (!tm) return a.updatedAt;
+          return ta.getTime() > tm.getTime() ? a.updatedAt : m;
+        }, "");
         $("status-updated").textContent = "共 " + list.length + " 个账号 · 最近更新 " + fmtTime(lastUpdate);
         renderStats(list, pctMax(list));
       }
@@ -2862,8 +2881,10 @@
         }
       });
 
-      async function loadAccountsManage() {
-        const r = await apiJson("/api/v1/config");
+      async function loadAccountsManage(cfg) {
+        // n1：首屏 enterApp 已通过 loadConfig() 取过 /api/v1/config（该接口要解密全部 AK/SK），
+        // 这里复用同一份数据，避免对「解密全部凭据」的重接口打两次。
+        const r = cfg ? { ok: true, data: cfg } : await apiJson("/api/v1/config");
         const tbody = $("accounts-manage");
         if (!r.ok) { tbody.innerHTML = '<tr><td colspan="7">' + esc(errText(r.data)) + "</td></tr>"; return; }
         const list = r.data.accounts || [];
@@ -3007,7 +3028,7 @@
           $("set-interval").placeholder = "600";
           $("set-monitor").placeholder = "5";
           toast("配置读取失败：" + errText(r.data), "err");
-          return;
+          return null;
         }
         const d = r.data;
         if (d.trafficThreshold != null) $("set-threshold").value = d.trafficThreshold;
@@ -3024,6 +3045,7 @@
         fillNotifyForm(d.notifications || {});
         fillTestAccountOptions(d.accounts || []);
         loadTriggers();
+        return d;
       }
 
       /* ---------- 监控触发源（渠道开关 + 上次触发 + 测试） ---------- */
@@ -3419,7 +3441,6 @@
         if (!body.trim()) { toast("模板不能为空，如需恢复默认请点「恢复默认」", "err"); return; }
         const r = await apiJson("/api/v1/config", { method: "PUT", body: JSON.stringify({ notifications: { template: { body } } }) });
         toast(r.ok ? "通知内容已保存" : errText(r.data), r.ok ? "ok" : "err");
-        if (r.ok) loadConfig();
       });
 
       $("reset-template").addEventListener("click", () => {
@@ -3477,7 +3498,6 @@
       $("save-notify").addEventListener("click", async () => {
         const r = await apiJson("/api/v1/config", { method: "PUT", body: JSON.stringify({ notifications: collectNotifyForm() }) });
         toast(r.ok ? "通知配置已保存" : errText(r.data), r.ok ? "ok" : "err");
-        if (r.ok) loadConfig();
       });
 
       // 各通知通道独立测试（先保存当前配置再单独测某一通道）
@@ -3548,7 +3568,6 @@
         if (!(days >= 1 && days <= 365)) { toast("保留天数需在 1–365 之间", "err"); return; }
         const r = await apiJson("/api/v1/config", { method: "PUT", body: JSON.stringify({ logRetentionDays: days }) });
         toast(r.ok ? "日志保留天数已保存，将在下次监控周期生效" : errText(r.data), r.ok ? "ok" : "err");
-        if (r.ok) loadConfig();
       });
 
       function fillCronUrl() {
@@ -3789,7 +3808,7 @@
        * 每次改动前端后手动更新此值。作用：部署后强刷页面（Ctrl+F5）时看页脚即可
        * 确认浏览器加载的是哪个构建，用于区分「线上已更新但浏览器缓存了旧 JS」——
        * 这是「保存无效 / 新功能不见」类问题的第一排查步骤。 */
-      const APP_BUILD = "20260929-2003";
+      const APP_BUILD = "20260929-2140";
       try {
         const el = document.createElement("div");
         el.style.cssText = "text-align:center;color:var(--muted);font-size:11px;padding:12px 0;opacity:.7";
@@ -4335,7 +4354,7 @@
             // 时段模式给个「全天」默认值：否则新成员会因时段未配置而永远不命中
             windowStart: isWindow ? "00:00" : "",
             windowEnd: isWindow ? "23:59" : "",
-            sortOrder: next.length,
+            sortOrder: next.reduce((m, x) => Math.max(m, x.sortOrder || 0), 0) + 1,
           });
         });
         const r = await apiJson("/api/v1/ddns/groups/" + g.id + "/members", { method: "PUT", body: JSON.stringify({ members: next }) });
@@ -4597,7 +4616,8 @@
       $("tab-ddns")?.addEventListener("click", function (e) {
         const btn = e.target.closest("[data-act]");
         if (!btn) return;
-        handleDdnsAction(btn.getAttribute("data-act"), Number(btn.getAttribute("data-id") || 0));
+        handleDdnsAction(btn.getAttribute("data-act"), Number(btn.getAttribute("data-id") || 0))
+          .catch((e) => ddnsMsg("操作失败：" + ((e && e.message) || e), "error"));
       });
 
       $("tab-ddns")?.addEventListener("change", function (e) {
