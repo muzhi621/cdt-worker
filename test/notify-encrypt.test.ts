@@ -9,7 +9,10 @@ const env = { CDT_MASTER_KEY: MASTER } as never;
 function sample() {
   return {
     telegram: { enabled: true, token: '111:telegram-token', chatId: '42', proxyType: 'none', proxyUrl: '' },
-    webhook: { enabled: true, url: 'https://hook.example.com', method: 'POST', type: 'JSON', provider: 'generic', headers: '', secret: 'wh-secret', body: '' },
+    webhook: {
+      enabled: true, url: 'https://hook.example.com/?access_token=tok-123', method: 'POST', type: 'JSON',
+      provider: 'generic', headers: '{"Authorization":"Bearer tok-123"}', secret: 'wh-secret', body: '',
+    },
     serverchan: { enabled: false, sendKey: 'SCT-key' },
     pushplus: { enabled: false, token: 'pp-token' },
     smtp: { enabled: true, host: 'smtp.example.com', port: 465, username: 'u', password: 'mail-pass', from: '', to: 'a@b.c' },
@@ -26,8 +29,12 @@ describe('通知凭据加密存储', () => {
     expect(isEncrypted(enc.serverchan.sendKey as string)).toBe(true);
     expect(isEncrypted(enc.pushplus.token as string)).toBe(true);
     expect(isEncrypted(enc.smtp.password as string)).toBe(true);
-    // 非敏感字段（url / host / username / 模板）不加密
-    expect(enc.webhook.url).toBe('https://hook.example.com');
+    // P1-6：webhook 的 url / headers 也已归入密钥语义——钉钉/飞书/企业微信机器人的
+    // access_token 就写在 URL 查询串里，headers 常被填成 {"Authorization":"Bearer xxx"}，
+    // 明文落库等于交出机器人发信权限，故同样加密。
+    expect(isEncrypted(enc.webhook.url as string)).toBe(true);
+    expect(isEncrypted(enc.webhook.headers as string)).toBe(true);
+    // 非敏感字段（host / username / 模板）保持明文
     expect(enc.smtp.host).toBe('smtp.example.com');
     expect(enc.template.body).toBe('{{账号}} {{使用率}}');
   });

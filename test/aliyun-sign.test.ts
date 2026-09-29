@@ -12,13 +12,17 @@ describe('percentEncode（RFC 3986）', () => {
     expect(percentEncode('a b')).toBe('a%20b');
   });
 
-  it('波浪号保留、星号按阿里云规范保留为 *', () => {
+  // P2-8：ECS 侧原实现的 %2A→* 是空操作（encodeURIComponent 本就不产出 %2A），
+  // 导致含 * ! ' ( ) 的参数签名与阿里云规范不符。现已与 DDNS 侧统一为同一实现，
+  // 这些字符按 RFC 3986 编码；波浪号仍属 unreserved，保留原样。
+  it('波浪号保留；星号及 sub-delims 按 RFC 3986 编码', () => {
     expect(percentEncode('~')).toBe('~');
-    expect(percentEncode('a*b')).toBe('a*b');
+    expect(percentEncode('a*b')).toBe('a%2Ab');
+    expect(percentEncode("!(')")).toBe('%21%28%27%29');
   });
 
   it('综合用例', () => {
-    expect(percentEncode('a+b c~d*e')).toBe('a%2Bb%20c~d*e');
+    expect(percentEncode('a+b c~d*e')).toBe('a%2Bb%20c~d%2Ae');
     expect(percentEncode('2026-09-26T12:00:00Z')).toBe('2026-09-26T12%3A00%3A00Z');
     expect(percentEncode('cn-hangzhou')).toBe('cn-hangzhou');
   });

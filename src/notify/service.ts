@@ -73,6 +73,15 @@ async function sendTelegram(config: NotifyConfig['telegram'], event: Notificatio
   }
 }
 
+/** HMAC-SHA256 十六进制摘要：供 webhook 请求签名使用（P1-12） */
+async function hmacHex(secret: string, payload: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 async function sendWebhook(config: NotifyConfig['webhook'], event: NotificationEvent, text: string): Promise<void> {
   let endpoint = replaceTemplate(config.url, replacements(event, text), true);
   const method = (config.method || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
@@ -101,6 +110,16 @@ async function sendWebhook(config: NotifyConfig['webhook'], event: NotificationE
     try {
       Object.assign(headers, JSON.parse(config.headers));
     } catch { /* 忽略无效 headers */ }
+  }
+  // P1-12：webhook.secret 此前是「死密钥」——声明并加密存储了，投递时却从未使用，
+  // 用户以为配了签名，实际请求是未签名的，接收方无法鉴别来源。
+  // 这里补上 HMAC-SHA256 签名：签名载荷 = "<时间戳>.<请求体>"，时间戳一并入签，
+  // 接收方既能验真伪、也能用时间戳拒绝重放。未配置 secret 时不加签名头（向后兼容）。
+  if (config.secret) {
+    const ts = Math.floor(Date.now() / 1000).toString();
+    const sig = await hmacHex(config.secret, `${ts}.${body ?? ''}`);
+    headers['X-CDT-Timestamp'] = ts;
+    headers['X-CDT-Signature'] = `sha256=${sig}`;
   }
   const resp = await fetch(endpoint, { method, headers, body, signal: AbortSignal.timeout(NOTIFY_TIMEOUT_MS) });
   if (resp.status >= 400) {

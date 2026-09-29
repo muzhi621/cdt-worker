@@ -391,7 +391,14 @@ async function getConfig(ctx: Context): Promise<Response> {
     // 每个通道用空对象兜底：即使 D1 里的旧配置缺某个通道键也不会抛错
     notifications: {
       telegram: { ...(n.telegram ?? {}), token: '', tokenConfigured: !!n.telegram?.token },
-      webhook: { ...(n.webhook ?? {}), secret: '', secretConfigured: !!n.webhook?.secret },
+      // P1-6：url / headers 与 secret 一样按密钥处理，只回 configured 标志。
+      // 机器人的 access_token 常直接写在 url 查询串里，明文回显等于把发信权限摊在页面上。
+      webhook: {
+        ...(n.webhook ?? {}),
+        secret: '', secretConfigured: !!n.webhook?.secret,
+        url: '', urlConfigured: !!n.webhook?.url,
+        headers: '', headersConfigured: !!n.webhook?.headers,
+      },
       serverchan: { ...(n.serverchan ?? {}), sendKey: '', sendKeyConfigured: !!n.serverchan?.sendKey },
       pushplus: { ...(n.pushplus ?? {}), token: '', tokenConfigured: !!n.pushplus?.token },
       smtp: { ...(n.smtp ?? {}), password: '', passwordConfigured: !!n.smtp?.password },
@@ -409,6 +416,10 @@ function mergeNotifySecrets(prev: Record<string, Record<string, unknown>> | unde
   const secretPaths: [string, string, string][] = [
     ['telegram', 'token', 'tokenConfigured'],
     ['webhook', 'secret', 'secretConfigured'],
+    // P1-6：url / headers 已改为加密存储并脱敏回显，因此必须同样「留空继承旧值」，
+    // 否则用户打开设置页再保存一次，就会把已配好的机器人地址清掉、通知无声停摆。
+    ['webhook', 'url', 'urlConfigured'],
+    ['webhook', 'headers', 'headersConfigured'],
     ['serverchan', 'sendKey', 'sendKeyConfigured'],
     ['pushplus', 'token', 'tokenConfigured'],
     ['smtp', 'password', 'passwordConfigured'],
@@ -431,6 +442,26 @@ function mergeNotifySecrets(prev: Record<string, Record<string, unknown>> | unde
     }
   }
   return next;
+}
+
+/**
+ * P1-1：定时开机与关机的最小间隔（分钟）。
+ * 引擎侧 dueWithin 的命中窗口是 2 小时（SCHEDULE_WINDOW_MS），若 start/stop 间隔 ≤ 2 小时，
+ * 两个窗口会重叠 —— 同一轮内先开机再关机，实例被反复启停、多耗 4~6 个 subrequest，
+ * 并触发阿里云 Throttling.User；幂等键带 action 区分，两个键都算新键，幂等拦不住。
+ * 引擎已做「本轮互斥」兜底，这里在写入时直接拒绝，让误配在保存时就暴露而不是上线后抖。
+ * 推导：间隔 > 窗口(120 分钟) 即两个窗口不重叠。
+ */
+const SCHEDULE_MIN_GAP_MINUTES = 120;
+
+/** start/stop 间隔是否过近（跨午夜按环形取最短间隔）。格式非法时返回 false，交由格式校验处理。 */
+function scheduleTooClose(start: string, stop: string): boolean {
+  if (!RE_SWITCH_TIME.test(start) || !RE_SWITCH_TIME.test(stop)) return false;
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = stop.split(':').map(Number);
+  let gap = Math.abs((sh * 60 + sm) - (eh * 60 + em));
+  if (gap > 12 * 60) gap = 24 * 60 - gap; // 跨午夜：22:00→06:00 实际间隔 8 小时
+  return gap < SCHEDULE_MIN_GAP_MINUTES;
 }
 
 async function saveConfig(ctx: Context): Promise<Response> {
@@ -523,10 +554,28 @@ async function saveConfig(ctx: Context): Promise<Response> {
   }
   // 保存账号：带 id 走更新（AK/SK 留空=保持不变），无 id 且提供 AK/SK 才新增
   if (Array.isArray(b.accounts)) {
+    // P1-1 写入侧校验：更新是部分字段，需先合并旧值才能判断 start/stop 间隔。
+    // 仅在确实涉及定时字段时才读库（配置保存是低频操作，不为它付常驻开销）。
+    let existing: Map<number, Account> | null = null;
     for (const a of b.accounts as Partial<Account>[]) {
       if (a.id) {
+        if (a.startTime !== undefined || a.stopTime !== undefined || a.scheduleEnabled !== undefined) {
+          if (!existing) {
+            existing = new Map((await store.listAccounts(ctx.env)).map((x) => [x.id, x]));
+          }
+          const cur = existing.get(Number(a.id));
+          const start = a.startTime !== undefined ? String(a.startTime) : (cur?.startTime ?? '');
+          const stop = a.stopTime !== undefined ? String(a.stopTime) : (cur?.stopTime ?? '');
+          const enabled = a.scheduleEnabled !== undefined ? !!a.scheduleEnabled : !!cur?.scheduleEnabled;
+          if (enabled && scheduleTooClose(start, stop)) {
+            return error('invalid_input', `账号「${cur?.name ?? a.id}」的开机与关机时间间隔需大于 ${SCHEDULE_MIN_GAP_MINUTES} 分钟，否则会与 2 小时命中窗口重叠导致实例反复启停`, 400);
+          }
+        }
         await store.updateAccountConfig(ctx.env, a as Partial<Account> & { id: number });
       } else if (a.accessKeySecret && a.accessKeyId) {
+        if (a.scheduleEnabled && scheduleTooClose(String(a.startTime ?? ''), String(a.stopTime ?? ''))) {
+          return error('invalid_input', `账号「${a.name ?? ''}」的开机与关机时间间隔需大于 ${SCHEDULE_MIN_GAP_MINUTES} 分钟，否则会与 2 小时命中窗口重叠导致实例反复启停`, 400);
+        }
         await store.saveAccount(ctx.env, a as Omit<Account, 'id'> & { id?: number });
       }
     }
@@ -592,8 +641,9 @@ async function logsHandler(ctx: Context): Promise<Response> {
 // 复用 time.ts 的 formatter 缓存——日志页每页 50 条，原来要 new 50 次 Intl.DateTimeFormat（毫秒级）。
 function toZoneString(utc: string, timezone: string): string {
   if (!utc) return utc;
-  const ms = Date.parse(utc.replace(' ', 'T') + 'Z');
-  if (isNaN(ms)) return utc;
+  // P2-4：复用 store.parseD1Utc，与账单缓存等处共用同一套「D1 UTC 字符串」解析口径
+  const ms = store.parseD1Utc(utc);
+  if (!Number.isFinite(ms)) return utc;
   return formatWallClock(new Date(ms), timezone);
 }
 
@@ -891,8 +941,13 @@ async function route(env: Env, request: Request): Promise<Response> {
   try {
     return await matched.route.handler(ctx);
   } catch (err) {
+    // P2-5：异常原文**不回显给前端**。这是全项目唯一一条「异常文本直达响应体」的通道，
+    // 异常消息里可能夹带 SQL 片段、密钥前缀、内部路径等实现细节。
+    // 完整信息改为落日志页（管理员可自查），响应体只给固定文案 + 路由（不含变量值）。
     const msg = err instanceof Error ? err.message : String(err);
-    return error('handler_failed', `${matched.route.method} ${matched.route.pattern} 执行失败：${msg}`, 500);
+    await store.addLog(ctx.env, 'error',
+      `${matched.route.method} ${matched.route.pattern} 执行失败：${msg}`.slice(0, 500)).catch(() => {});
+    return error('handler_failed', `${matched.route.method} ${matched.route.pattern} 执行失败，详情见日志页`, 500);
   }
 }
 

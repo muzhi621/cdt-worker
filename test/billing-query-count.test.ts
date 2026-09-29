@@ -20,10 +20,17 @@ afterEach(() => vi.restoreAllMocks());
 
 describe('summary 账单查询次数（P0-T2 回归）', () => {
   it('每账号只产生 1 次 billing 查询，且不调用 billingCache', async () => {
-    const snapSpy = vi.spyOn(store, 'billingSnapshot').mockResolvedValue({
+    const snap = {
       balance: { hit: true, value: { amount: 9.9, currency: 'CNY' } },
       instance_bill: { hit: true, value: { totalCost: 88 } },
-    } as unknown as Record<string, { hit: boolean; value?: unknown }>);
+    };
+    // P1-9：summary 改为**批量**取回（1 次 D1 查询覆盖全部账号的多个 kind），
+    // 取代原先「账号循环内逐个 billingSnapshot」的 N+1。
+    const manySpy = vi.spyOn(store, 'billingSnapshotMany').mockResolvedValue(
+      new Map<number, Record<string, { hit: boolean; value?: unknown }>>([[1, snap], [2, snap]]) as never,
+    );
+    // 账号循环内不得再出现逐账号查询
+    const snapSpy = vi.spyOn(store, 'billingSnapshot').mockResolvedValue(snap as never);
     // 关键断言：合并后绝不应再出现独立的 billingCache 调用
     const cacheSpy = vi.spyOn(store, 'billingCache').mockResolvedValue({ hit: false } as never);
     vi.spyOn(store, 'getConfig').mockResolvedValue({
@@ -40,8 +47,10 @@ describe('summary 账单查询次数（P0-T2 回归）', () => {
 
     const res = await summary(fakeEnv());
     expect(res.length).toBe(2);
-    // 每账号 1 次 billingSnapshot（合并两个 kind），共 2 次
-    expect(snapSpy).toHaveBeenCalledTimes(2);
+    // 全账号只 1 次批量查询（与账号数无关），而不是每账号 1 次
+    expect(manySpy).toHaveBeenCalledTimes(1);
+    // 账号循环内不得再逐个查询（N+1 已消除）
+    expect(snapSpy).not.toHaveBeenCalled();
     // 不允许残留的独立 billingCache 调用
     expect(cacheSpy).not.toHaveBeenCalled();
   });

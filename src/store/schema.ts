@@ -1,7 +1,7 @@
 // 自动建表：部署后首次请求时幂等执行 schema
 // 对应 schema.sql，全部用 IF NOT EXISTS 保证可重复执行
 import type { Env } from '../security/security';
-import { DEFAULT_CONFIG, addLog } from './store';
+import { DEFAULT_CONFIG, addLog, type Config } from './store';
 
 const SCHEMA_STATEMENTS: string[] = [
   `CREATE TABLE IF NOT EXISTS settings (
@@ -177,25 +177,46 @@ const MIGRATIONS: string[] = [
   `ALTER TABLE ddns_records ADD COLUMN credential_id INTEGER NOT NULL DEFAULT 0`,
   // 分组新增「基准时间」（interval 模式：精确到分钟的轮换起点）
   `ALTER TABLE ddns_groups ADD COLUMN anchor_at TEXT NOT NULL DEFAULT ''`,
+  // P1-11：outbox 增加入队时间。此前「超过 24 小时放弃」用的是 updated_at，
+  // 而 updated_at 每次重试都会被刷成当前时间，于是 age 实际衡量的是「距上次重试」——
+  // 重试间隔 300s 远小于放弃阈值 24h，记录永远不会被放弃，失败通知会无限重试下去。
+  `ALTER TABLE notification_outbox ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0`,
 ];
 
-// 默认设置项：首次部署写入；已部署库仅补齐缺失的键（INSERT OR IGNORE 不覆盖现有值）。
-// 唯一数据源是 store.ts 的 DEFAULT_CONFIG，这里只描述「settings key ↔ Config 字段」的映射，
-// 避免默认值在两个文件里各写一份后漂移（历史上 enable_status_change_notify 就只在 DEFAULT_CONFIG 里）。
-const DEFAULT_SETTINGS: [string, string][] = [
-  ['traffic_threshold', String(DEFAULT_CONFIG.trafficThreshold)],
-  ['shutdown_mode', DEFAULT_CONFIG.shutdownMode],
-  ['threshold_action', DEFAULT_CONFIG.thresholdAction],
-  ['api_interval', String(DEFAULT_CONFIG.apiInterval)],
-  ['monitor_interval', String(DEFAULT_CONFIG.monitorInterval)],
-  ['timezone', DEFAULT_CONFIG.timezone],
-  ['keep_alive', DEFAULT_CONFIG.keepAlive ? '1' : '0'],
-  ['enable_billing', DEFAULT_CONFIG.enableBilling ? '1' : '0'],
-  ['enable_schedule_mail', DEFAULT_CONFIG.enableScheduleMail ? '1' : '0'],
-  ['log_retention_days', String(DEFAULT_CONFIG.logRetentionDays)],
-  // 新增设置项时在此追加一行即可，取值一律来自 DEFAULT_CONFIG
-  ['enable_status_change_notify', DEFAULT_CONFIG.enableStatusChangeNotify ? '1' : '0'],
-];
+/**
+ * 默认设置项：首次部署写入；已部署库仅补齐缺失的键（INSERT OR IGNORE 不覆盖现有值）。
+ * 唯一数据源是 store.ts 的 DEFAULT_CONFIG，这里只描述「settings key ↔ Config 字段」的映射，
+ * 避免默认值在两个文件里各写一份后漂移（历史上 enable_status_change_notify 就只在 DEFAULT_CONFIG 里）。
+ *
+ * P2-9：原来这份映射是裸数组，漏写一项照样编译通过，只能在运行时表现为
+ * 「新设置项首次部署没写库 → 读不到 → 静默用默认值」，排查成本很高。
+ * 改为 Record<SettingKey, ...>：SettingKey 由 Config 的标量字段自动推导
+ * （排除 notifications / accounts 这两个不落 settings 表的复合字段），
+ * 于是**给 Config 新增标量字段时，这里漏写会直接编译报错**。
+ */
+type SettingKey = Exclude<keyof Config, 'notifications' | 'accounts'>;
+
+const DEFAULT_SETTINGS_MAP: Record<SettingKey, [string, string]> = {
+  // adminPasswordHash 不落 settings 表（初始化流程单独处理），这里给一个不写入的占位映射，
+  // 只为满足 Record 的完整性要求；ensureSchema 只遍历 Object.values 里的表项，
+  // 因此需要在下面显式排除它。
+  adminPasswordHash: ['__skip_admin_password_hash__', ''],
+  trafficThreshold: ['traffic_threshold', String(DEFAULT_CONFIG.trafficThreshold)],
+  shutdownMode: ['shutdown_mode', DEFAULT_CONFIG.shutdownMode],
+  thresholdAction: ['threshold_action', DEFAULT_CONFIG.thresholdAction],
+  apiInterval: ['api_interval', String(DEFAULT_CONFIG.apiInterval)],
+  monitorInterval: ['monitor_interval', String(DEFAULT_CONFIG.monitorInterval)],
+  timezone: ['timezone', DEFAULT_CONFIG.timezone],
+  keepAlive: ['keep_alive', DEFAULT_CONFIG.keepAlive ? '1' : '0'],
+  enableBilling: ['enable_billing', DEFAULT_CONFIG.enableBilling ? '1' : '0'],
+  enableScheduleMail: ['enable_schedule_mail', DEFAULT_CONFIG.enableScheduleMail ? '1' : '0'],
+  logRetentionDays: ['log_retention_days', String(DEFAULT_CONFIG.logRetentionDays)],
+  enableStatusChangeNotify: ['enable_status_change_notify', DEFAULT_CONFIG.enableStatusChangeNotify ? '1' : '0'],
+};
+
+// adminPasswordHash 由初始化流程单独写入，不参与 INSERT OR IGNORE 默认值补齐
+const DEFAULT_SETTINGS: [string, string][] = Object.values(DEFAULT_SETTINGS_MAP)
+  .filter(([k]) => !k.startsWith('__skip_'));
 
 /**
  * 把历史上「每条解析记录内嵌一份凭据」的旧数据，迁移为独立的 ddns_credentials
@@ -216,22 +237,35 @@ async function migrateInlineCredentials(env: Env): Promise<void> {
     id: number; provider: string; zone: string; credential_enc: string;
   }[];
   if (!rows.length) return;
-  for (const r of rows) {
-    const name = `${r.provider} · ${r.zone}`;
-    const ins = await env.DB.prepare(
-      'INSERT INTO ddns_credentials (name, provider, credential_enc) VALUES (?,?,?)',
-    ).bind(name, r.provider, r.credential_enc).run();
-    const cid = Number(ins.meta?.last_row_id ?? 0);
-    if (cid > 0) {
-      await env.DB.prepare('UPDATE ddns_records SET credential_id=? WHERE id=?').bind(cid, r.id).run();
-    }
-  }
+  // P1-10：原实现是「每条记录 2 次独立 run()」——50 条遗留记录就是冷启动 +100 个
+  // subrequest，直接撞 Cloudflare 上限并 1102。改为 2 次调用：
+  //   ① 一条 batch 插入全部凭据（D1 的 batch 只算 1 个 subrequest）
+  //   ② 一条 UPDATE 用子查询按密文回填引用（密文相同即同一份凭据，选哪条等价）
+  await env.DB.batch(
+    rows.map((r) =>
+      env.DB.prepare('INSERT INTO ddns_credentials (name, provider, credential_enc) VALUES (?,?,?)')
+        .bind(`${r.provider} · ${r.zone}`, r.provider, r.credential_enc),
+    ),
+  );
+  // COALESCE 兜底：万一某条没匹配到（如并发插入），退回 0 而不是写 NULL 破坏 NOT NULL 约束
+  await env.DB.prepare(
+    `UPDATE ddns_records SET credential_id = COALESCE((
+       SELECT c.id FROM ddns_credentials c
+       WHERE c.credential_enc = ddns_records.credential_enc AND c.provider = ddns_records.provider
+     ), 0)
+     WHERE credential_id = 0 AND credential_enc <> ''`,
+  ).run();
 }
 
 let schemaReady = false;
 // P2-R4-2：遗留凭据迁移的失败次数。迁移失败时**不置** schemaReady，让下个请求再试一次；
 // 达到上限后放弃重试，否则每个请求都会重跑一遍建表 batch，把 D1 写打满。
 let migrateFailures = 0;
+// P1-7：迁移是否**本次**成功。必须显式记录，不能由「migrateFailures === 0」推导——
+// 计数器只在失败时递增、成功时不变，于是「先失败一次、随后成功」会让它永远停在 1，
+// 导致 schemaReady 恒为 false、每个请求都重跑一遍完整建表流程（数十个 D1 写）。
+// 这是 8e8e645 引入的回归：用计数器间接推导成功，语义太脆弱。
+let migrationOk = false;
 const MIGRATE_MAX_ATTEMPTS = 3;
 
 // 幂等建表 + 增量迁移 + 默认值补齐，多次调用只真正执行一次（进程内标记）
@@ -248,6 +282,7 @@ export async function ensureSchema(env: Env): Promise<void> {
   // 数据迁移：把历史上内嵌在解析记录里的凭据提升为独立凭据并回填引用
   try {
     await migrateInlineCredentials(env);
+    migrationOk = true; // P1-7：显式置位，成功即成功
   } catch (e) {
     migrateFailures++;
     const detail = e instanceof Error ? e.message : String(e);
@@ -265,7 +300,7 @@ export async function ensureSchema(env: Env): Promise<void> {
       ),
     );
   } catch { /* 默认值写入失败不影响启动 */ }
-  // P2-R4-2：迁移成功 → 完成；迁移失败且未达上限 → 不置 true，下个请求重试；
+  // P2-R4-2 + P1-7：本次迁移成功 → 完成；失败且未达上限 → 不置 true，下个请求重试；
   // 失败达上限 → 放弃重试，避免每个请求都重跑一遍建表 batch 把 D1 写打满
-  schemaReady = migrateFailures === 0 || migrateFailures >= MIGRATE_MAX_ATTEMPTS;
+  schemaReady = migrationOk || migrateFailures >= MIGRATE_MAX_ATTEMPTS;
 }

@@ -33,15 +33,19 @@ export interface BillingBill {
   itemCount?: number; // 账单条目数，便于排查「查不到金额」的原因
 }
 
-// RFC 3986 百分号编码，等价原 percentEncode()
-// 注意：encodeURIComponent 已把空格编为 %20、字面 + 编为 %2B，与阿里云 RPC 签名规范一致；
+// RFC 3986 百分号编码：阿里云 ECS 与阿里云 DNS 用的是同一套 POP 签名规范，
+// 因此直接复用 DDNS 侧的实现（src/ddns/providers/types.ts），不再各写一份。
+//
+// P2-8：原 ECS 侧副本只有两条 replace（%7E→~、%2A→*），而 encodeURIComponent
+// 本就不会产生 %7E/%2A —— 这两句是**空操作**；真正需要补编码的 ! ' ( ) *
+// （RFC 3986 的 sub-delims，阿里云要求编码）却没补，含这些字符的参数会
+// SignatureDoesNotMatch。两份实现漂移是这类「偶尔签名失败」的温床，故合并为一处。
+//
+// 注意：encodeURIComponent 已把空格编为 %20、字面 + 编为 %2B，与规范一致；
 // 不能再执行 %2B → %20 的替换（那是 Go 版对 url.QueryEscape「空格编为 +」的补救，
 // 照搬到 JS 会把参数里真正的 + 改成空格，导致 SignatureDoesNotMatch）。
-export function percentEncode(value: string): string {
-  return encodeURIComponent(value)
-    .replace(/%7E/gi, '~')
-    .replace(/%2A/gi, '*');
-}
+import { percentEncode } from '../ddns/providers/types';
+export { percentEncode };
 
 // 阿里云调用异常：带 retryable 标记，让上层重试逻辑有明确类型可判
 // （原来靠给 Error 实例挂任意属性 + as any 断言，类型不安全且网络错误路径容易漏标）
@@ -54,23 +58,57 @@ export class AliyunError extends Error {
   }
 }
 
+/**
+ * P1-2：阿里云调用超时。这是全项目唯一没有超时的出站请求（对照组：通知 8s、
+ * DDNS 15s、自建驱动 60s）。「连得上但不回包」会把整个监控周期挂住。
+ * 超时抛出的 abort 由下面的 catch 包成 AliyunError(retryable=true)，直接复用已有重试。
+ */
+const ALIYUN_TIMEOUT_MS = 10_000;
+
+/**
+ * P1-3：默认尝试次数 3 → 2。重试 × 分页会放大 subrequest（getInstanceBill 最坏
+ * 3 页 × 2 次 = 6，实例级为空时再走账号级 → 12），逼近 Cloudflare 50 上限。
+ * 降到 2 后上限减半，代价是偶发 5xx 少一次重试机会 —— 下一轮监控周期仍会覆盖。
+ */
+const ALIYUN_MAX_ATTEMPTS = 2;
+
 // HMAC 密钥缓存：每个监控周期要签十几次 API，importKey 属毫秒级开销。
 // AK Secret 在 isolate 内不变，按 secret 缓存 CryptoKey（最多账号数条，LRU 式清理）。
 const hmacKeyCache = new Map<string, CryptoKey>();
+const HMAC_KEY_CACHE_MAX = 64;
+
+/** 十六进制 SHA-256 摘要（Web Crypto 属纯 CPU，不产生 subrequest） */
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 async function getHmacKey(secret: string): Promise<CryptoKey> {
-  const cacheKey = secret + '&';
+  // P2-7：用 SHA-256 摘要做缓存键，而不是把明文 AK Secret 直接留在 Map 的键里 ——
+  // 堆快照 / 调试转储 / 异常上下文都可能顺带把 Map 的键打印出来，那是主密钥级的泄露面。
+  const cacheKey = await sha256Hex(secret + '&');
   const cached = hmacKeyCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    // 命中后移到末尾，维持「最久未用排在前面」的 LRU 顺序（Map 按插入顺序迭代）
+    hmacKeyCache.delete(cacheKey);
+    hmacKeyCache.set(cacheKey, cached);
+    return cached;
+  }
   const enc = new TextEncoder();
   const imported = await crypto.subtle.importKey(
     'raw',
-    enc.encode(cacheKey),
+    enc.encode(secret + '&'),
     { name: 'HMAC', hash: 'SHA-1' },
     false,
     ['sign'],
   );
-  if (hmacKeyCache.size > 64) hmacKeyCache.clear(); // 防止账号数极多时缓存无限增长
+  // P2-7：原来 size > 64 就 clear() 全清 —— 下一次调用要全部重新 importKey，
+  // 且在临界点会反复「填满→清空→填满」抖动。改为只淘汰最久未用的那一条。
+  // 实际账号数是常量级，这条分支几乎不会触发，只是防止极端情况下无限增长。
+  if (hmacKeyCache.size >= HMAC_KEY_CACHE_MAX) {
+    const oldest = hmacKeyCache.keys().next().value;
+    if (oldest !== undefined) hmacKeyCache.delete(oldest);
+  }
   hmacKeyCache.set(cacheKey, imported);
   return imported;
 }
@@ -104,7 +142,7 @@ export async function callAliyun(
   version: string,
   action: string,
   extras: Record<string, string> = {},
-  retries = 3,
+  retries = ALIYUN_MAX_ATTEMPTS,
 ): Promise<Record<string, unknown>> {
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt < retries; attempt++) {
@@ -115,7 +153,12 @@ export async function callAliyun(
       // 只有 5xx / 429 / 网络错误才重试（与原逻辑一致）
       const retryable = (err as any)?.retryable === true;
       if (!retryable || attempt === retries - 1) break;
-      await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 300 + attempt * 100));
+      // P1-3：退避必须带抖动。固定 300/700ms 会让所有账号在同一毫秒集体重试——
+      // 而 Throttling.User 恰恰是「多账号同时打」才会触发，无抖动等于把限流风暴
+      // 同步放大。加 [0,400)ms 随机量把重试在时间上摊开。
+      await new Promise((r) =>
+        setTimeout(r, Math.pow(2, attempt) * 300 + attempt * 100 + Math.random() * 400),
+      );
     }
   }
   throw lastErr ?? new Error(`aliyun ${action} failed`);
@@ -151,6 +194,8 @@ async function callOnce(
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
+      // P1-2：必须带超时，否则服务端不回包时会一直挂住整个监控周期
+      signal: AbortSignal.timeout(ALIYUN_TIMEOUT_MS),
     });
   } catch (err) {
     // 网络层错误（DNS/TLS/超时）一定可重试，否则会退化成"直接失败"而不是退避重试
@@ -329,38 +374,34 @@ export async function getInstanceBill(
   const targetInstance = instanceId !== undefined ? instanceId : account.instanceId;
   let total = 0;
   let itemCount = 0;
-  let nextToken = '';
-  // 分页拉取（MaxResults 最大 300，最多 3 页防止异常循环）
-  for (let page = 0; page < 3; page++) {
-    const extras: Record<string, string> = {
-      BillingCycle: cycle,
-      Granularity: 'MONTHLY',
-      MaxResults: '300',
-    };
-    // InstanceID 为空时不能传空字符串（会被判为非法参数）
-    if (targetInstance) extras.InstanceID = targetInstance;
-    if (nextToken) extras.NextToken = nextToken;
+  // 单页拉取（MaxResults 最大 300）。
+  // P1-3：原为最多 3 页的分页循环。单实例单月的账单条目远少于 300 条，正常一页就取完；
+  // 而每页 × 每次尝试都算 subrequest（3 页 × 2 次 = 6，实例级为空时再走账号级 → 12），
+  // 是监控周期里最容易撞 Cloudflare 50 上限的一块。取首页已足以反映本月花费。
+  const extras: Record<string, string> = {
+    BillingCycle: cycle,
+    Granularity: 'MONTHLY',
+    MaxResults: '300',
+  };
+  // InstanceID 为空时不能传空字符串（会被判为非法参数）
+  if (targetInstance) extras.InstanceID = targetInstance;
 
-    const result = await callAliyun(
-      account.accessKeyId,
-      secret,
-      bss.region,
-      bss.host,
-      '2017-12-14',
-      'DescribeInstanceBill',
-      extras,
-    );
-    const data = result.Data as Record<string, unknown> | undefined;
-    let items = asSlice(data?.Items);
-    if (items.length === 0) items = asSlice((data?.Items as Record<string, unknown>)?.Item);
-    for (const item of items) {
-      const obj = item as Record<string, unknown>;
-      total += number(obj.PretaxAmount);
-      itemCount++;
-    }
-    const next = data?.NextToken ? String(data.NextToken) : '';
-    if (!next || items.length === 0) break;
-    nextToken = next;
+  const result = await callAliyun(
+    account.accessKeyId,
+    secret,
+    bss.region,
+    bss.host,
+    '2017-12-14',
+    'DescribeInstanceBill',
+    extras,
+  );
+  const data = result.Data as Record<string, unknown> | undefined;
+  let items = asSlice(data?.Items);
+  if (items.length === 0) items = asSlice((data?.Items as Record<string, unknown>)?.Item);
+  for (const item of items) {
+    const obj = item as Record<string, unknown>;
+    total += number(obj.PretaxAmount);
+    itemCount++;
   }
   return { totalCost: Math.round(total * 100) / 100, itemCount };
 }

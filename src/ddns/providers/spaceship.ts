@@ -56,11 +56,31 @@ function matches(item: any, host: string, zone: string): boolean {
  * 拉取域名下的全部记录。
  * 字段名可能是 items 或 records，做兼容；该接口一次返回全部记录（不分页），
  * 所以拿到的数组可以直接当作「域名当前完整记录集」用于后续整组写回。
+ *
+ * P1-5：整组覆盖写是不可逆操作，这里必须在返回前做完整性断言 ——
+ * 原实现遇到「响应形状变化」或「空体」会静默返回 []，随后 PUT 一条 A 记录，
+ * 等于把域名的 MX / TXT / CNAME 全部删掉（邮件与域名验证当场中断，且不可撤销）。
+ * 宁可抛错让同步失败，也不能拿一份可能不完整的记录集去覆盖。
  */
 async function fetchAll(zone: string, headers: HeadersInit): Promise<any[]> {
   const data = await requestJson(`${BASE}/dns/records/${encodeURIComponent(zone)}`, { headers });
-  const list = data?.items || data?.records || [];
-  return Array.isArray(list) ? list : [];
+  const list = Array.isArray(data?.items) ? data.items : Array.isArray(data?.records) ? data.records : null;
+  if (!list) {
+    throw new DnsProviderError(
+      'spaceship',
+      '记录接口返回格式异常（未找到 items/records 数组），拒绝整组写回以免误删其他记录',
+    );
+  }
+  // 厂商若改成带 total/count 的分页结构，取到的数组可能只是一页。
+  // 只要给出的总数大于本批长度，就判定不完整并拒绝写回。
+  const totalRaw = Number((data as any)?.total ?? (data as any)?.count ?? NaN);
+  if (Number.isFinite(totalRaw) && totalRaw >= 0 && list.length < totalRaw) {
+    throw new DnsProviderError(
+      'spaceship',
+      `记录分页不完整（取到 ${list.length} 条，声明 ${totalRaw} 条），拒绝整组写回以免误删其他记录`,
+    );
+  }
+  return list;
 }
 
 export const spaceshipProvider: DnsProvider = {

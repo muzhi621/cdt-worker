@@ -114,9 +114,6 @@ export function windowOver(fields: { hour: number; minute: number }, time: strin
   return nowMin > targetMin + Math.floor(windowMs / 60000);
 }
 
-// 关机窗口是否已结束（同一天内）：now 的墙钟分钟 > stopTime + 窗口时长。
-// 供「错过窗口补偿」使用——只在关机窗口结束后的当天补执行，跨天后不再追溯
-//（隔天仍 Running 的实例属于手动/保活意图，不强行关回）。
-export function stopWindowOver(fields: { hour: number; minute: number }, stopTime: string, windowMs: number): boolean {
-  return windowOver(fields, stopTime, windowMs);
-}
+// P2-6：原 stopWindowOver 已删除 —— 它只是 windowOver 的别名，src 下零调用点（死代码）。
+// 「错过窗口补偿」现直接调用 windowOver，语义完全相同：
+// 只在窗口结束后的当天补执行，跨天后不再追溯（隔天仍 Running 的实例属于手动/保活意图，不强行关回）。

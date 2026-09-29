@@ -1,6 +1,6 @@
 // 时区与调度窗口纯函数单测
 import { describe, it, expect } from 'vitest';
-import { dueWithin, inTimeRange, localCycle, stopWindowOver, toZone, windowOver, zoneFields } from '../src/engine/time';
+import { dueWithin, inTimeRange, localCycle, toZone, windowOver, zoneFields } from '../src/engine/time';
 
 describe('dueWithin（定时开关机 2 小时窗口）', () => {
   const WINDOW = 2 * 60 * 60 * 1000;
@@ -52,33 +52,35 @@ describe('inTimeRange（保活时段，支持跨午夜区间）', () => {
   });
 });
 
-describe('stopWindowOver（错过窗口补偿判定）', () => {
+// P2-6：原 stopWindowOver 只是 windowOver 的别名、src 下零调用，已删除。
+// 下面的用例改用 windowOver 覆盖同一语义（错过关机/开机窗口的补偿判定）。
+describe('windowOver 用于错过关机窗口的补偿判定', () => {
   const WINDOW = 2 * 60 * 60 * 1000;
   const f = (hour: number, minute: number) => ({ hour, minute });
 
   it('窗口结束后当天触发补偿（stopTime 12:00，15:00 时窗口已过）', () => {
-    expect(stopWindowOver(f(15, 0), '12:00', WINDOW)).toBe(true);
-    expect(stopWindowOver(f(14, 1), '12:00', WINDOW)).toBe(true);
+    expect(windowOver(f(15, 0), '12:00', WINDOW)).toBe(true);
+    expect(windowOver(f(14, 1), '12:00', WINDOW)).toBe(true);
   });
 
   it('窗口内 / 窗口开始前不触发补偿', () => {
-    expect(stopWindowOver(f(13, 59), '12:00', WINDOW)).toBe(false); // 窗口 12:00–14:00 内
-    expect(stopWindowOver(f(11, 59), '12:00', WINDOW)).toBe(false); // 还没到关机时间
+    expect(windowOver(f(13, 59), '12:00', WINDOW)).toBe(false); // 窗口 12:00–14:00 内
+    expect(windowOver(f(11, 59), '12:00', WINDOW)).toBe(false); // 还没到关机时间
   });
 
   it('窗口结束整点压线不触发（14:00 = stopTime+2h，属于 dueWithin 的窗口末尾）', () => {
-    expect(stopWindowOver(f(14, 0), '12:00', WINDOW)).toBe(false);
+    expect(windowOver(f(14, 0), '12:00', WINDOW)).toBe(false);
   });
 
   it('跨午夜 stopTime（01:00）：窗口 01:00–03:00，窗口内不补偿、03:01 起补偿', () => {
-    expect(stopWindowOver(f(2, 59), '01:00', WINDOW)).toBe(false);
-    expect(stopWindowOver(f(3, 0), '01:00', WINDOW)).toBe(false);
-    expect(stopWindowOver(f(3, 1), '01:00', WINDOW)).toBe(true);
+    expect(windowOver(f(2, 59), '01:00', WINDOW)).toBe(false);
+    expect(windowOver(f(3, 0), '01:00', WINDOW)).toBe(false);
+    expect(windowOver(f(3, 1), '01:00', WINDOW)).toBe(true);
   });
 
   it('非法 stopTime 返回 false', () => {
-    expect(stopWindowOver(f(15, 0), '', WINDOW)).toBe(false);
-    expect(stopWindowOver(f(15, 0), 'xx:yy', WINDOW)).toBe(false);
+    expect(windowOver(f(15, 0), '', WINDOW)).toBe(false);
+    expect(windowOver(f(15, 0), 'xx:yy', WINDOW)).toBe(false);
   });
 });
 

@@ -19,6 +19,11 @@ const StatusUnknown = 'Unknown';
 // 定时开关机命中窗口（2 小时）：容忍外部 cron 延迟，幂等键保证一天只执行一次
 const SCHEDULE_WINDOW_MS = 2 * 60 * 60 * 1000;
 
+// P1-8：账单下次该刷新的时刻（按账号）。进程内状态，isolate 回收后自然回退到
+// 「读一次缓存快照判断」，不会因此丢刷新，只是多一次读。账单不是毫秒级数据，
+// 进程内记录不会造成跨实例不一致的问题（各实例各自按 TTL 刷新，结果都写同一份缓存）。
+const billNextRefreshAt = new Map<number, number>();
+
 export function masked(accessKeyId: string): string {
   return accessKeyId.length <= 7 ? accessKeyId + '***' : accessKeyId.slice(0, 7) + '***';
 }
@@ -34,6 +39,27 @@ export function resolveShutdownMode(account: Account, config: store.Config): str
 function usagePercent(traffic: number, maxTraffic: number): number {
   if (maxTraffic <= 0) return 0;
   return Math.round((traffic / maxTraffic) * 10000) / 100;
+}
+
+/**
+ * P2-1：保活是否对该账号生效 —— 全局开关 AND 账号级未关。
+ * 这个表达式原本在 5 处各写一遍（其中 summary 里的 keepAliveBlocked 与 keepAliveOn
+ * 是完全相同的表达式），语义一旦要调整就得同步改 5 处。收敛成单一函数。
+ * 账号级保活是「收窄」开关：全局开着、账号关掉时保活完全不执行。
+ */
+export function isKeepAliveOn(config: { keepAlive: boolean }, account: Account): boolean {
+  return config.keepAlive && account.keepAlive !== false;
+}
+
+/**
+ * P2-2：账号的定时运行区间（带默认值兜底），供定时/保活/补偿共用。
+ * 原 keepAliveWindowOk 用的是**未兜底**的 account.startTime/stopTime，
+ * 而其他几处都写了 || '08:00' / || '23:00'。于是只填了开机时间、没填关机时间的账号，
+ * inTimeRange(current, '08:00', '') 恒为 false（inTimeRange 对空串直接返回 false），
+ * 保活被永久静默跳过 —— 且因为跳过路径当时不写日志，用户完全无从察觉。
+ */
+export function scheduleWindow(account: Account): { start: string; stop: string } {
+  return { start: account.startTime || '08:00', stop: account.stopTime || '23:00' };
 }
 
 function transient(status: string): boolean {
@@ -72,8 +98,9 @@ function accountVars(
     '地域ID': account.regionId || '',
     '实例': account.instanceId || '',
     '停机模式': resolveShutdownMode(account, config) === 'StopCharging' ? '节省停机' : '普通停机',
-    '开机时间': account.scheduleEnabled ? (account.startTime || '08:00') : '未启用',
-    '关机时间': account.scheduleEnabled ? (account.stopTime || '23:00') : '未启用',
+    // P2-2：展示值也走同一兜底，避免「界面显示空」与「判定按 08:00 算」不一致
+    '开机时间': account.scheduleEnabled ? scheduleWindow(account).start : '未启用',
+    '关机时间': account.scheduleEnabled ? scheduleWindow(account).stop : '未启用',
     '已用流量': `${ctx.traffic.toFixed(2)} GB`,
     '流量上限': `${account.maxTraffic.toFixed(2)} GB`,
     '剩余流量': `${remaining.toFixed(2)} GB`,
@@ -133,21 +160,21 @@ export async function processAccount(
   // 定时开关机
   // 命中窗口放宽到 2 小时：外部 cron（GitHub Actions 等）常有数分钟到数十分钟延迟，
   // 窗口过窄会整天错过；action_events 幂等键（含日期）保证同一天只执行一次
+  // P1-1：两个动作必须互斥。窗口宽达 2 小时，若 start/stop 间隔 ≤ 2h（如误配 08:00 / 09:00），
+  // 两个独立 if 会在同一轮内先 start 再 stop —— 实例被反复启停，且多耗 4~6 个 subrequest、
+  // 触发阿里云 Throttling.User；幂等键带 action，两个键都算新键，幂等拦不住。
+  // 故：本轮已成功执行了定时开机，就不再执行定时关机（关机留给下一轮窗口）。
   if (account.scheduleEnabled) {
+    let scheduleActed = false;
     if (dueWithin(local, account.startTime, SCHEDULE_WINDOW_MS)) {
-      const changed = await executeScheduledAction(env, config, account, 'start', now);
-      if (changed) {
-        actions.push('scheduled_start');
-        statusChangedBySchedule = true;
-      }
+      scheduleActed = await executeScheduledAction(env, config, account, 'start', now);
+      if (scheduleActed) actions.push('scheduled_start');
     }
-    if (dueWithin(local, account.stopTime, SCHEDULE_WINDOW_MS)) {
-      const changed = await executeScheduledAction(env, config, account, 'stop', now);
-      if (changed) {
-        actions.push('scheduled_stop');
-        statusChangedBySchedule = true;
-      }
+    if (!scheduleActed && dueWithin(local, account.stopTime, SCHEDULE_WINDOW_MS)) {
+      scheduleActed = await executeScheduledAction(env, config, account, 'stop', now);
+      if (scheduleActed) actions.push('scheduled_stop');
     }
+    statusChangedBySchedule = scheduleActed;
   }
 
   // 刷新频率判断
@@ -254,9 +281,9 @@ export async function processAccount(
   // 语义说明：定时启用时，窗口外的 Running 实例一律会被关回（含手动开机的场景）；
   // 跨天后不再追溯（隔天仍 Running 视为手动/保活意图）。
   if (account.scheduleEnabled && !statusChangedBySchedule && status === StatusRunning) {
-    const stopTime = account.stopTime || '23:00';
-    if (!inTimeRange(hhmm, account.startTime || '08:00', stopTime)
-        && windowOver(localFields, stopTime, SCHEDULE_WINDOW_MS)) {
+    const win = scheduleWindow(account); // P2-2：统一兜底，避免空串让窗口判断恒假
+    if (!inTimeRange(hhmm, win.start, win.stop)
+        && windowOver(localFields, win.stop, SCHEDULE_WINDOW_MS)) {
       const changed = await executeScheduledAction(env, config, account, 'stop', now);
       if (changed) {
         actions.push('scheduled_stop_compensated');
@@ -280,10 +307,10 @@ export async function processAccount(
   // 跨天窗口（如 16:00–02:00）的凌晨段不补偿：开机窗口属于昨天，日期归属复杂且价值低，
   // 交由保活兜底；此处只在「今天的开机窗口已过、且仍在今天窗口内」时补。
   if (account.scheduleEnabled && !statusChangedBySchedule && status === StatusStopped) {
-    const startTime = account.startTime || '08:00';
-    if (inTimeRange(hhmm, startTime, account.stopTime || '23:00')
-        && !dueWithin(local, startTime, SCHEDULE_WINDOW_MS)
-        && windowOver(localFields, startTime, SCHEDULE_WINDOW_MS)) {
+    const win = scheduleWindow(account); // P2-2：统一兜底，避免空串让窗口判断恒假
+    if (inTimeRange(hhmm, win.start, win.stop)
+        && !dueWithin(local, win.start, SCHEDULE_WINDOW_MS)
+        && windowOver(localFields, win.start, SCHEDULE_WINDOW_MS)) {
       const changed = await executeScheduledAction(env, config, account, 'start', now);
       if (changed) {
         actions.push('scheduled_start_compensated');
@@ -296,9 +323,10 @@ export async function processAccount(
   }
 
   // 保活：全局开关 AND 账号级开关（accounts.keep_alive 此前只写不读，属死字段）
-  const keepAliveOn = config.keepAlive && account.keepAlive !== false;
+  const keepAliveOn = isKeepAliveOn(config, account); // P2-1：与 summary/控制路径共用同一判定
+  const win = scheduleWindow(account);
   const keepAliveWindowOk = !account.scheduleEnabled
-    || inTimeRange(hhmm, account.startTime, account.stopTime);
+    || inTimeRange(hhmm, win.start, win.stop);
   // 保活可观测性：实例确已停止却没能启动，说明存在阻断因素，必须留痕。
   // 此前只有「保活启动成功」会写日志，而自定义变量恰恰想知道的是「为什么这次没保活」，
   // 结果整个跳过路径完全黑盒（定时时段外/阈值超限/与定时策略冲突都无声无息）。
@@ -348,39 +376,53 @@ export async function processAccount(
     // 5 个账号若都用同一个 TTL，会在同一轮同时 miss 并各自发起 2 次阿里云 fetch + 2 次写缓存，
     // 形成尖峰（+10 subrequest）直接撞 Free 计划的 50 上限；抖动后 miss 被分散到不同轮次。
     const BILL_TTL_HOURS = (10 + (account.id % 7)) / 60;
+    const BILL_TTL_MS = BILL_TTL_HOURS * 3600 * 1000;
     const cycle = localCycle(now, config.timezone); // 配置时区月份 YYYY-MM
-    // 一次查询取回 balance + instance_bill 两个 kind，替代两次 billingCache()（省 1 subrequest/轮）
-    const snap = await store.billingSnapshot<{ amount?: number; currency?: string; totalCost?: number }>(
-      env, account.id, { balance: '', instance_bill: cycle }, BILL_TTL_HOURS,
-    );
-    const balanceHit = snap.balance?.hit ?? false;
-    const billHit = snap.instance_bill?.hit ?? false;
-    try {
-      if (!balanceHit) {
-        const balance = await aliyun.getAccountBalance(account, account.accessKeySecret);
-        await store.setBillingCache(env, account.id, 'balance', '', balance);
+
+    // P1-8：原实现每轮每账号都无条件读一次缓存快照，而本轮 processAccount 并不使用它的
+    // 返回值（真正给通知用的是懒加载的 peekBillingText）。命中缓存的那些轮次，这个读唯一的
+    // 作用是把「不查」变成一次 D1 往返 —— 5 账号 × 288 轮/天 ≈ 1440 个纯读开销。
+    // 改为进程内记住「下次该刷新的时刻」：稳态下不再读缓存，直接按 TTL 判断要不要刷新。
+    // 冷 isolate（nextAt 未知）时回退到读一次快照，避免重启就无条件打阿里云。
+    const nextAt = billNextRefreshAt.get(account.id);
+    if (nextAt === undefined || now.getTime() >= nextAt) {
+      // 冷 isolate 时先读一次快照判断是否真的过期，避免重启就无条件打阿里云；
+      // 之后进程内已记住时刻，直接按 TTL 判定，不再为「判断要不要查」付一次 D1 读。
+      let shouldRefresh = true;
+      if (nextAt === undefined) {
+        // 一次查询取回 balance + instance_bill 两个 kind，替代两次 billingCache()（省 1 subrequest）
+        const snap = await store.billingSnapshot<{ amount?: number; currency?: string; totalCost?: number }>(
+          env, account.id, { balance: '', instance_bill: cycle }, BILL_TTL_HOURS,
+        );
+        shouldRefresh = !(snap.balance?.hit && snap.instance_bill?.hit);
       }
-    } catch (err) {
-      await store.addLog(env, 'error', `余额查询失败 [${masked(account.accessKeyId)}]: ${err}`);
-    }
-    try {
-      if (!billHit) {
-        // 先按实例查；无数据时回退到账号级（当月账单延迟出账、或包年包月实例无账单时）
-        let bill = await aliyun.getInstanceBill(account, account.accessKeySecret, cycle);
-        let scope = '实例';
-        if ((!bill.totalCost || !bill.itemCount) && account.instanceId) {
-          const accountBill = await aliyun.getInstanceBill(account, account.accessKeySecret, cycle, '');
-          if (accountBill.totalCost > 0) {
-            bill = accountBill;
-            scope = '账号';
-          }
+      if (shouldRefresh) {
+        try {
+          const balance = await aliyun.getAccountBalance(account, account.accessKeySecret);
+          await store.setBillingCache(env, account.id, 'balance', '', balance);
+        } catch (err) {
+          await store.addLog(env, 'error', `余额查询失败 [${masked(account.accessKeyId)}]: ${err}`);
         }
-        await store.setBillingCache(env, account.id, 'instance_bill', cycle, bill);
-        await store.addLog(env, 'info',
-          `账单已刷新 [${masked(account.accessKeyId)}] ${cycle} ${scope}账单 ¥${bill.totalCost}（${bill.itemCount ?? 0} 条）`);
+        try {
+          // 先按实例查；无数据时回退到账号级（当月账单延迟出账、或包年包月实例无账单时）
+          let bill = await aliyun.getInstanceBill(account, account.accessKeySecret, cycle);
+          let scope = '实例';
+          if ((!bill.totalCost || !bill.itemCount) && account.instanceId) {
+            const accountBill = await aliyun.getInstanceBill(account, account.accessKeySecret, cycle, '');
+            if (accountBill.totalCost > 0) {
+              bill = accountBill;
+              scope = '账号';
+            }
+          }
+          await store.setBillingCache(env, account.id, 'instance_bill', cycle, bill);
+          await store.addLog(env, 'info',
+            `账单已刷新 [${masked(account.accessKeyId)}] ${cycle} ${scope}账单 ¥${bill.totalCost}（${bill.itemCount ?? 0} 条）`);
+        } catch (err) {
+          await store.addLog(env, 'error', `账单查询失败 [${masked(account.accessKeyId)}]: ${err}`);
+        }
       }
-    } catch (err) {
-      await store.addLog(env, 'error', `账单查询失败 [${masked(account.accessKeyId)}]: ${err}`);
+      // 无论刷新成功与否都推进下次时刻：失败时按 TTL 退避，避免持续故障下每轮都打阿里云
+      billNextRefreshAt.set(account.id, now.getTime() + BILL_TTL_MS);
     }
   }
 
@@ -436,7 +478,8 @@ async function executeScheduledAction(
   // key 对齐原项目 scheduleActionKey：schedule:{id}:{YYYYMMDD}:{action}:{配置时间}
   // 注意：时间维度必须用「配置的固定时间」而非「当前墙钟分钟」——
   // 否则 2 小时命中窗口内每分钟 key 都不同，去重失效，导致重复调用启停 API。
-  const configuredTime = action === 'start' ? (account.startTime || '08:00') : (account.stopTime || '23:00');
+  const win = scheduleWindow(account); // P2-2：与判定侧同源，避免幂等键与判定用不同兜底值
+  const configuredTime = action === 'start' ? win.start : win.stop;
   const f = zoneFields(now, config.timezone);
   let dateStr = `${f.year}${String(f.month).padStart(2, '0')}${String(f.day).padStart(2, '0')}`;
   // 跨午夜窗口归属：若 now 的墙钟早于配置时间（即命中的是「昨天」该时刻的窗口，
@@ -501,7 +544,7 @@ export async function control(
   // 与前端按钮禁用状态(keepAliveBlocked)保持同一语义：账号级保活关闭时手动关机必须放行。
   // 此前这里只看全局开关，导致「关掉账号保活 → 前端解禁关机按钮 → 点下去被后端拒绝」，
   // 且错误文案还提示用户去关保活，与他刚刚做过的操作完全相反。
-  if (config.keepAlive && account.keepAlive !== false && action === 'stop') {
+  if (isKeepAliveOn(config, account) && action === 'stop') {
     throw new Error('manual shutdown is disabled while keep-alive is enabled');
   }
   await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
@@ -538,25 +581,28 @@ export async function control(
 export async function summary(env: Env) {
   const config = await store.getConfig(env);
   const cycle = localCycle(new Date(), config.timezone); // 配置时区月份，与账单缓存键一致
+  // P1-9：账单快照**批量**取回（D1 的 account_id IN 只算 1 个 subrequest），
+  // 替代原先「账号循环内逐个查询」的 N+1 —— 5 账号时每次刷新 7 → 3。
+  // TTL 传大值表示"取缓存即可"。取不到时退化为全未命中，不影响其余字段。
+  const snaps = config.enableBilling
+    ? await store.billingSnapshotMany<{ amount?: number; currency?: string; totalCost?: number }>(
+        env, config.accounts.map((a) => a.id), { balance: '', instance_bill: cycle }, 8760,
+      ).catch(() => new Map<number, Record<string, { hit: boolean; value?: { amount?: number; currency?: string; totalCost?: number } }>>())
+    : new Map<number, Record<string, { hit: boolean; value?: { amount?: number; currency?: string; totalCost?: number } }>>();
   const result = [];
   for (const account of config.accounts) {
     const percentage = usagePercent(account.trafficUsed, account.maxTraffic);
-    // 账户余额 / 本月消费：读账单缓存（TTL 传大值表示"取缓存即可"，未开启账单则为 null）
+    // 账户余额 / 本月消费：读账单缓存（未开启账单则为 null）
     let balance: number | null = null;
     let cost: number | null = null;
     let currency = 'CNY';
     if (config.enableBilling) {
-      try {
-        // P0-T2：改为一次查询取回 balance + instance_bill 两个 kind（billingSnapshot），
-        // 替代两次独立 billingCache()，状态页每次刷新每账号省 1 个 subrequest（详见第三轮审查）。
-        const snap = await store.billingSnapshot<{ amount?: number; currency?: string; totalCost?: number }>(
-          env, account.id, { balance: '', instance_bill: cycle }, 8760);
-        if (snap.balance?.hit && snap.balance.value) {
-          balance = snap.balance.value.amount ?? null;
-          currency = snap.balance.value.currency || 'CNY';
-        }
-        if (snap.instance_bill?.hit && snap.instance_bill.value) cost = snap.instance_bill.value.totalCost ?? null;
-      } catch { /* 账单读取失败忽略 */ }
+      const snap = snaps.get(account.id);
+      if (snap?.balance?.hit && snap.balance.value) {
+        balance = snap.balance.value.amount ?? null;
+        currency = snap.balance.value.currency || 'CNY';
+      }
+      if (snap?.instance_bill?.hit && snap.instance_bill.value) cost = snap.instance_bill.value.totalCost ?? null;
     }
     result.push({
       id: account.id,
@@ -575,12 +621,12 @@ export async function summary(env: Env) {
       scheduleEnabled: account.scheduleEnabled,
       // 保活开启时后端会拒绝手动关机（config.keepAlive && 账号级保活未关），
       // 前端据此禁用按钮并给出原因，避免"点了没反应"的困惑
-      keepAliveBlocked: config.keepAlive && account.keepAlive !== false,
+      keepAliveBlocked: isKeepAliveOn(config, account),
       // 保活对该账号是否真的生效（全局开关 AND 账号级未关）。
       // 账号级保活是「收窄」开关：全局开着、账号关掉时保活完全不执行，而上一版的跳过
       // 日志也卡在同一个条件上，于是整个「没保活」路径彻底静默——日志里既看不到保活启动，
       // 也看不到跳过原因，用户无法分辨「保活没开」还是「保活坏了」。必须在界面上显性化。
-      keepAliveOn: config.keepAlive && account.keepAlive !== false,
+      keepAliveOn: isKeepAliveOn(config, account),
       balance,
       cost,
       currency,

@@ -13,6 +13,13 @@ import {
 const NOTIFY_SECRET_PATHS: [string, string][] = [
   ['telegram', 'token'],
   ['webhook', 'secret'],
+  // P1-6：webhook 的 url / headers 恰恰是最容易夹带凭据的两个字段——
+  // 钉钉/飞书/企业微信机器人的 access_token 就写在 URL 查询串里，
+  // headers 常被填成 {"Authorization":"Bearer xxx"}。明文落库等于交出机器人发信权限。
+  // 注意：url 因此被归入密钥语义，配置接口只回 urlConfigured 标志（见 http/server.ts），
+  // 保存时留空继承旧值，与其它密钥字段一致。
+  ['webhook', 'url'],
+  ['webhook', 'headers'],
   ['serverchan', 'sendKey'],
   ['pushplus', 'token'],
   ['smtp', 'password'],
@@ -578,9 +585,10 @@ export async function listLogs(
   // COUNT 上限截断：日志保留 30 天时会有数万行，全表 COUNT 没有索引下界可利用，
   // 每次翻页都实算一次纯属浪费。超过 COUNT_CAP 就按"已有足够多"返回，前端翻页到上限即可。
   // 注意 COUNT_CAP 不能太大：日志页前端每 10 秒自动刷新一次，5 个管理员同时开着页面，
-  // 每分钟就是 30 次全量 COUNT 扫描，直接撞 D1 免费 5M 行/天读取配额。10000 已经够展示
-  // 「总页数」的观感，也把单次扫描行数压到可控范围。
-  const COUNT_CAP = 10000;
+  // 每分钟就是 30 次全量 COUNT 扫描，直接撞 D1 免费 5M 行/天读取配额。
+  // P2-10：10000 → 2000。日志页每页 50 条，2000 条 = 40 页，已经远超任何真实的翻页深度；
+  // 而每次扫描的行数与配额消耗直接按这个上限走，砍到 2000 等于把这块读开销降到 1/5。
+  const COUNT_CAP = 2000;
   const totalRow = await env.DB.prepare(
     'SELECT COUNT(*) AS c FROM (SELECT 1 FROM logs ' + where + ' LIMIT ' + COUNT_CAP + ')',
   ).bind(...params).first();
@@ -678,7 +686,30 @@ export async function deleteActionEvent(env: Env, key: string): Promise<void> {
   await env.DB.prepare('DELETE FROM action_events WHERE key = ?').bind(key).run();
 }
 
-// 账单缓存
+/**
+ * P2-4：解析 D1 的 datetime('now') 时间戳。
+ * 它返回的是 UTC 无时区字符串（YYYY-MM-DD HH:MM:SS），**必须按 UTC 解析** ——
+ * 直接 Date.parse 会让 JS 当本地时间处理，东八区会整整差 8 小时。
+ * 这段解析 + TTL 判定原先在 billingCache / billingSnapshot / server.ts 里逐字重复三遍，
+ * 收敛到一个地方：哪天要修 TTL 语义，只需改 here。
+ */
+export function parseD1Utc(raw: unknown): number {
+  const s = String(raw ?? '');
+  const utcMs = Date.parse(s.replace(' ', 'T') + 'Z');
+  return isNaN(utcMs) ? Date.parse(s) : utcMs;
+}
+
+/** P2-4：写入时刻是否仍在 TTL 内。解析失败（NaN）视为过期——保守处理，宁可重取。 */
+export function withinTtl(updatedMs: number, ttlHours: number, nowMs = Date.now()): boolean {
+  if (!Number.isFinite(updatedMs)) return false;
+  return nowMs - updatedMs <= ttlHours * 3600 * 1000;
+}
+
+// 账单缓存（单个 kind）
+// P2-3：@deprecated —— src 下已无调用方，全部改用 billingSnapshot / billingSnapshotMany
+//（一次查询取回多个 kind，D1 的 IN 只算 1 个 subrequest）。保留仅供测试做负向断言：
+// test/billing-query-count.test.ts 断言「summary 不再调用它」，用来钉住 P0-R2 的修复。
+// 新增业务代码请勿使用。
 export async function billingCache<T>(
   env: Env,
   accountId: number,
@@ -690,12 +721,9 @@ export async function billingCache<T>(
     'SELECT value, updated_at FROM billing_cache WHERE account_id = ? AND kind = ? AND cycle = ?',
   ).bind(accountId, kind, cycle).first();
   if (!row) return { hit: false };
-  // D1 的 datetime('now') 返回 UTC 无时区字符串（YYYY-MM-DD HH:MM:SS），需按 UTC 解析，
-  // 否则 JS 会当本地时间解析导致 TTL 偏移（东八区会差 8 小时）
-  const raw = String((row as Record<string, unknown>).updated_at ?? '');
-  const utcMs = Date.parse(raw.replace(' ', 'T') + 'Z');
-  const updatedMs = isNaN(utcMs) ? Date.parse(raw) : utcMs;
-  if (Date.now() - updatedMs > ttlHours * 3600 * 1000) return { hit: false };
+  // P2-4：D1 UTC 解析 + TTL 判定收敛到 parseD1Utc / withinTtl
+  const updatedMs = parseD1Utc((row as Record<string, unknown>).updated_at);
+  if (!withinTtl(updatedMs, ttlHours)) return { hit: false };
   try {
     return { hit: true, value: JSON.parse(String(row.value)) as T };
   } catch {
@@ -743,11 +771,8 @@ export async function billingSnapshot<T>(
     const kind = String(row.kind);
     // cycle 必须与该 kind 的期望值精确匹配（balance 是 ''，instance_bill 是 'YYYY-MM'）
     if (String(row.cycle ?? '') !== (cycleFor[kind] ?? '')) continue;
-    // TTL 判断：D1 的 datetime('now') 返回 UTC 无时区字符串，需按 UTC 解析（东八区会差 8 小时）
-    const raw = String(row.updated_at ?? '');
-    const utcMs = Date.parse(raw.replace(' ', 'T') + 'Z');
-    const updatedMs = isNaN(utcMs) ? Date.parse(raw) : utcMs;
-    if (nowMs - updatedMs > ttlHours * 3600 * 1000) continue; // 过期视为未命中
+    // P2-4：复用 parseD1Utc / withinTtl（D1 UTC 解析 + TTL 判定）
+    if (!withinTtl(parseD1Utc(row.updated_at), ttlHours, nowMs)) continue; // 过期视为未命中
     try {
       out[kind] = { hit: true, value: JSON.parse(String(row.value)) as T };
     } catch { out[kind] = { hit: false }; }
@@ -755,10 +780,59 @@ export async function billingSnapshot<T>(
   return out;
 }
 
+/**
+ * P1-9：一次查询取回**多个账号**的多个账单缓存 kind。
+ * summary() 被 /api/v1/status 与 /api/v1/widget/summary 调用，前端轮询刷新，
+ * 原实现在「账号循环内」逐个 billingSnapshot → N 账号就是 N 个 subrequest/次刷新。
+ * D1 的 `account_id IN (?,?...)` 只算 1 个 subrequest，5 账号时每次刷新 7 → 3。
+ * 返回按 accountId 索引的快照；未查到任何记录的账号也会得到全 hit:false 的结构。
+ */
+export async function billingSnapshotMany<T>(
+  env: Env,
+  accountIds: number[],
+  cycleFor: Record<string, string>,
+  ttlHours: number,
+): Promise<Map<number, Record<string, { hit: boolean; value?: T }>>> {
+  const ids = accountIds.filter((id) => Number.isFinite(id) && id > 0);
+  const kinds = Object.keys(cycleFor);
+  const out = new Map<number, Record<string, { hit: boolean; value?: T }>>();
+  for (const id of ids) {
+    const blank: Record<string, { hit: boolean; value?: T }> = {};
+    for (const k of kinds) blank[k] = { hit: false };
+    out.set(id, blank);
+  }
+  if (ids.length === 0 || kinds.length === 0) return out;
+
+  const idPh = ids.map(() => '?').join(',');
+  const kindPh = kinds.map(() => '?').join(',');
+  const rows = await env.DB.prepare(
+    `SELECT account_id, kind, cycle, value, updated_at FROM billing_cache
+     WHERE account_id IN (${idPh}) AND kind IN (${kindPh})`,
+  ).bind(...ids, ...kinds).all();
+
+  const nowMs = Date.now();
+  for (const r of rows.results ?? []) {
+    const row = r as Record<string, unknown>;
+    const accId = Number(row.account_id);
+    const kind = String(row.kind);
+    const bucket = out.get(accId);
+    if (!bucket || !(kind in bucket)) continue;
+    // cycle 必须与该 kind 的期望值精确匹配（balance 是 ''，instance_bill 是 'YYYY-MM'）
+    if (String(row.cycle ?? '') !== (cycleFor[kind] ?? '')) continue;
+    // P2-4：复用 parseD1Utc / withinTtl（D1 UTC 解析 + TTL 判定）
+    if (!withinTtl(parseD1Utc(row.updated_at), ttlHours, nowMs)) continue; // 过期视为未命中
+    try {
+      bucket[kind] = { hit: true, value: JSON.parse(String(row.value)) as T };
+    } catch { bucket[kind] = { hit: false }; }
+  }
+  return out;
+}
+
 // 通知 Outbox
 export async function addOutbox(env: Env, channel: string, payload: unknown): Promise<void> {
+  // P1-11：一并写入入队时间 created_at，供「超过 giveUpSeconds 则放弃」判定使用
   await env.DB.prepare(
-    'INSERT INTO notification_outbox (channel, payload, available_at) VALUES (?,?,unixepoch())',
+    'INSERT INTO notification_outbox (channel, payload, available_at, created_at) VALUES (?,?,unixepoch(),unixepoch())',
   ).bind(channel, JSON.stringify(payload)).run();
 }
 
@@ -785,17 +859,21 @@ export async function markOutboxSent(env: Env, id: number): Promise<void> {
   ).bind(id).run();
 }
 
-// 发送失败：延迟 retrySeconds 后重试；若首条入队已超过 giveUpSeconds 则放弃
+// 发送失败：延迟 retrySeconds 后重试；若首条入队已超过 giveUpSeconds 则放弃。
+//
+// P1-11：两处修正。
+// ① 判定基准改为 created_at（入队时间）。原先用 updated_at，而它每次重试都被刷成当前时间，
+//    age 实际是「距上次重试」——重试间隔 300s < 放弃阈值 24h，记录永远不会被放弃，
+//    失败通知会无限重试。COALESCE 兜底老数据（created_at=0 时退回 updated_at）。
+// ② 去掉了原来「先 SELECT 再 UPDATE」的那次读：flushOutbox 每轮最多 10 行，
+//    全部失败时多 10 个 subrequest。改为直接发一条带条件的 UPDATE，用 meta.changes 判断
+//    是否命中「放弃」分支；未命中再发重试 UPDATE。
 export async function markOutboxRetry(env: Env, id: number, error: string, retrySeconds: number, giveUpSeconds: number): Promise<'retry' | 'failed'> {
-  const row = await env.DB.prepare('SELECT updated_at FROM notification_outbox WHERE id = ?').bind(id).first();
-  const updatedAt = getNumber(row, 'updated_at');
-  const age = Math.floor(Date.now() / 1000) - updatedAt;
-  if (age >= giveUpSeconds) {
-    await env.DB.prepare(
-      "UPDATE notification_outbox SET status = 'failed', error = ?, updated_at = unixepoch() WHERE id = ?",
-    ).bind(error.slice(0, 500), id).run();
-    return 'failed';
-  }
+  const giveUp = await env.DB.prepare(
+    `UPDATE notification_outbox SET status = 'failed', error = ?, updated_at = unixepoch()
+     WHERE id = ? AND (unixepoch() - COALESCE(NULLIF(created_at, 0), updated_at)) >= ?`,
+  ).bind(error.slice(0, 500), id, giveUpSeconds).run();
+  if ((giveUp?.meta?.changes ?? 0) > 0) return 'failed';
   await env.DB.prepare(
     "UPDATE notification_outbox SET error = ?, available_at = unixepoch() + ?, updated_at = unixepoch() WHERE id = ?",
   ).bind(error.slice(0, 500), retrySeconds, id).run();

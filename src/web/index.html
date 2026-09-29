@@ -3384,7 +3384,9 @@
         $("nt-tg-token").placeholder = t.tokenConfigured ? "已配置，留空保持不变" : "123456:ABC-DEF...";
         $("nt-tg-chat").value = t.chatId || "";
         $("nt-wh-enabled").checked = !!w.enabled;
-        $("nt-wh-url").value = w.url || "";
+        // P1-6：webhook url 已归为密钥（机器人 access_token 常写在查询串里），后端只回标志位
+        $("nt-wh-url").value = "";
+        $("nt-wh-url").placeholder = w.urlConfigured ? "已配置，留空保持不变" : "https://oapi.dingtalk.com/robot/send?access_token=...";
         $("nt-sc-enabled").checked = !!sc.enabled;
         $("nt-sc-key").value = sc.sendKey || "";
         $("nt-sc-key").placeholder = sc.sendKeyConfigured ? "已配置，留空保持不变" : "SCT...";
