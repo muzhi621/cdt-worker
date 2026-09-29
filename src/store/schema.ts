@@ -22,6 +22,9 @@ const SCHEMA_STATEMENTS: string[] = [
     start_time TEXT NOT NULL DEFAULT '',
     stop_time TEXT NOT NULL DEFAULT '',
     schedule_enabled INTEGER NOT NULL DEFAULT 0,
+    cycle_enabled INTEGER NOT NULL DEFAULT 0,
+    cycle_anchor TEXT NOT NULL DEFAULT '',
+    cycle_days INTEGER NOT NULL DEFAULT 10,
     keep_alive INTEGER NOT NULL DEFAULT 0,
     instance_status TEXT NOT NULL DEFAULT 'Unknown',
     traffic_used REAL NOT NULL DEFAULT 0,
@@ -178,6 +181,11 @@ const SCHEMA_STATEMENTS: string[] = [
 export const MIGRATIONS: string[] = [
   // 账号级停机模式：'' 表示跟随系统全局设置，StopCharging/KeepCharging 覆盖全局
   `ALTER TABLE accounts ADD COLUMN shutdown_mode TEXT NOT NULL DEFAULT ''`,
+  // 「基准时间 + N 天循环开关机」：与每日定时（schedule_enabled）互斥。
+  // cycle_anchor 为基准时间 "YYYY-MM-DD HH:mm:ss"（按全局时区解释）；cycle_days 为一个相位的天数。
+  `ALTER TABLE accounts ADD COLUMN cycle_enabled INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE accounts ADD COLUMN cycle_anchor TEXT NOT NULL DEFAULT ''`,
+  `ALTER TABLE accounts ADD COLUMN cycle_days INTEGER NOT NULL DEFAULT 10`,
   // jobs 表早已零引用（通知走 notification_outbox、账单走 billing_cache），直接回收
   `DROP TABLE IF EXISTS jobs`,
   // 解析记录改为引用独立凭据：新增 credential_id（0 表示尚未绑定凭据）

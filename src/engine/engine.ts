@@ -7,7 +7,7 @@ import * as aliyun from '../provider/aliyun';
 import * as store from '../store/store';
 import { deliverEvent, hasActiveChannel, type NotificationEvent, type NotifyConfig } from '../notify/service';
 import { newToken, type Env } from '../security/security';
-import { dueWithin, inTimeRange, localCycle, toZone, windowOver, zoneFields } from './time';
+import { cyclePhase, dueWithin, inTimeRange, localCycle, toZone, windowOver, zoneFields, type CyclePhase } from './time';
 
 // 状态常量（与原 Go 项目一致）
 const StatusStarting = 'Starting';
@@ -99,8 +99,11 @@ function accountVars(
     '实例': account.instanceId || '',
     '停机模式': resolveShutdownMode(account, config) === 'StopCharging' ? '节省停机' : '普通停机',
     // P2-2：展示值也走同一兜底，避免「界面显示空」与「判定按 08:00 算」不一致
-    '开机时间': account.scheduleEnabled ? scheduleWindow(account).start : '未启用',
-    '关机时间': account.scheduleEnabled ? scheduleWindow(account).stop : '未启用',
+    '定时模式': account.cycleEnabled ? 'N天循环' : (account.scheduleEnabled ? '每日定时' : '未启用'),
+    '开机时间': account.cycleEnabled ? `循环模式（每 ${account.cycleDays || 10} 天交替）` : (account.scheduleEnabled ? scheduleWindow(account).start : '未启用'),
+    '关机时间': account.cycleEnabled ? `循环模式（每 ${account.cycleDays || 10} 天交替）` : (account.scheduleEnabled ? scheduleWindow(account).stop : '未启用'),
+    '循环基准时间': account.cycleEnabled ? (account.cycleAnchor || '') : '',
+    '循环周期(天)': account.cycleEnabled ? String(account.cycleDays || 10) : '',
     '已用流量': `${ctx.traffic.toFixed(2)} GB`,
     '流量上限': `${account.maxTraffic.toFixed(2)} GB`,
     '剩余流量': `${remaining.toFixed(2)} GB`,
@@ -156,6 +159,13 @@ export async function processAccount(
 
   // 当前配置时区墙钟 HH:mm（定时/保活/补偿共用）
   const hhmm = `${String(localFields.hour).padStart(2, '0')}:${String(localFields.minute).padStart(2, '0')}`;
+
+  // 「基准时间 + N 天循环开关机」当前相位（未启用则为 null）。
+  // 与每日定时互斥（服务端在写入时保证不会同时开启），故两者最多只有一个生效。
+  // 相位按配置时区判定，与每日定时「按配置时区开关机」语义一致。
+  const cycle: CyclePhase | null = account.cycleEnabled
+    ? cyclePhase(now, config.timezone, account.cycleAnchor, account.cycleDays)
+    : null;
 
   // 定时开关机
   // 命中窗口放宽到 2 小时：外部 cron（GitHub Actions 等）常有数分钟到数十分钟延迟，
@@ -322,11 +332,36 @@ export async function processAccount(
     }
   }
 
+  // 「基准时间 + N 天循环开关机」执行：目标状态由相位推导（偶数相位开机 / 奇数相位关机）。
+  // 只在「当前状态与目标不符」时下发指令，并用「相位边界 + 动作」幂等键保证同一相位只成功执行
+  // 一次；失败删键、下一轮自动重试（与每日定时的补偿语义一致）。
+  // 断档容忍：即使监控在相位切换点宕机，恢复后只要状态与目标不符就会补执行，不会漏掉整个相位。
+  // 放在刷新之后执行，用的是本轮最新的实例状态（与两个补偿块同源）。
+  if (cycle && cycle.started && !statusChangedBySchedule && (status === StatusRunning || status === StatusStopped)) {
+    const wantStart = cycle.on;
+    const mismatched = wantStart ? status === StatusStopped : status === StatusRunning;
+    if (mismatched) {
+      const changed = await executeCycleAction(env, config, account, wantStart ? 'start' : 'stop', cycle, now);
+      if (changed) {
+        actions.push(wantStart ? 'cycle_start' : 'cycle_stop');
+        status = wantStart ? StatusStarting : StatusStopping;
+        statusChangedBySchedule = true; // 抑制本轮保活，避免与刚下发的循环指令冲突
+      }
+    }
+  }
+
   // 保活：全局开关 AND 账号级开关（accounts.keep_alive 此前只写不读，属死字段）
   const keepAliveOn = isKeepAliveOn(config, account); // P2-1：与 summary/控制路径共用同一判定
   const win = scheduleWindow(account);
-  const keepAliveWindowOk = !account.scheduleEnabled
-    || inTimeRange(hhmm, win.start, win.stop);
+  // 保活只在「定时/循环允许运行的时段」内生效：
+  //   每日定时 → 落在 start~stop 运行窗口内；
+  //   N 天循环 → 处于开机相位（且已过基准时间）。
+  // 否则循环的关机相位会被保活反复拉起，导致启停互相打架。
+  const keepAliveWindowOk = account.scheduleEnabled
+    ? inTimeRange(hhmm, win.start, win.stop)
+    : account.cycleEnabled
+      ? !!cycle && cycle.started && cycle.on
+      : true;
   // 保活可观测性：实例确已停止却没能启动，说明存在阻断因素，必须留痕。
   // 此前只有「保活启动成功」会写日志，而自定义变量恰恰想知道的是「为什么这次没保活」，
   // 结果整个跳过路径完全黑盒（定时时段外/阈值超限/与定时策略冲突都无声无息）。
@@ -435,7 +470,8 @@ export async function processAccount(
   // 去重：与定时/阈值/保活等已发专项通知的场景不再重复发送。
   const statusChanged = status !== previousStatus;
   const hasActionNotification = actions.some((a) =>
-    a === 'scheduled_start' || a === 'scheduled_stop' || a === 'threshold_stop' || a === 'keepalive_start',
+    a === 'scheduled_start' || a === 'scheduled_stop' || a === 'cycle_start' || a === 'cycle_stop'
+    || a === 'threshold_stop' || a === 'keepalive_start',
   );
   const stableChanged = statusChanged &&
     (status === StatusRunning || status === StatusStopped) &&
@@ -513,6 +549,43 @@ async function executeScheduledAction(
   await store.addLog(env, 'info', `执行定时${action === 'start' ? '开机' : '关机'} [${masked(account.accessKeyId)}]`);
   if (config.enableScheduleMail) {
     const event = newEvent('schedule', '定时任务已执行', `实例定时${action === 'start' ? '开机' : '关机'}指令已发送。`, account.id, {
+      ...accountVars(account, config, {
+        traffic: account.trafficUsed, status, percentage: usagePercent(account.trafficUsed, account.maxTraffic), now,
+        timezone: config.timezone, balance: '', cost: '',
+      }),
+    });
+    await store.addOutbox(env, 'notify', event);
+  }
+  return true;
+}
+
+// 「基准时间 + N 天循环开关机」的动作执行（与 executeScheduledAction 同构，供相位切换使用）。
+// 幂等键：cycle:{id}:{相位起始 YYYYMMDD}:{action}——同一相位边界只成功执行一次；
+// 相位转换点每 N 天才出现一次，键天然稀疏，几乎不占 D1 写入。
+async function executeCycleAction(
+  env: Env,
+  config: store.Config,
+  account: Account,
+  action: 'start' | 'stop',
+  phase: CyclePhase,
+  now: Date,
+): Promise<boolean> {
+  const key = `cycle:${account.id}:${phase.boundaryKey}:${action}`;
+  const fresh = await store.recordActionEvent(env, key, account.id, 'cycle_' + action, 'attempting', '');
+  if (!fresh) return false;
+  try {
+    await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
+  } catch (err) {
+    await store.deleteActionEvent(env, key); // 失败删键，下一轮重试
+    await store.addLog(env, 'error', `循环${action === 'start' ? '开机' : '关机'}失败 [${masked(account.accessKeyId)}]: ${err}`);
+    return false;
+  }
+  const status = action === 'start' ? StatusStarting : StatusStopping;
+  await store.updateRuntime(env, account.id, account.trafficUsed, status, new Date().toISOString());
+  await store.addLog(env, 'info',
+    `执行循环${action === 'start' ? '开机' : '关机'} [${masked(account.accessKeyId)}]：周期每 ${account.cycleDays || 10} 天交替，相位起始 ${phase.boundaryDate}，第 ${phase.phaseDay} 天`);
+  if (config.enableScheduleMail) {
+    const event = newEvent('schedule', '循环开关机已执行', `实例按「基准时间 + N 天循环」${action === 'start' ? '开机' : '关机'}指令已发送。`, account.id, {
       ...accountVars(account, config, {
         traffic: account.trafficUsed, status, percentage: usagePercent(account.trafficUsed, account.maxTraffic), now,
         timezone: config.timezone, balance: '', cost: '',
@@ -619,6 +692,10 @@ export async function summary(env: Env) {
       instanceId: account.instanceId,
       shutdownMode: resolveShutdownMode(account, config),
       scheduleEnabled: account.scheduleEnabled,
+      // 「基准时间 + N 天循环开关机」：与每日定时互斥，前端据此展示与校验
+      cycleEnabled: !!account.cycleEnabled,
+      cycleAnchor: account.cycleAnchor || '',
+      cycleDays: account.cycleDays || 10,
       // 保活开启时后端会拒绝手动关机（config.keepAlive && 账号级保活未关），
       // 前端据此禁用按钮并给出原因，避免"点了没反应"的困惑
       keepAliveBlocked: isKeepAliveOn(config, account),

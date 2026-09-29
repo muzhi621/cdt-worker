@@ -403,6 +403,9 @@ export async function listAccounts(env: Env): Promise<Account[]> {
       startTime: getString(r, 'start_time'),
       stopTime: getString(r, 'stop_time'),
       scheduleEnabled: getBool(r, 'schedule_enabled'),
+      cycleEnabled: getBool(r, 'cycle_enabled'),
+      cycleAnchor: getString(r, 'cycle_anchor'),
+      cycleDays: getNumber(r, 'cycle_days') || 10,
       keepAlive: getBool(r, 'keep_alive'),
       shutdownMode: getString(r, 'shutdown_mode'),
       instanceStatus: getString(r, 'instance_status'),
@@ -427,11 +430,13 @@ export async function saveAccount(env: Env, account: Omit<Account, 'id'> & { id?
   const keepAlive = account.keepAlive === undefined ? true : account.keepAlive;
   if (account.id) {
     await env.DB.prepare(
-      `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, access_key_id_enc=?, access_key_secret_enc=?, site_type=?, max_traffic=?, start_time=?, stop_time=?, schedule_enabled=?, keep_alive=?, shutdown_mode=?, updated_at=? WHERE id=?`,
+      `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, access_key_id_enc=?, access_key_secret_enc=?, site_type=?, max_traffic=?, start_time=?, stop_time=?, schedule_enabled=?, cycle_enabled=?, cycle_anchor=?, cycle_days=?, keep_alive=?, shutdown_mode=?, updated_at=? WHERE id=?`,
     ).bind(
       name, remark, account.regionId, instanceId,
       akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
-      account.scheduleEnabled ? 1 : 0, keepAlive ? 1 : 0, account.shutdownMode ?? '',
+      account.scheduleEnabled ? 1 : 0,
+      account.cycleEnabled ? 1 : 0, account.cycleAnchor ?? '', account.cycleDays ?? 10,
+      keepAlive ? 1 : 0, account.shutdownMode ?? '',
       // 统一用带 Z 后缀的 ISO：datetime('now') 写入的是 UTC 无后缀字符串，前端 new Date
       // 会按浏览器本地时区解析，东八区恰好差 8 小时（账号卡片「更新 15:30」实为 23:30）
       new Date().toISOString(), account.id,
@@ -439,11 +444,13 @@ export async function saveAccount(env: Env, account: Omit<Account, 'id'> & { id?
     return account.id;
   }
   const result = await env.DB.prepare(
-    `INSERT INTO accounts (name, remark, region_id, instance_id, access_key_id_enc, access_key_secret_enc, site_type, max_traffic, start_time, stop_time, schedule_enabled, keep_alive, shutdown_mode, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO accounts (name, remark, region_id, instance_id, access_key_id_enc, access_key_secret_enc, site_type, max_traffic, start_time, stop_time, schedule_enabled, cycle_enabled, cycle_anchor, cycle_days, keep_alive, shutdown_mode, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).bind(
     name, remark, account.regionId, instanceId,
     akEnc, skEnc, account.siteType, account.maxTraffic, startTime, stopTime,
-    account.scheduleEnabled ? 1 : 0, keepAlive ? 1 : 0, account.shutdownMode ?? '',
+    account.scheduleEnabled ? 1 : 0,
+    account.cycleEnabled ? 1 : 0, account.cycleAnchor ?? '', account.cycleDays ?? 10,
+    keepAlive ? 1 : 0, account.shutdownMode ?? '',
     new Date().toISOString(),
   ).run();
   return Number(result.meta.last_row_id ?? 0);
@@ -464,9 +471,17 @@ export async function updateAccountConfig(env: Env, a: Partial<Account> & { id: 
   // 语义：与 AK/SK 一致，仅在调用方显式传入时才写该列。若用「未传则默认 true」，
   // API 客户端只发 {id:1, remark:"x"} 改备注时会把已关闭的账号级保活又打开成 1。
   const hasKeepAlive = a.keepAlive !== undefined;
+  // 「循环开关机」三列同样按字段条件写入（与 keep_alive 同理）：部分更新（只改备注的 API 客户端）
+  // 不应把已配置的循环参数重置掉。
+  const hasCycleEnabled = a.cycleEnabled !== undefined;
+  const hasCycleAnchor = a.cycleAnchor !== undefined;
+  const hasCycleDays = a.cycleDays !== undefined;
   const sql =
     `UPDATE accounts SET name=?, remark=?, region_id=?, instance_id=?, site_type=?, max_traffic=?, schedule_enabled=?, start_time=?, stop_time=?, shutdown_mode=?` +
     (hasKeepAlive ? ', keep_alive=?' : '') +
+    (hasCycleEnabled ? ', cycle_enabled=?' : '') +
+    (hasCycleAnchor ? ', cycle_anchor=?' : '') +
+    (hasCycleDays ? ', cycle_days=?' : '') +
     (akEnc ? ', access_key_id_enc=?' : '') +
     (skEnc ? ', access_key_secret_enc=?' : '') +
     // updated_at 与 updateRuntime 一致用带 Z 的 ISO；datetime('now') 是 UTC 无后缀，
@@ -477,6 +492,9 @@ export async function updateAccountConfig(env: Env, a: Partial<Account> & { id: 
     a.maxTraffic ?? 0, a.scheduleEnabled ? 1 : 0, a.startTime ?? '', a.stopTime ?? '', a.shutdownMode ?? '',
   ];
   if (hasKeepAlive) vals.push(a.keepAlive ? 1 : 0);
+  if (hasCycleEnabled) vals.push(a.cycleEnabled ? 1 : 0);
+  if (hasCycleAnchor) vals.push(a.cycleAnchor ?? '');
+  if (hasCycleDays) vals.push(a.cycleDays ?? 10);
   if (akEnc) vals.push(akEnc);
   if (skEnc) vals.push(skEnc);
   // updated_at 排在全部动态列之后，与 SQL 拼接顺序一致

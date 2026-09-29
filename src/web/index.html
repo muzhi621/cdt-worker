@@ -1149,6 +1149,22 @@
               <label for="ak-stop" data-page-node-id="AK-STOP-LBL">定时关机时间</label>
               <input id="ak-stop" class="control" type="time" value="23:00" data-page-node-id="AK-STOP-INPUT" />
             </div>
+            <div class="field" data-page-node-id="AK-CYCLE-BLOCK">
+              <label>循环开关机（基准时间 + N 天）</label>
+              <label class="check" for="ak-cycle" data-page-node-id="AK-CYCLE-CHK">
+                <input type="checkbox" id="ak-cycle" data-page-node-id="AK-CYCLE-INPUT" />
+                按基准时间每 N 天交替开/关机
+              </label>
+              <p class="hint">与「每日定时开关机」互斥，只能启用其一。首个 N 天为开机，之后每 N 天在开/关机之间交替。</p>
+            </div>
+            <div class="field" id="ak-cycle-anchor-field" data-page-node-id="AK-CYCLE-ANCHOR-BLOCK">
+              <label for="ak-cycle-anchor" data-page-node-id="AK-CYCLE-ANCHOR-LBL">循环基准时间（按配置时区）</label>
+              <input id="ak-cycle-anchor" class="control" type="datetime-local" step="1" data-page-node-id="AK-CYCLE-ANCHOR-INPUT" />
+            </div>
+            <div class="field" id="ak-cycle-days-field" data-page-node-id="AK-CYCLE-DAYS-BLOCK">
+              <label for="ak-cycle-days" data-page-node-id="AK-CYCLE-DAYS-LBL">循环周期（天）</label>
+              <input id="ak-cycle-days" class="control" type="number" min="1" max="365" step="1" value="10" data-page-node-id="AK-CYCLE-DAYS-INPUT" />
+            </div>
             <div class="field full" data-page-node-id="KIUIP8ddz2c2iuDzwmWgne">
               <label for="ak-remark" data-page-node-id="kP26wuuKdVleBOGNyDv1b8">备注（可选）</label>
               <input id="ak-remark" class="control" placeholder="例如：香港生产机" autocomplete="off" data-page-node-id="rHAfs6aoRkBrhUdBHWY5yC" />
@@ -1839,6 +1855,22 @@
             <div class="field" id="ed-stop-field">
               <label for="ed-stop">定时关机时间</label>
               <input id="ed-stop" class="control" type="time" value="23:00" />
+            </div>
+            <div class="field">
+              <label>循环开关机（基准时间 + N 天）</label>
+              <label class="check" for="ed-cycle">
+                <input type="checkbox" id="ed-cycle" />
+                按基准时间每 N 天交替开/关机
+              </label>
+              <p class="hint">与「每日定时开关机」互斥，只能启用其一。首个 N 天为开机，之后每 N 天在开/关机之间交替。</p>
+            </div>
+            <div class="field" id="ed-cycle-anchor-field">
+              <label for="ed-cycle-anchor">循环基准时间（按配置时区）</label>
+              <input id="ed-cycle-anchor" class="control" type="datetime-local" step="1" />
+            </div>
+            <div class="field" id="ed-cycle-days-field">
+              <label for="ed-cycle-days">循环周期（天）</label>
+              <input id="ed-cycle-days" class="control" type="number" min="1" max="365" step="1" value="10" />
             </div>
             <div class="field">
               <label>实例保活（账号级开关）</label>
@@ -2809,24 +2841,77 @@
       paintRegionList("china"); // 初始为中国站
       $("ak-site").addEventListener("change", function () { paintRegionList(this.value); });
 
-      // 每日定时开关：仅当开关打开时才显示开机/关机时间（默认隐藏）
+      // 本地时间的 datetime-local 值 "YYYY-MM-DDTHH:mm:ss"（循环基准时间默认取「当前打开时间」）
+      function nowLocalDatetime() {
+        const d = new Date();
+        const p = (n) => String(n).padStart(2, "0");
+        return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+          "T" + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+      }
+      // datetime-local 值 "YYYY-MM-DDTHH:mm[:ss]" → 后端存储 "YYYY-MM-DD HH:mm:ss"
+      function dtLocalToStore(v) {
+        const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(:\d{2})?$/.exec(String(v || "").trim());
+        return m ? m[1] + " " + m[2] + (m[3] || ":00") : "";
+      }
+      // 后端存储 "YYYY-MM-DD HH:mm[:ss]" → datetime-local 值
+      function dtStoreToLocal(v) {
+        const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(:\d{2})?$/.exec(String(v || "").trim());
+        return m ? m[1] + "T" + m[2] + (m[3] || ":00") : "";
+      }
+
+      // 定时开关机两种模式互斥：每日定时 / N 天循环，同一时刻只能启用其一。
+      // 各模式的参数行仅在对应模式启用时显示（默认全部隐藏）。
       function syncScheduleFields() {
-        const on = $("ak-schedule").checked;
-        $("ak-start-field").style.display = on ? "" : "none";
-        $("ak-stop-field").style.display = on ? "" : "none";
+        const daily = $("ak-schedule").checked;
+        const cyc = $("ak-cycle").checked;
+        $("ak-start-field").style.display = daily ? "" : "none";
+        $("ak-stop-field").style.display = daily ? "" : "none";
+        $("ak-cycle-anchor-field").style.display = cyc ? "" : "none";
+        $("ak-cycle-days-field").style.display = cyc ? "" : "none";
+        if (cyc && !$("ak-cycle-anchor").value) $("ak-cycle-anchor").value = nowLocalDatetime();
       }
       function syncEditScheduleFields() {
-        const on = $("ed-schedule").checked;
-        $("ed-start-field").style.display = on ? "" : "none";
-        $("ed-stop-field").style.display = on ? "" : "none";
+        const daily = $("ed-schedule").checked;
+        const cyc = $("ed-cycle").checked;
+        $("ed-start-field").style.display = daily ? "" : "none";
+        $("ed-stop-field").style.display = daily ? "" : "none";
+        $("ed-cycle-anchor-field").style.display = cyc ? "" : "none";
+        $("ed-cycle-days-field").style.display = cyc ? "" : "none";
+        if (cyc && !$("ed-cycle-anchor").value) $("ed-cycle-anchor").value = nowLocalDatetime();
       }
-      $("ak-schedule").addEventListener("change", syncScheduleFields);
-      $("ed-schedule").addEventListener("change", syncEditScheduleFields);
+      $("ak-schedule").addEventListener("change", function () {
+        if (this.checked) $("ak-cycle").checked = false; // 互斥：开每日定时则关循环
+        syncScheduleFields();
+      });
+      $("ak-cycle").addEventListener("change", function () {
+        if (this.checked) {
+          $("ak-schedule").checked = false; // 互斥：开循环则关每日定时
+          if (!$("ak-cycle-anchor").value) $("ak-cycle-anchor").value = nowLocalDatetime();
+        }
+        syncScheduleFields();
+      });
+      $("ed-schedule").addEventListener("change", function () {
+        if (this.checked) $("ed-cycle").checked = false;
+        syncEditScheduleFields();
+      });
+      $("ed-cycle").addEventListener("change", function () {
+        if (this.checked) {
+          $("ed-schedule").checked = false;
+          if (!$("ed-cycle-anchor").value) $("ed-cycle-anchor").value = nowLocalDatetime();
+        }
+        syncEditScheduleFields();
+      });
       syncScheduleFields();
       syncEditScheduleFields();
 
       $("account-form").addEventListener("reset", function () {
-        setTimeout(() => { paintRegionList($("ak-site").value); syncScheduleFields(); }, 0);
+        setTimeout(() => {
+          paintRegionList($("ak-site").value);
+          $("ak-cycle").checked = false;
+          $("ak-cycle-anchor").value = nowLocalDatetime();
+          $("ak-cycle-days").value = "10";
+          syncScheduleFields();
+        }, 0);
       });
 
       $("account-form").addEventListener("submit", async function (e) {
@@ -2842,8 +2927,12 @@
           scheduleEnabled: $("ak-schedule").checked,
           startTime: $("ak-start").value || "08:00",
           stopTime: $("ak-stop").value || "23:00",
+          cycleEnabled: $("ak-cycle").checked,
+          cycleAnchor: dtLocalToStore($("ak-cycle-anchor").value),
+          cycleDays: parseInt($("ak-cycle-days").value, 10) || 10,
           remark: $("ak-remark").value.trim(),
         };
+        if (account.cycleEnabled) account.scheduleEnabled = false; // 双保险：与每日定时互斥
         let bad = false;
         if (!/^LTAI/i.test(account.accessKeyId)) { setFieldError("ak-id", "err-ak-id", "AccessKey ID 通常以 LTAI 开头"); bad = true; }
         else setFieldError("ak-id", "err-ak-id", "");
@@ -2865,6 +2954,11 @@
             toast("开机与关机时间间隔需大于 120 分钟，否则会与 2 小时命中窗口重叠导致实例反复启停", "err");
             return;
           }
+        }
+        // 「N 天循环开关机」校验：基准时间必填，周期 1~365 天（与后端同源）
+        if (account.cycleEnabled) {
+          if (!account.cycleAnchor) { toast("请填写循环基准时间", "err"); return; }
+          if (!(account.cycleDays >= 1 && account.cycleDays <= 365)) { toast("循环周期天数需为 1~365 的整数", "err"); return; }
         }
         if (bad) return;
 
@@ -2894,9 +2988,12 @@
           return;
         }
         tbody.innerHTML = list.map((a) => {
-          const sched = a.scheduleEnabled
-            ? '<span style="color:var(--success);font-weight:600">' + esc(a.startTime || "08:00") + " → " + esc(a.stopTime || "23:00") + "</span>"
-            : '<span style="color:var(--muted)">未启用</span>';
+          const sched = a.cycleEnabled
+            ? '<span style="color:var(--accent);font-weight:600">循环 ' + esc(String(a.cycleDays || 10)) + " 天</span>"
+              + '<div class="mono" style="font-size:11.5px;color:var(--muted)">' + esc(a.cycleAnchor || "") + "</div>"
+            : a.scheduleEnabled
+              ? '<span style="color:var(--success);font-weight:600">' + esc(a.startTime || "08:00") + " → " + esc(a.stopTime || "23:00") + "</span>"
+              : '<span style="color:var(--muted)">未启用</span>';
           // 保活落库状态直接展示在列表里：保存账号配置后无需开弹窗即可核对是否生效。
           // 账号级是收窄开关，最终生效 = 全局开 AND 账号未显式关闭。
           const ka = !globalKa
@@ -2946,6 +3043,11 @@
         $("ed-shutdown").value = a.shutdownMode || "";
         $("ed-instance").value = a.instanceId || "";
         $("ed-schedule").checked = !!a.scheduleEnabled;
+        // 「N 天循环开关机」：老数据无该字段时默认关闭；基准时间缺省用「当前时刻」，
+        // 方便用户编辑已有账号时直接勾选启用（日期时间取当前打开时间，可再调整）。
+        $("ed-cycle").checked = !!a.cycleEnabled;
+        $("ed-cycle-anchor").value = dtStoreToLocal(a.cycleAnchor) || nowLocalDatetime();
+        $("ed-cycle-days").value = String(a.cycleDays || 10);
         // 老数据可能没有该字段：跟随全局保活策略视为开启，避免升级后某账号被静默关掉保活
         $("ed-keepalive").checked = a.keepAlive !== false;
         $("ed-start").value = a.startTime || "08:00";
@@ -2979,6 +3081,14 @@
             return;
           }
         }
+        const cycleEnabled = $("ed-cycle").checked;
+        const cycleAnchor = dtLocalToStore($("ed-cycle-anchor").value);
+        const cycleDays = parseInt($("ed-cycle-days").value, 10) || 10;
+        // 「N 天循环开关机」校验（与后端同源）：基准时间必填，周期 1~365 天
+        if (cycleEnabled) {
+          if (!cycleAnchor) { toast("请填写循环基准时间", "err"); return; }
+          if (!(cycleDays >= 1 && cycleDays <= 365)) { toast("循环周期天数需为 1~365 的整数", "err"); return; }
+        }
         const acc = {
           id,
           remark: $("ed-remark").value.trim(),
@@ -2987,10 +3097,13 @@
           maxTraffic,
           siteType: $("ed-site").value,
           shutdownMode: $("ed-shutdown").value,
-          scheduleEnabled: $("ed-schedule").checked,
+          scheduleEnabled: cycleEnabled ? false : $("ed-schedule").checked, // 互斥双保险
           keepAlive: $("ed-keepalive").checked,
           startTime: $("ed-start").value || "08:00",
           stopTime: $("ed-stop").value || "23:00",
+          cycleEnabled,
+          cycleAnchor,
+          cycleDays,
           // AK/SK 留空 → 后端保留旧值
           accessKeyId: $("ed-akid").value.trim(),
           accessKeySecret: $("ed-aksecret").value,
@@ -3808,7 +3921,7 @@
        * 每次改动前端后手动更新此值。作用：部署后强刷页面（Ctrl+F5）时看页脚即可
        * 确认浏览器加载的是哪个构建，用于区分「线上已更新但浏览器缓存了旧 JS」——
        * 这是「保存无效 / 新功能不见」类问题的第一排查步骤。 */
-      const APP_BUILD = "20260929-2140";
+      const APP_BUILD = "20260929-2310";
       try {
         const el = document.createElement("div");
         el.style.cssText = "text-align:center;color:var(--muted);font-size:11px;padding:12px 0;opacity:.7";

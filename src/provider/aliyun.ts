@@ -15,6 +15,11 @@ export interface Account {
   startTime: string; // "HH:mm"
   stopTime: string; // "HH:mm"
   scheduleEnabled: boolean;
+  // 「基准时间 + N 天循环开关机」：与 scheduleEnabled 互斥（只能启用其一）。
+  // cycleAnchor 形如 "YYYY-MM-DD HH:mm:ss"（按全局配置时区解释）；cycleDays 为一个相位的天数。
+  cycleEnabled: boolean;
+  cycleAnchor: string;
+  cycleDays: number;
   keepAlive: boolean;
   // 账号级停机模式：'' 跟随系统全局设置；'KeepCharging'|'StopCharging' 覆盖全局
   shutdownMode: string;

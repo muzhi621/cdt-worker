@@ -117,3 +117,79 @@ export function windowOver(fields: { hour: number; minute: number }, time: strin
 // P2-6：原 stopWindowOver 已删除 —— 它只是 windowOver 的别名，src 下零调用点（死代码）。
 // 「错过窗口补偿」现直接调用 windowOver，语义完全相同：
 // 只在窗口结束后的当天补执行，跨天后不再追溯（隔天仍 Running 的实例属于手动/保活意图，不强行关回）。
+
+// ─────────────────────────────────────────────────────────────
+// 「基准时间 + N 天循环开关机」相位判定
+// ─────────────────────────────────────────────────────────────
+
+/** 解析 YYYY-MM-DD 为 UTC 毫秒（仅用于按「日期」对齐的差值计算）；非法返回 null */
+function parseYmdUtc(s: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || '').trim());
+  if (!m) return null;
+  const t = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isFinite(t) ? t : null;
+}
+
+/** 取指定时区下的「日期 YYYY-MM-DD + 当日分钟数」，与 zoneFields 同源（复用格式化器缓存） */
+function zonedDay(date: Date, timezone: string): { date: string; minutes: number } {
+  const f = zoneFields(date, timezone);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return { date: `${f.year}-${p(f.month)}-${p(f.day)}`, minutes: f.hour * 60 + f.minute };
+}
+
+export interface CyclePhase {
+  /** 是否已到达基准时间（未到达时引擎不做任何启停） */
+  started: boolean;
+  /** 当前相位是否应为「开机」状态（第 1 相位为开机，之后每 N 天交替） */
+  on: boolean;
+  /** 当前相位起点的日期 YYYYMMDD，用于幂等键（同一相位边界只执行一次） */
+  boundaryKey: string;
+  /** 当前相位起点的墙钟日期 YYYY-MM-DD（展示/日志用） */
+  boundaryDate: string;
+  /** 当前处在相位内的第几天（1-based，展示用） */
+  phaseDay: number;
+}
+
+const EMPTY_CYCLE_PHASE: CyclePhase = { started: false, on: false, boundaryKey: '', boundaryDate: '', phaseDay: 1 };
+
+/**
+ * 「基准时间 + N 天循环开关机」相位判定（纯函数，无 D1 / cloudflare 依赖，可独立单测）。
+ *
+ * 语义：从 anchor（"YYYY-MM-DD HH:mm[:ss]"，按配置时区解释）起，以 N 天为一个相位，
+ * **开机 / 关机交替**：第 1 个 N 天为开机相位，第 2 个为关机相位，第 3 个再开机……如此循环。
+ * 例：anchor = 2026-09-30 00:00、N = 10 →
+ *   09-30 ~ 10-09 开机、10-10 ~ 10-19 关机、10-20 ~ 10-29 开机……（转换点每 10 天一次，落在 anchor 的时刻上）
+ *
+ * 时区：按传入的 IANA 时区判定「今天是哪天 / 现在几点」，与每日定时一致，避免 UTC 错位整天。
+ *
+ * 早于基准时间（含基准日当天但未到基准时刻）→ started = false，引擎保持现状不动作。
+ */
+export function cyclePhase(now: Date, timezone: string, anchor: string, days: number): CyclePhase {
+  const n = Math.floor(Number(days));
+  if (!Number.isFinite(n) || n < 1) return { ...EMPTY_CYCLE_PHASE };
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/.exec(String(anchor || '').trim());
+  if (!m) return { ...EMPTY_CYCLE_PHASE };
+  const anchorMs = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (!Number.isFinite(anchorMs)) return { ...EMPTY_CYCLE_PHASE };
+  const anchorMin = (m[4] !== undefined ? Number(m[4]) : 0) * 60 + (m[5] !== undefined ? Number(m[5]) : 0);
+
+  const { date, minutes } = zonedDay(now, timezone);
+  const todayMs = parseYmdUtc(date);
+  // 早于基准「时刻」→ 排班日回退一天（与 DDNS rotate 的 switch_time 同义），使基准日当天的
+  // 基准时刻之前一律算「还没开始」，而不是提前进入第 1 相位。
+  const dutyMs = (todayMs ?? 0) - (minutes < anchorMin ? 86400000 : 0);
+  const offsetDays = Math.floor((dutyMs - anchorMs) / 86400000);
+  if (offsetDays < 0) return { ...EMPTY_CYCLE_PHASE };
+
+  const k = Math.floor(offsetDays / n);
+  const on = k % 2 === 0; // 第 0 相位（首个 N 天）开机，之后交替
+  const boundaryDayMs = anchorMs + k * n * 86400000;
+  const boundaryDate = new Date(boundaryDayMs).toISOString().slice(0, 10);
+  return {
+    started: true,
+    on,
+    boundaryKey: boundaryDate.replace(/-/g, ''),
+    boundaryDate,
+    phaseDay: offsetDays - k * n + 1,
+  };
+}

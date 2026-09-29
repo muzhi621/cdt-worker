@@ -614,8 +614,27 @@ async function saveConfig(ctx: Context): Promise<Response> {
       if (a.regionId !== undefined && !String(a.regionId).trim()) {
         return error('invalid_input', '地域 ID 不能为空', 400);
       }
+      // 「基准时间 + N 天循环开关机」字段校验与互斥控制。
+      if (a.cycleDays !== undefined) {
+        const cd = Number(a.cycleDays);
+        if (!Number.isInteger(cd) || cd < 1 || cd > 365) {
+          return error('invalid_input', `循环周期天数必须是 1~365 之间的整数：${a.cycleDays}`, 400);
+        }
+      }
+      if (a.cycleAnchor !== undefined && String(a.cycleAnchor).trim() !== ''
+          && !RE_CYCLE_ANCHOR.test(String(a.cycleAnchor).trim())) {
+        return error('invalid_input', `循环基准时间格式应为 YYYY-MM-DD HH:mm:ss：${a.cycleAnchor}`, 400);
+      }
+      // 「每日定时」与「N 天循环」互斥：同一账号只能启用其一。
+      // 两者同时为 true 视为误配直接拒绝；否则以本次显式开启的那个为准，自动关闭另一个。
+      if (a.scheduleEnabled === true && a.cycleEnabled === true) {
+        return error('invalid_input', '「每日定时开关机」与「N 天循环开关机」互斥，只能启用其一', 400);
+      }
+      if (a.cycleEnabled === true) a.scheduleEnabled = false;
+      else if (a.scheduleEnabled === true) a.cycleEnabled = false;
       if (a.id) {
-        if (a.startTime !== undefined || a.stopTime !== undefined || a.scheduleEnabled !== undefined) {
+        if (a.startTime !== undefined || a.stopTime !== undefined || a.scheduleEnabled !== undefined
+            || a.cycleEnabled !== undefined || a.cycleAnchor !== undefined || a.cycleDays !== undefined) {
           if (!existing) {
             existing = new Map((await store.listAccounts(ctx.env)).map((x) => [x.id, x]));
           }
@@ -626,11 +645,24 @@ async function saveConfig(ctx: Context): Promise<Response> {
           if (enabled && scheduleTooClose(start, stop)) {
             return error('invalid_input', `账号「${cur?.name ?? a.id}」的开机与关机时间间隔需大于 ${SCHEDULE_MIN_GAP_MINUTES} 分钟，否则会与 2 小时命中窗口重叠导致实例反复启停`, 400);
           }
+          // 启用「N 天循环开关机」时必须有基准时间与有效周期（与库中旧值合并判断，支持部分更新）
+          const cycOn = a.cycleEnabled !== undefined ? !!a.cycleEnabled : !!cur?.cycleEnabled;
+          const cycAnchor = a.cycleAnchor !== undefined ? String(a.cycleAnchor) : (cur?.cycleAnchor ?? '');
+          const cycDays = a.cycleDays !== undefined ? Number(a.cycleDays) : Number(cur?.cycleDays ?? 0);
+          if (cycOn && !cycAnchor.trim()) {
+            return error('invalid_input', `账号「${cur?.name ?? a.id}」启用「N 天循环开关机」时必须填写基准时间`, 400);
+          }
+          if (cycOn && !(cycDays >= 1)) {
+            return error('invalid_input', `账号「${cur?.name ?? a.id}」启用「N 天循环开关机」时必须填写有效的周期天数`, 400);
+          }
         }
         await store.updateAccountConfig(ctx.env, a as Partial<Account> & { id: number });
       } else if (a.accessKeySecret && a.accessKeyId) {
         if (a.scheduleEnabled && scheduleTooClose(String(a.startTime ?? ''), String(a.stopTime ?? ''))) {
           return error('invalid_input', `账号「${a.name ?? ''}」的开机与关机时间间隔需大于 ${SCHEDULE_MIN_GAP_MINUTES} 分钟，否则会与 2 小时命中窗口重叠导致实例反复启停`, 400);
+        }
+        if (a.cycleEnabled && !String(a.cycleAnchor ?? '').trim()) {
+          return error('invalid_input', '启用「N 天循环开关机」时必须填写基准时间', 400);
         }
         await store.saveAccount(ctx.env, a as Omit<Account, 'id'> & { id?: number });
       }
@@ -832,8 +864,11 @@ async function notifyTestHandler(ctx: Context): Promise<Response> {
       '地域ID': sample.regionId || '',
       '实例': sample.instanceId || '',
       '停机模式': config.shutdownMode === 'StopCharging' ? '节省停机' : '普通停机',
-      '开机时间': sample.scheduleEnabled ? (sample.startTime || '08:00') : '未启用',
-      '关机时间': sample.scheduleEnabled ? (sample.stopTime || '23:00') : '未启用',
+      '定时模式': sample.cycleEnabled ? 'N天循环' : (sample.scheduleEnabled ? '每日定时' : '未启用'),
+      '开机时间': sample.cycleEnabled ? `循环模式（每 ${sample.cycleDays || 10} 天交替）` : (sample.scheduleEnabled ? (sample.startTime || '08:00') : '未启用'),
+      '关机时间': sample.cycleEnabled ? `循环模式（每 ${sample.cycleDays || 10} 天交替）` : (sample.scheduleEnabled ? (sample.stopTime || '23:00') : '未启用'),
+      '循环基准时间': sample.cycleEnabled ? (sample.cycleAnchor || '') : '',
+      '循环周期(天)': sample.cycleEnabled ? String(sample.cycleDays || 10) : '',
       '已用流量': `${used.toFixed(2)} GB`,
       '流量上限': `${total.toFixed(2)} GB`,
       '剩余流量': `${Math.max(0, total - used).toFixed(2)} GB`,
@@ -1481,6 +1516,8 @@ const DDNS_MODES = ['rotate', 'interval', 'window', 'static'];
 // P3-R4-2：这几个正则只做**形状**校验（例如 2026-99-99 也会通过），
 // 日期是否真实存在由 scheduler 兜底；前端已做「2 月 31 日」这类收敛，后端不重复实现。
 const RE_SWITCH_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+// 账号「N 天循环开关机」的基准时间：YYYY-MM-DD HH:mm 或 YYYY-MM-DD HH:mm:ss（T 或空格分隔均可）
+const RE_CYCLE_ANCHOR = /^\d{4}-\d{2}-\d{2}[ T][0-2]\d:[0-5]\d(:[0-5]\d)?$/;
 const RE_ANCHOR_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const RE_ANCHOR_AT = /^\d{4}-\d{2}-\d{2}([ T][0-2]\d:[0-5]\d)?$/;
 function groupTimeError(g: ReturnType<typeof parseGroupBody>): string | null {
