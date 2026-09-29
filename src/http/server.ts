@@ -83,6 +83,40 @@ function allowRate(key: string, max: number, windowMs: number): boolean {
   return true;
 }
 
+// 跨 isolate 限流（D1 计数，第二道闸）
+// Cloudflare 会把请求调度到多个短生命周期 isolate，进程内 rateMap 在冷启动后即失效，
+// 于是认证后高敏端点（测试通知 / DDNS 连通 / 删账号等）的限流等于空设。
+// 这里复用 D1 做跨实例计数，与 login 的 recentLoginFailures 同一思路：
+//   - 单次调用 1 读 +（允许时）1 写 = 最多 2 个 subrequest，远低于 50 上限；
+//   - 这些端点都是低频人工管理操作，不在 /__cron 周期里，不会挤占 cron 的 subrequest 预算；
+//   - D1 计数失败退化为放行（fail-open），与 recentLoginFailures 容错一致，避免 DB 抖动锁死管理员。
+const RATE_BUCKET_SQL = {
+  select: 'SELECT count AS c, reset_at AS r FROM rate_buckets WHERE key = ?',
+  reset: 'INSERT INTO rate_buckets (key, count, reset_at) VALUES (?, 1, ?) '
+       + 'ON CONFLICT(key) DO UPDATE SET count = 1, reset_at = excluded.reset_at',
+  inc: 'UPDATE rate_buckets SET count = count + 1 WHERE key = ? AND reset_at > ?',
+};
+async function allowRateD1(env: Env, key: string, max: number, windowMs: number): Promise<boolean> {
+  const now = Date.now();
+  try {
+    const row = await env.DB.prepare(RATE_BUCKET_SQL.select).bind(key).first();
+    const r = row as Record<string, unknown> | null;
+    const resetAt = r ? Number(r.r ?? 0) : 0;
+    const count = r ? Number(r.c ?? 0) : 0;
+    if (!row || now >= resetAt) {
+      // 窗口未开启或已过期：重置为 1，开启新窗口
+      await env.DB.prepare(RATE_BUCKET_SQL.reset).bind(key, now + windowMs).run();
+      return true;
+    }
+    if (count >= max) return false; // 窗口内已超阈值，拒绝（不再自增，等窗口过期自动重置）
+    await env.DB.prepare(RATE_BUCKET_SQL.inc).bind(key, now).run();
+    return true;
+  } catch {
+    // D1 计数失败不应阻断管理操作主流程（退化为仅内存限流）
+    return true;
+  }
+}
+
 // 鉴权：API Key 或管理员 Session
 interface Principal { admin: boolean; scopes: Set<string> }
 
@@ -190,6 +224,10 @@ async function setup(ctx: Context): Promise<Response> {
   if (!allowRate('setup:' + clientIP(ctx.request), 5, 60_000)) {
     return error('rate_limited', '请求过于频繁', 429);
   }
+  // 跨 isolate 限流兜底（D1 计数，最多 2 subrequest）：内存计数冷启动后失效
+  if (!await allowRateD1(ctx.env, 'setup:' + clientIP(ctx.request), 5, 60_000)) {
+    return error('rate_limited', '请求过于频繁', 429);
+  }
   const body = await ctx.request.json().catch(() => null);
   if (!body || typeof body !== 'object') return error('invalid_request', 'invalid JSON', 400);
   const b = body as Record<string, unknown>;
@@ -290,6 +328,10 @@ async function login(ctx: Context): Promise<Response> {
 // 修改管理员密码：校验当前密码（D1 哈希或环境变量密码均可），成功后吊销其他会话
 async function changePassword(ctx: Context): Promise<Response> {
   if (!allowRate('passwd:' + clientIP(ctx.request), 6, 15 * 60_000)) {
+    return error('rate_limited', '操作过于频繁，请稍后再试', 429);
+  }
+  // 跨 isolate 限流兜底（D1 计数，最多 2 subrequest）：内存计数冷启动后失效
+  if (!await allowRateD1(ctx.env, 'passwd:' + clientIP(ctx.request), 6, 15 * 60_000)) {
     return error('rate_limited', '操作过于频繁，请稍后再试', 429);
   }
   const body = await ctx.request.json().catch(() => null);
@@ -634,6 +676,10 @@ async function controlHandler(ctx: Context): Promise<Response> {
   if (!allowRate('control:' + clientIP(ctx.request), 10, 60_000)) {
     return error('rate_limited', '操作过于频繁，请 1 分钟后再试', 429);
   }
+  // 跨 isolate 限流兜底（D1 计数，最多 2 subrequest）：内存计数冷启动后失效
+  if (!await allowRateD1(ctx.env, 'control:' + clientIP(ctx.request), 10, 60_000)) {
+    return error('rate_limited', '操作过于频繁，请 1 分钟后再试', 429);
+  }
   const message = await engine.control(ctx.env, id, action, '手动');
   return json({ success: true, message }, 202);
 }
@@ -674,6 +720,10 @@ async function createApiKeyHandler(ctx: Context): Promise<Response> {
   if (!allowRate('apikey:' + clientIP(ctx.request), 10, 60_000)) {
     return error('rate_limited', '操作过于频繁，请稍后再试', 429);
   }
+  // 跨 isolate 限流兜底（D1 计数，最多 2 subrequest）：内存计数冷启动后失效
+  if (!await allowRateD1(ctx.env, 'apikey:' + clientIP(ctx.request), 10, 60_000)) {
+    return error('rate_limited', '操作过于频繁，请稍后再试', 429);
+  }
   const body = await ctx.request.json().catch(() => null);
   if (!body || typeof body !== 'object') return error('invalid_request', 'invalid JSON', 400);
   const b = body as Record<string, unknown>;
@@ -711,6 +761,10 @@ async function deleteApiKeyHandler(ctx: Context): Promise<Response> {
   if (!allowRate('apikey-del:' + clientIP(ctx.request), 20, 60_000)) {
     return error('rate_limited', '操作过于频繁，请稍后再试', 429);
   }
+  // 跨 isolate 限流兜底（D1 计数，最多 2 subrequest）：内存计数冷启动后失效
+  if (!await allowRateD1(ctx.env, 'apikey-del:' + clientIP(ctx.request), 20, 60_000)) {
+    return error('rate_limited', '操作过于频繁，请稍后再试', 429);
+  }
   const id = parseInt(ctx.params.id, 10);
   if (!Number.isFinite(id)) return error('invalid_request', 'id 无效', 400);
   const ok = await store.deleteApiKey(ctx.env, id);
@@ -723,6 +777,10 @@ async function clearLogsHandler(ctx: Context): Promise<Response> {
   if (!allowRate('clearlogs:' + clientIP(ctx.request), 10, 60_000)) {
     return error('rate_limited', '清空日志过于频繁，请 1 分钟后再试', 429);
   }
+  // 跨 isolate 限流兜底（D1 计数，最多 2 subrequest）：内存计数冷启动后失效
+  if (!await allowRateD1(ctx.env, 'clearlogs:' + clientIP(ctx.request), 10, 60_000)) {
+    return error('rate_limited', '清空日志过于频繁，请 1 分钟后再试', 429);
+  }
   const category = new URL(ctx.request.url).searchParams.get('category') || 'all';
   await store.clearLogs(ctx.env, category);
   return json({ success: true });
@@ -733,6 +791,10 @@ async function notifyTestHandler(ctx: Context): Promise<Response> {
   // 限流：测试会真实调用所有已启用的通知通道（telegram/webhook/smtp 等），
   // 连点等于给第三方通道刷消息、甚至触发其限流封禁。
   if (!allowRate('notify-test:' + clientIP(ctx.request), 5, 60_000)) {
+    return error('rate_limited', '测试过于频繁，请 1 分钟后再试', 429);
+  }
+  // 跨 isolate 限流兜底（D1 计数，最多 2 subrequest）：内存计数冷启动后失效
+  if (!await allowRateD1(ctx.env, 'notify-test:' + clientIP(ctx.request), 5, 60_000)) {
     return error('rate_limited', '测试过于频繁，请 1 分钟后再试', 429);
   }
   const config = await store.getConfig(ctx.env);
@@ -799,6 +861,10 @@ async function notifyTestHandler(ctx: Context): Promise<Response> {
 async function deleteAccountHandler(ctx: Context): Promise<Response> {
   // 限流：删除账号是破坏性操作，防误触连点。
   if (!allowRate('delete-account:' + clientIP(ctx.request), 10, 60_000)) {
+    return error('rate_limited', '操作过于频繁，请 1 分钟后再试', 429);
+  }
+  // 跨 isolate 限流兜底（D1 计数，最多 2 subrequest）：内存计数冷启动后失效
+  if (!await allowRateD1(ctx.env, 'delete-account:' + clientIP(ctx.request), 10, 60_000)) {
     return error('rate_limited', '操作过于频繁，请 1 分钟后再试', 429);
   }
   const id = parseInt(ctx.params.id, 10);
@@ -1655,6 +1721,10 @@ async function ddnsTestCredential(ctx: Context): Promise<Response> {
   if (!allowRate('ddns-test:' + clientIP(ctx.request), 5, 60_000)) {
     return error('rate_limited', '连通测试过于频繁，请稍后再试', 429);
   }
+  // 跨 isolate 限流兜底（D1 计数，最多 2 subrequest）：内存计数冷启动后失效
+  if (!await allowRateD1(ctx.env, 'ddns-test:' + clientIP(ctx.request), 5, 60_000)) {
+    return error('rate_limited', '连通测试过于频繁，请稍后再试', 429);
+  }
   const b = await ddnsBody(ctx);
   const credRow = await ddnsStore.getCredential(ctx.env, id);
   if (!credRow) return error('not_found', '凭据不存在', 404);
@@ -1686,6 +1756,10 @@ async function ddnsTestCredential(ctx: Context): Promise<Response> {
 async function ddnsSyncHandler(ctx: Context): Promise<Response> {
   // P1-1：手动同步会打外部 DNS 厂商 API（切换时刻尤其集中），加限流防误点刷爆厂商
   if (!allowRate('ddns-sync:' + clientIP(ctx.request), 3, 60_000)) {
+    return error('rate_limited', '同步操作过于频繁，请稍后再试', 429);
+  }
+  // 跨 isolate 限流兜底（D1 计数，最多 2 subrequest）：内存计数冷启动后失效
+  if (!await allowRateD1(ctx.env, 'ddns-sync:' + clientIP(ctx.request), 3, 60_000)) {
     return error('rate_limited', '同步操作过于频繁，请稍后再试', 429);
   }
   const b = await ddnsBody(ctx);

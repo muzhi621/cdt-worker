@@ -161,6 +161,13 @@ async function openSecureSession(
   return { socket, conn };
 }
 
+// 拒绝含控制字符（CR/LF 及其他 < 0x20）的发件人/收件人，防 SMTP 命令（CRLF）注入
+function assertSafeSmtpAddress(field: string, value: string): void {
+  if (/[\x00-\x1f]/.test(value)) {
+    throw new Error(`SMTP ${field} 含非法控制字符（可能的命令注入），已拒绝发送`);
+  }
+}
+
 // 发送 HTML 邮件（UTF-8，base64 传输编码）
 export async function sendSmtpMail(
   cfg: SmtpConfig,
@@ -179,6 +186,10 @@ export async function sendSmtpMail(
     const authed = await conn.cmd(b64(cfg.password));
     if (!authed.startsWith('235')) throw new Error(`SMTP 认证失败: ${authed}`);
 
+    // P-smtp-1：MAIL FROM / RCPT TO 直接把管理员配置拼进 SMTP 命令，
+    // 若含 CR/LF 等控制字符可被注入额外命令（SMTP CRLF 注入），发送前清洗。
+    assertSafeSmtpAddress('from', cfg.from);
+    assertSafeSmtpAddress('to', cfg.to);
     await conn.cmd(`MAIL FROM:<${cfg.from}>`);
     await conn.cmd(`RCPT TO:<${cfg.to}>`);
     const dataResp = await conn.cmd('DATA');

@@ -6,8 +6,15 @@
 // 这里生成的是「已填好配置的便携版」，两者逻辑一致，目的都是作为 GitHub Actions 之外的冗余触发源。
 
 function q(v: string): string {
-  // 单引号字符串转义（防注入/语法破坏）
+  // 单引号字符串转义（防注入/语法破坏）—— 供 JS 模板字面量使用，\' 在 JS 里合法
   return String(v).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+// bash 单引号字符串转义：与 q() 不同，bash 单引号内反斜杠是字面量，无法用 \' 转义单引号。
+// 正确做法是 '\''（闭合单引号 + 转义的单引号 + 重新开启单引号）。install.sh 用单引号包裹配置，
+// 必须走 qBash，否则含 ' 的 URL/密钥会破坏脚本（SECRET='a\'b' 在 bash 里会留下多余的字面反斜杠）。
+function qBash(v: string): string {
+  return String(v).replace(/'/g, "'\\''");
 }
 
 export function driverScript(url: string, secret: string, interval: number): string {
@@ -66,8 +73,8 @@ UNIT="cdt-trigger"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET="/opt/\${UNIT}"
 ENV_FILE="/etc/\${UNIT}.env"
-URL='${q(url)}'
-SECRET='${q(secret)}'
+URL='${qBash(url)}'
+SECRET='${qBash(secret)}'
 INTERVAL=${Math.max(30, Math.floor(interval))}
 
 [ "$(id -u)" = "0" ] || { echo "请用 root 执行：sudo bash install.sh"; exit 1; }

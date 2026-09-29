@@ -70,7 +70,7 @@ describe('自建驱动脚本（selfhost）', () => {
 
   it('密钥与间隔被注入脚本，且单引号被转义', () => {
     const install = installScript(URL_, "it's-secret", 300);
-    expect(install).toContain("SECRET='it\\'s-secret'");
+    expect(install).toContain("SECRET='it'\\''s-secret'");
     expect(install).toContain('INTERVAL=300');
     expect(driverScript(URL_, "it's-secret", 300)).toContain("secret: 'it\\'s-secret'");
   });

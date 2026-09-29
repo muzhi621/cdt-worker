@@ -96,6 +96,13 @@ const SCHEMA_STATEMENTS: string[] = [
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS idx_login_ip ON login_attempts(ip, created_at)`,
+  // 跨 isolate 限流计数桶：allowRateD1 用 D1 做第二道跨实例计数闸，
+  // 弥补进程内 rateMap 在 Cloudflare 冷启动后失效的问题。单窗口一行，随窗口过期被下一请求重置覆盖。
+  `CREATE TABLE IF NOT EXISTS rate_buckets (
+    key TEXT PRIMARY KEY,
+    count INTEGER NOT NULL DEFAULT 0,
+    reset_at INTEGER NOT NULL
+  )`,
 
   // ── DDNS 轮换解析 ──
   // 分组（一组机器 + 若干域名记录，同一分组下的域名永远指向同一台值班机器）
