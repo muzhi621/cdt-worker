@@ -28,6 +28,24 @@ export function masked(accessKeyId: string): string {
   return accessKeyId.length <= 7 ? accessKeyId + '***' : accessKeyId.slice(0, 7) + '***';
 }
 
+/**
+ * 日志/告警里标识「这条记录属于哪个账号」的短标签：`备注（或账号名）｜脱敏 AK`。
+ *
+ * 为什么需要：日志里原本只写脱敏 AccessKeyId（如 `LTAI5tE***`），多个账号的前 7 位
+ * 往往相同或极难分辨，于是「保活」「定时」「阈值」等日志在列表里长得一模一样，
+ * 用户无法判断某条记录属于哪个账号——尤其是保活日志，一行一条、按账号混在一起时
+ * 完全无法区分。反过来只写备注也不行：备注是用户自定义的、可能重复或为空，
+ * 且丢失了与阿里云控制台对照的锚点。故两者都给，备注为空时回退账号名，
+ * 再为空才退化为纯脱敏 AK（与历史日志观感一致）。
+ */
+export function accountTag(account: Pick<Account, 'accessKeyId' | 'remark' | 'name'>): string {
+  // 先 trim 再判空：备注为纯空白（'   '）时若不 trim 会被当成有效标签，
+  // 结果是「空白｜LTAIxxx」——既没有区分度，又丢掉了账号名兜底。
+  const label = String(account.remark ?? '').trim() || String(account.name ?? '').trim();
+  const id = masked(account.accessKeyId);
+  return label ? `${label}｜${id}` : id;
+}
+
 // 停机模式解析：账号级设置优先于系统全局设置（等价原项目 resolveShutdownMode）
 export function resolveShutdownMode(account: Account, config: store.Config): string {
   if (account.shutdownMode === 'KeepCharging' || account.shutdownMode === 'StopCharging') {
@@ -206,12 +224,12 @@ export async function processAccount(
     if (trafficResult.status === 'fulfilled') {
       traffic = trafficResult.value;
     } else {
-      await store.addLog(env, 'error', `流量查询失败 [${masked(account.accessKeyId)}]: ${trafficResult.reason}`);
+      await store.addLog(env, 'error', `流量查询失败 [${accountTag(account)}]: ${trafficResult.reason}`);
     }
     if (statusResult.status === 'fulfilled' && statusResult.value) {
       status = statusResult.value;
     } else {
-      await store.addLog(env, 'error', `实例状态查询失败 [${masked(account.accessKeyId)}]: ${statusResult.status === 'rejected' ? statusResult.reason : ''}`);
+      await store.addLog(env, 'error', `实例状态查询失败 [${accountTag(account)}]: ${statusResult.status === 'rejected' ? statusResult.reason : ''}`);
     }
     if (statusChangedBySchedule) {
       if (actions.includes('scheduled_start')) status = StatusStarting;
@@ -268,7 +286,7 @@ export async function processAccount(
           actions.push('threshold_stop');
         } catch (err) {
           await store.deleteActionEvent(env, thresholdKey);
-          await store.addLog(env, 'error', `阈值停机失败 [${masked(account.accessKeyId)}]: ${err}`);
+          await store.addLog(env, 'error', `阈值停机失败 [${accountTag(account)}]: ${err}`);
         }
       }
       const vars = accountVars(account, config, {
@@ -276,7 +294,7 @@ export async function processAccount(
         timezone: config.timezone,
         ...(await peekBillingText()),
       });
-      const event = newEvent('threshold', '流量阈值告警', `账号 ${masked(account.accessKeyId)} 的流量使用率达到 ${percentage.toFixed(2)}%。`, account.id, {
+      const event = newEvent('threshold', '流量阈值告警', `账号 ${accountTag(account)} 的流量使用率达到 ${percentage.toFixed(2)}%。`, account.id, {
         ...vars,
         '当前流量': `${traffic.toFixed(2)} GB`,
         '设定阈值': `${config.trafficThreshold}%`,
@@ -305,7 +323,7 @@ export async function processAccount(
         status = StatusStopping;
         statusChangedBySchedule = true;
         await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
-        await store.addLog(env, 'warning', `定时关机窗口曾被错过，已补偿执行关机 [${masked(account.accessKeyId)}]`);
+        await store.addLog(env, 'warning', `定时关机窗口曾被错过，已补偿执行关机 [${accountTag(account)}]`);
       }
     }
   }
@@ -330,7 +348,7 @@ export async function processAccount(
         status = StatusStarting;
         statusChangedBySchedule = true;
         await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
-        await store.addLog(env, 'warning', `定时开机窗口曾被错过，已补偿执行开机 [${masked(account.accessKeyId)}]`);
+        await store.addLog(env, 'warning', `定时开机窗口曾被错过，已补偿执行开机 [${accountTag(account)}]`);
       }
     }
   }
@@ -373,10 +391,10 @@ export async function processAccount(
             statusChangedBySchedule = true;
             actions.push(wantStart ? 'cycle_start_fixed' : 'cycle_stop_fixed');
             await store.addLog(env, 'warning',
-              `循环相位内状态偏离已修正 [${masked(account.accessKeyId)}]：本相位目标为${wantStart ? '开机' : '关机'}，补发${wantStart ? '开机' : '关机'}指令（相位起始 ${cycle.boundaryDate}，每 ${account.cycleDays || 10} 天交替）`);
+              `循环相位内状态偏离已修正 [${accountTag(account)}]：本相位目标为${wantStart ? '开机' : '关机'}，补发${wantStart ? '开机' : '关机'}指令（相位起始 ${cycle.boundaryDate}，每 ${account.cycleDays || 10} 天交替）`);
           } catch (err) {
             await store.deleteActionEvent(env, fixKey); // 失败删键，下一轮可再试
-            await store.addLog(env, 'error', `循环相位修正失败 [${masked(account.accessKeyId)}]: ${err}`);
+            await store.addLog(env, 'error', `循环相位修正失败 [${accountTag(account)}]: ${err}`);
           }
         }
       }
@@ -397,7 +415,7 @@ export async function processAccount(
         `anchor=${account.cycleAnchor || ''} days=${account.cycleDays}`);
       if (fresh) {
         await store.addLog(env, 'warning',
-          `账号「${account.remark || account.name || masked(account.accessKeyId)}」已启用 N 天循环开关机，但基准时间或周期天数无效，循环不会执行，请到账号配置里修正`);
+          `账号「${accountTag(account)}」已启用 N 天循环开关机，但基准时间或周期天数无效，循环不会执行，请到账号配置里修正`);
       }
     }
   }
@@ -429,7 +447,7 @@ export async function processAccount(
       const skipKey = `keepalive-skip:${account.id}:${localFields.year}${String(localFields.month).padStart(2, '0')}${String(localFields.day).padStart(2, '0')}${String(localFields.hour).padStart(2, '0')}`;
       const skipFresh = await store.recordActionEvent(env, skipKey, account.id, 'keepalive', 'skipped', blockedReason);
       if (skipFresh) {
-        await store.addLog(env, 'keepalive', `实例已停止但保活未执行 [${masked(account.accessKeyId)}]：${blockedReason}`);
+        await store.addLog(env, 'keepalive', `实例已停止但保活未执行 [${accountTag(account)}]：${blockedReason}`);
       }
     }
   }
@@ -442,7 +460,7 @@ export async function processAccount(
         status = StatusStarting;
         await store.updateRuntime(env, account.id, traffic, status, new Date().toISOString());
         actions.push('keepalive_start');
-        await store.addLog(env, 'keepalive', `实例保活启动 [${masked(account.accessKeyId)}]：检测到实例在允许运行时段意外停止，已发送启动指令。`);
+        await store.addLog(env, 'keepalive', `实例保活启动 [${accountTag(account)}]：检测到实例在允许运行时段意外停止，已发送启动指令。`);
         const event = newEvent('keepalive', '实例保活启动', '检测到实例在允许运行时段意外停止，已发送启动指令。', account.id, {
           ...accountVars(account, config, {
             traffic, status, percentage, now,
@@ -452,7 +470,7 @@ export async function processAccount(
         await store.addOutbox(env, 'notify', event);
       } catch (err) {
         await store.deleteActionEvent(env, key);
-        await store.addLog(env, 'error', `保活启动失败 [${masked(account.accessKeyId)}]: ${err}`);
+        await store.addLog(env, 'error', `保活启动失败 [${accountTag(account)}]: ${err}`);
       }
     }
   }
@@ -488,7 +506,7 @@ export async function processAccount(
           const balance = await aliyun.getAccountBalance(account, account.accessKeySecret);
           await store.setBillingCache(env, account.id, 'balance', '', balance);
         } catch (err) {
-          await store.addLog(env, 'error', `余额查询失败 [${masked(account.accessKeyId)}]: ${err}`);
+          await store.addLog(env, 'error', `余额查询失败 [${accountTag(account)}]: ${err}`);
         }
         try {
           // 先按实例查；无数据时回退到账号级（当月账单延迟出账、或包年包月实例无账单时）
@@ -503,9 +521,9 @@ export async function processAccount(
           }
           await store.setBillingCache(env, account.id, 'instance_bill', cycle, bill);
           await store.addLog(env, 'info',
-            `账单已刷新 [${masked(account.accessKeyId)}] ${cycle} ${scope}账单 ¥${bill.totalCost}（${bill.itemCount ?? 0} 条）`);
+            `账单已刷新 [${accountTag(account)}] ${cycle} ${scope}账单 ¥${bill.totalCost}（${bill.itemCount ?? 0} 条）`);
         } catch (err) {
-          await store.addLog(env, 'error', `账单查询失败 [${masked(account.accessKeyId)}]: ${err}`);
+          await store.addLog(env, 'error', `账单查询失败 [${accountTag(account)}]: ${err}`);
         }
       }
       // 无论刷新成功与否都推进下次时刻：失败时按 TTL 退避，避免持续故障下每轮都打阿里云
@@ -513,7 +531,7 @@ export async function processAccount(
     }
   }
 
-  let message = `[${masked(account.accessKeyId)}] 流量 ${traffic.toFixed(2)}GB / ${account.maxTraffic.toFixed(2)}GB (${percentage.toFixed(2)}%) · 状态 ${status}`;
+  let message = `[${accountTag(account)}] 流量 ${traffic.toFixed(2)}GB / ${account.maxTraffic.toFixed(2)}GB (${percentage.toFixed(2)}%) · 状态 ${status}`;
   if (actions.length > 0) message += ' · 动作 ' + actions.join(',');
 
   // 状态变化通知：当实例到达稳定状态 Running/Stopped 时触发。
@@ -530,7 +548,7 @@ export async function processAccount(
     !hasActionNotification;
   if (stableChanged && config.enableStatusChangeNotify) {
     const title = status === StatusRunning ? '实例已启动' : '实例已停止';
-    const summary = `账号 ${masked(account.accessKeyId)} 的实例状态变为 ${status}。`;
+    const summary = `账号 ${accountTag(account)} 的实例状态变为 ${status}。`;
     const event = newEvent('status', title, summary, account.id, {
       ...accountVars(account, config, {
         traffic, status, percentage, now,
@@ -545,7 +563,7 @@ export async function processAccount(
 
   // 状态变化在「告警」标签也留一条，避免用户只在 heartbeat（监控标签）里找。
   if (statusChanged && (status === StatusRunning || status === StatusStopped)) {
-    await store.addLog(env, 'warning', `实例状态变化 [${masked(account.accessKeyId)}]: ${previousStatus || 'Unknown'} → ${status}`);
+    await store.addLog(env, 'warning', `实例状态变化 [${accountTag(account)}]: ${previousStatus || 'Unknown'} → ${status}`);
   }
 
   // heartbeat：这里只记「本轮真的做了事」的情况，避免 5 账号 × 288 轮 ≈ 1440 条/天的重复噪声。
@@ -593,12 +611,12 @@ async function executeScheduledAction(
     await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
   } catch (err) {
     await store.deleteActionEvent(env, key);
-    await store.addLog(env, 'error', `定时${action === 'start' ? '开机' : '关机'}失败 [${masked(account.accessKeyId)}]: ${err}`);
+    await store.addLog(env, 'error', `定时${action === 'start' ? '开机' : '关机'}失败 [${accountTag(account)}]: ${err}`);
     return false;
   }
   const status = action === 'start' ? StatusStarting : StatusStopping;
   await store.updateRuntime(env, account.id, account.trafficUsed, status, new Date().toISOString());
-  await store.addLog(env, 'info', `执行定时${action === 'start' ? '开机' : '关机'} [${masked(account.accessKeyId)}]`);
+  await store.addLog(env, 'info', `执行定时${action === 'start' ? '开机' : '关机'} [${accountTag(account)}]`);
   if (config.enableScheduleMail) {
     const event = newEvent('schedule', '定时任务已执行', `实例定时${action === 'start' ? '开机' : '关机'}指令已发送。`, account.id, {
       ...accountVars(account, config, {
@@ -631,13 +649,13 @@ async function executeCycleAction(
     await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
   } catch (err) {
     await store.deleteActionEvent(env, key); // 失败删键，下一轮重试
-    await store.addLog(env, 'error', `循环${action === 'start' ? '开机' : '关机'}失败 [${masked(account.accessKeyId)}]: ${err}`);
+    await store.addLog(env, 'error', `循环${action === 'start' ? '开机' : '关机'}失败 [${accountTag(account)}]: ${err}`);
     return 'failed';
   }
   const status = action === 'start' ? StatusStarting : StatusStopping;
   await store.updateRuntime(env, account.id, account.trafficUsed, status, new Date().toISOString());
   await store.addLog(env, 'info',
-    `执行循环${action === 'start' ? '开机' : '关机'} [${masked(account.accessKeyId)}]：周期每 ${account.cycleDays || 10} 天交替，相位起始 ${phase.boundaryDate}，第 ${phase.phaseDay} 天`);
+    `执行循环${action === 'start' ? '开机' : '关机'} [${accountTag(account)}]：周期每 ${account.cycleDays || 10} 天交替，相位起始 ${phase.boundaryDate}，第 ${phase.phaseDay} 天`);
   if (config.enableScheduleMail) {
     const event = newEvent('schedule', '循环开关机已执行', `实例按「基准时间 + N 天循环」${action === 'start' ? '开机' : '关机'}指令已发送。`, account.id, {
       ...accountVars(account, config, {
@@ -677,14 +695,14 @@ export async function control(
   await aliyun.controlInstance(account, account.accessKeySecret, action, resolveShutdownMode(account, config));
   const status = action === 'start' ? StatusStarting : StatusStopping;
   await store.updateRuntime(env, account.id, account.trafficUsed, status, new Date().toISOString());
-  const message = `${source}控制实例 [${masked(account.accessKeyId)}]：${action}`;
+  const message = `${source}控制实例 [${accountTag(account)}]：${action}`;
   await store.addLog(env, 'audit', message);
 
   // 手动控制通知：用户在前台或 API 触发开关机后，立即收到一条确认通知。
   // 复用 enableStatusChangeNotify 开关；未开启时仅保留 audit 日志。
   if (config.enableStatusChangeNotify) {
     const title = action === 'start' ? '手动开机已执行' : '手动关机已执行';
-    const summary = `账号 ${masked(account.accessKeyId)} 的${source}控制指令已发送：${action === 'start' ? '开机' : '关机'}。`;
+    const summary = `账号 ${accountTag(account)} 的${source}控制指令已发送：${action === 'start' ? '开机' : '关机'}。`;
     const event = newEvent('manual_control', title, summary, account.id, {
       ...accountVars(account, config, {
         traffic: account.trafficUsed,

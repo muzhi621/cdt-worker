@@ -4,7 +4,6 @@
 
 import * as store from '../store/store';
 import * as engine from '../engine/engine';
-import { masked } from '../engine/engine';
 import { hashPassword, verifyPassword, constantTimeEqual, envPassword, newToken, tokenHash, type Env } from '../security/security';
 import { deliverEvent } from '../notify/service';
 import { driverScript, installScript, uninstallScript } from '../engine/selfhost';
@@ -1382,8 +1381,9 @@ export async function runMonitorCycle(
     for (let j = 0; j < settled.length; j++) {
       const s = settled[j];
       if (s.status === 'fulfilled') results.push(s.value);
-      // accessKeyId 是完整 AK，不能进日志；有 remark 时优先用备注，否则只记脱敏后的 AK
-      else await store.addLog(env, 'error', `监控账号失败 [${batch[j].remark || masked(batch[j].accessKeyId)}]: ${s.reason}`);
+      // 用「备注｜脱敏 AK」标识账号：accessKeyId 是完整 AK，绝不能进日志；
+      // 仅写脱敏 AK 时多账号无法区分（见 engine.accountTag 注释）
+      else await store.addLog(env, 'error', `监控账号失败 [${engine.accountTag(batch[j])}]: ${s.reason}`);
     }
   }
   // 槽位已在进入时原子抢占（tryAcquireMonitorSlot），无需再写 last_monitor_run
