@@ -435,16 +435,24 @@ export async function processAccount(
   // 保活可观测性：实例确已停止却没能启动，说明存在阻断因素，必须留痕。
   // 此前只有「保活启动成功」会写日志，而自定义变量恰恰想知道的是「为什么这次没保活」，
   // 结果整个跳过路径完全黑盒（定时时段外/阈值超限/与定时策略冲突都无声无息）。
-  // 按小时去抖（keepalive-skip:{id}:{YYYYMMDDHH}）：阻断是持续态，若按分钟去重，
-  // 一个持续停止的实例每分钟写一行业务日志，5 账号一天就是上万行，日志页会被冲垮。
-  // 去抖后约 120 行/天，既看得见又不浪费 D1 写入额度。
+  //
+  // 去抖粒度 = 「监控触发时效」（config.monitorInterval）：保活本就随每轮监控检查一次，
+  // 日志也必须同频——间隔 5 分钟 → 每 5 分钟一条；间隔 60 分钟 → 每小时一条。
+  // 旧实现硬编码按小时去抖（keepalive-skip:{id}:{YYYYMMDDHH}），监控明明 5 分钟一轮，
+  // 日志却 60 分钟才落一行，看起来像「保活是小时级、没跟着监控走」（用户报障）。
+  // 直接按分钟去重又会把持续停止的实例刷成上万行/天，故取监控间隔：
+  // 既与触发时效严格同步，写入量又天然被监控节流兜住（间隔越小跑得越勤，日志也才越密）。
   if (keepAliveOn && status === StatusStopped) {
     const blockedReason = overThreshold ? `流量已达阈值（${percentage.toFixed(2)}%），跳过保活`
       : statusChangedBySchedule ? '本轮状态由定时策略变更，跳过保活避免冲突'
         : !keepAliveWindowOk ? '当前不在实例定时规则允许的运行时段，跳过保活'
           : ''; // 空串代表所有前置条件都满足（仅剩去抖键占用），属正常节流，不打扰
     if (blockedReason) {
-      const skipKey = `keepalive-skip:${account.id}:${localFields.year}${String(localFields.month).padStart(2, '0')}${String(localFields.day).padStart(2, '0')}${String(localFields.hour).padStart(2, '0')}`;
+      // 与监控触发时效同频分桶：把毫秒时间戳对齐到 monitorInterval 分钟一个格子。
+      // 同一格内（即同一轮监控窗口）最多留一条，跨格即可再次留痕。
+      const skipBucketMs = Math.max(1, config.monitorInterval) * 60_000;
+      const skipBucket = Math.floor(now.getTime() / skipBucketMs);
+      const skipKey = `keepalive-skip:${account.id}:${skipBucket}`;
       const skipFresh = await store.recordActionEvent(env, skipKey, account.id, 'keepalive', 'skipped', blockedReason);
       if (skipFresh) {
         await store.addLog(env, 'keepalive', `实例已停止但保活未执行 [${accountTag(account)}]：${blockedReason}`);
