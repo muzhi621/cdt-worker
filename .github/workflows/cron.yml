@@ -9,6 +9,13 @@
 # 但请求不带密钥，Worker 端会以管理员会话/密钥校验，匿名请求将得到 401。
 # 注意：GitHub 的 schedule 使用 UTC 时间且可能延迟数分钟（高峰期更明显），
 # Worker 侧已放宽定时开关机的命中窗口以容忍延迟。
+#
+# ⚠️ 重要（曾经的坑）：GitHub Actions 里每个 `run:` 是【独立 step、独立 shell】，
+# 前一个 step 里 `exit 0` 只是「本步成功结束」，**不会阻止后面的 step 执行**。
+# 早期版本用 `exit 0` 表示「渠道已关闭则跳过」，结果 gate 形同虚设：渠道明明关了，
+# 下一步仍每 5 分钟调用一次 /__cron?source=github（用错密钥时就被 401 拒绝并留痕，
+# 排障时表现为「开关关了却一直有 401 日志」）。所以 gate 结论必须经 outputs 传给
+# 下一步，由下一步用 `if:` 真正跳过。改动本文件时请勿把 `if:` 去掉。
 name: cdt-monitor-trigger
 
 on:
@@ -25,23 +32,35 @@ jobs:
   trigger:
     runs-on: ubuntu-latest
     steps:
-      - name: 查询渠道开关（已关闭则跳过，节省 Actions 时长）
+      - name: 查询渠道开关（未开启则跳过，节省 Actions 时长）
+        id: gate
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
+          # 结论通过 $GITHUB_OUTPUT 传给下一步；只写 exit 0 不会跳过后续 step
           if [ -z "$CRON_SECRET" ]; then
-            echo "::warning::未配置 CRON_SECRET secret，无法查询开关，将直接触发（匿名请求会被 401 拒绝）"
+            echo "::warning::未配置 CRON_SECRET secret，无法查询渠道开关，按「未开启」处理并跳过"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          status=$(curl -sS -m 20 -H "X-Cron-Secret: $CRON_SECRET" \
-            "https://cdt.dddde.de/api/v1/system/trigger-status" || echo "")
-          enabled=$(printf '%s' "$status" | tr -d ' ' | grep -o '"github":true' | head -1)
-          if [ -z "$enabled" ]; then
-            echo "渠道 GitHub Actions 在 Worker 侧为关闭状态，本次跳过（管理台 → 设置 → 监控触发源 可开启）"
-            exit 0
+          resp=$(curl -sS -m 20 -w '\nHTTP_CODE:%{http_code}' \
+            -H "X-Cron-Secret: $CRON_SECRET" \
+            "https://cdt.dddde.de/api/v1/system/trigger-status" 2>/dev/null || echo "")
+          code=$(printf '%s' "$resp" | sed -n 's/.*HTTP_CODE:\([0-9]\{3\}\).*/\1/p' | tail -1)
+          body=$(printf '%s' "$resp" | sed '$d')
+          if [ "$code" = "401" ]; then
+            echo "::warning::trigger-status 返回 401：GitHub 侧 CRON_SECRET 与 Worker 当前触发密钥不一致（改过密钥后本渠道需手动同步），请在 仓库 Settings → Secrets and variables → Actions 更新 CRON_SECRET"
           fi
-          echo "渠道已开启，继续触发"
+          if printf '%s' "$body" | tr -d ' \n' | grep -q '"github":true'; then
+            echo "渠道已开启，继续触发"
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "渠道 GitHub Actions 在 Worker 侧为未开启状态（或密钥不匹配，HTTP $code），本次跳过（管理台 → 设置 → 监控触发源 可开启）"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Trigger monitor
+        # 关键：没有这行 if，上面的 gate 就是摆设（渠道关了也照调）。不要删。
+        if: steps.gate.outputs.enabled == 'true'
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
