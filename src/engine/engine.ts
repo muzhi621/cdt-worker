@@ -7,7 +7,7 @@ import * as aliyun from '../provider/aliyun';
 import * as store from '../store/store';
 import { deliverEvent, hasActiveChannel, type NotificationEvent, type NotifyConfig } from '../notify/service';
 import { newToken, type Env } from '../security/security';
-import { cyclePhase, dueWithin, inTimeRange, localCycle, toZone, windowOver, zoneFields, type CyclePhase } from './time';
+import { cyclePhase, dueWithin, intervalBucket, inTimeRange, localCycle, toZone, windowOver, zoneFields, type CyclePhase } from './time';
 
 // 状态常量（与原 Go 项目一致）
 const StatusStarting = 'Starting';
@@ -440,8 +440,7 @@ export async function processAccount(
   // 日志也必须同频——间隔 5 分钟 → 每 5 分钟一条；间隔 60 分钟 → 每小时一条。
   // 旧实现硬编码按小时去抖（keepalive-skip:{id}:{YYYYMMDDHH}），监控明明 5 分钟一轮，
   // 日志却 60 分钟才落一行，看起来像「保活是小时级、没跟着监控走」（用户报障）。
-  // 直接按分钟去重又会把持续停止的实例刷成上万行/天，故取监控间隔：
-  // 既与触发时效严格同步，写入量又天然被监控节流兜住（间隔越小跑得越勤，日志也才越密）。
+  // 直接按分钟去重又会把持续停止的实例刷成上万行/天，故取监控间隔（intervalBucket）。
   if (keepAliveOn && status === StatusStopped) {
     const blockedReason = overThreshold ? `流量已达阈值（${percentage.toFixed(2)}%），跳过保活`
       : statusChangedBySchedule ? '本轮状态由定时策略变更，跳过保活避免冲突'
@@ -450,8 +449,7 @@ export async function processAccount(
     if (blockedReason) {
       // 与监控触发时效同频分桶：把毫秒时间戳对齐到 monitorInterval 分钟一个格子。
       // 同一格内（即同一轮监控窗口）最多留一条，跨格即可再次留痕。
-      const skipBucketMs = Math.max(1, config.monitorInterval) * 60_000;
-      const skipBucket = Math.floor(now.getTime() / skipBucketMs);
+      const skipBucket = intervalBucket(now.getTime(), config.monitorInterval);
       const skipKey = `keepalive-skip:${account.id}:${skipBucket}`;
       const skipFresh = await store.recordActionEvent(env, skipKey, account.id, 'keepalive', 'skipped', blockedReason);
       if (skipFresh) {

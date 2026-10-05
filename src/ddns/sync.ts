@@ -10,6 +10,7 @@ import * as store from './store';
 // 写日志要用根目录的 src/store/store.ts。显式命名为 rootStore，避免两个 store 混淆。
 import * as rootStore from '../store/store';
 import { pickActiveMachine, previewRotate, type DdnsMachine, type PickResult } from './scheduler';
+import { intervalBucket } from '../engine/time';
 import { getProvider } from './providers';
 import { fullDomain } from './providers/types';
 
@@ -20,6 +21,12 @@ export interface SyncOptions {
   groupId?: number;
   /** 是否手动触发（仅用于日志文案区分） */
   manual?: boolean;
+  /**
+   * 当前监控间隔（分钟）。仅用于「例行态告警」的去重粒度（见 intervalBucket）：
+   * 日志频率必须等于监控触发时效，否则界面会误判功能故障。
+   * 监控周期调用方传 config.monitorInterval；未传（外部直调）时退化为 1 分钟桶。
+   */
+  intervalMinutes?: number;
 }
 
 export interface SyncOutcome {
@@ -129,7 +136,21 @@ export async function runDdnsSync(env: Env, opts: SyncOptions = {}): Promise<Syn
         why = `${picked.reason}，已回落到兜底 IP ${targetIp}`;
       } else {
         out.skipped++;
-        await addDdnsLog(env, 'warning', `分组「${group.name}」当前无值班机器且未配置兜底 IP，保持原解析不变（${picked.reason}）`).catch(() => {});
+        // 「无值班机器」是**例行且持续**的状态（window 模式的夜间空档、或还没配机器），
+        // 判定每轮都会命中。旧实现没有任何去重 → 间隔 5 分钟时 288 行/天，
+        // 「DNS 轮换」标签页会被同一句话冲垮（与保活跳过是同一类问题，方向相反）。
+        // 去重粒度取监控间隔：间隔 5 分钟 → 每 5 分钟一条；间隔 60 分钟 → 每小时一条，
+        // 与保活跳过、触发源提醒共用同一套「日志频率 = 判定频率」的约定。
+        const bucket = intervalBucket(Date.now(), opts.intervalMinutes ?? 0);
+        const noDutyKey = `ddns-noonduty:${group.id}:${bucket}`;
+        let fresh = true;
+        try {
+          spent++; // recordActionEvent = 1 次 D1 写
+          fresh = await rootStore.recordActionEvent(env, noDutyKey, 0, 'ddns', 'skipped', picked.reason);
+        } catch { /* 去重失败（如首次部署建表未完成）时仍然留痕，绝不无声失效 */ }
+        if (fresh) {
+          await addDdnsLog(env, 'warning', `分组「${group.name}」当前无值班机器且未配置兜底 IP，保持原解析不变（${picked.reason}）`).catch(() => {});
+        }
         continue;
       }
     }

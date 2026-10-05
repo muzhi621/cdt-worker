@@ -267,7 +267,14 @@ async function login(ctx: Context): Promise<Response> {
   // 第二道：D1 计数（跨 isolate 生效，Cloudflare 会调度到多个实例，内存计数会失效）
   const failures = await recentLoginFailures(ctx.env, ip);
   if (failures >= LOGIN_MAX_FAILURES) {
-    await store.addLog(ctx.env, 'warning', `登录尝试过多已拦截 [IP: ${ip}]（15 分钟内失败 ${failures} 次）`);
+    // 去重：这条日志落在**公开且可被攻击者无限触发**的路径上——一旦失败次数越线，
+    // 之后每个请求都会走这个分支。不加去重就是「请求数 = 日志行数」，
+    // 攻击者（或脚本反复重试）能直接把 D1 日志表刷爆、让日志页彻底失效。
+    // 每个 IP 每小时最多一条：次数在日志里看得到，量又被死死摁住。
+    const blockKey = 'login_blocked:' + ip + ':' + new Date().toISOString().slice(0, 13);
+    if (await store.recordActionEvent(ctx.env, blockKey, 0, 'login', 'blocked', String(failures))) {
+      await store.addLog(ctx.env, 'warning', `登录尝试过多已拦截 [IP: ${ip}]（15 分钟内失败 ${failures} 次）`);
+    }
     return error('rate_limited', '登录尝试过多，请 15 分钟后再试', 429);
   }
   const body = await ctx.request.json().catch(() => null);
@@ -1423,7 +1430,7 @@ export async function runMonitorCycle(
   // 按天轮换的分组一天最多真正写一次，window 模式也只会在跨时段时写。
   // 整段包 try/catch：DDNS 出错绝不能影响监控主流程的返回值与上面的周期日志。
   try {
-    const ddns = await runDdnsSync(env);
+    const ddns = await runDdnsSync(env, { intervalMinutes: config.monitorInterval });
     // 只在「有切换或有失败」时写汇总，避免每 5 分钟一条无意义日志灌满日志页
     if (ddns.changed > 0 || ddns.failed > 0) {
       await store.addLog(env, ddns.failed > 0 ? 'warning' : 'info',
@@ -1809,10 +1816,14 @@ async function ddnsSyncHandler(ctx: Context): Promise<Response> {
   }
   const b = await ddnsBody(ctx);
   const groupId = b.groupId ? Number(b.groupId) : undefined;
+  // 例行态告警（无值班机器）的去重粒度 = 监控间隔，手动同步也保持同一套语义，
+  // 故这里补读一次监控间隔（1 次 D1 读，仅发生在用户点「立即同步」时）。
+  const monitorState = await store.getMonitorState(ctx.env).catch(() => null);
   const out = await runDdnsSync(ctx.env, {
     force: b.force === true,
     groupId: Number.isFinite(groupId) && groupId ? groupId : undefined,
     manual: true,
+    ...(monitorState ? { intervalMinutes: monitorState.intervalMinutes } : {}),
   });
   await store.addLog(ctx.env, out.failed > 0 ? 'warning' : 'info',
     `手动触发 DDNS 同步：切换 ${out.changed} 条，失败 ${out.failed} 条，跳过 ${out.skipped} 条`);

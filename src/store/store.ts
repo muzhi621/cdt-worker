@@ -55,10 +55,21 @@ export async function decryptNotifyConfig(env: Env, cfg: Record<string, unknown>
       o[field] = await decrypt(env, v);
     } catch {
       o[field] = '';
-      // 留痕但不抛出：解密失败是异常情况，宁可在日志页吵一点，也不要无声失效
-      void addLog(env, 'error',
-        `通知凭据解密失败，该通道将发送失败：${chan}.${field}（检查 CDT_MASTER_KEY 是否变更）`)
-        .catch(() => {});
+      // 留痕但不抛出：解密失败是异常情况，宁可吵一点，也不要无声失效。
+      // 但**必须去重**：本函数由 getConfig 调用，而 getConfig 每轮监控、每次接口调用都会走一遍，
+      // 不去重就是「请求数 = 日志行数」——主密钥一改，管理台 10 秒轮询即 6 行/分钟，
+      // 一天上万行，日志页直接报废（与 DDNS 无值班机器、登录拦截同一类问题）。
+      // 每个字段每天一条：故障依然看得见（不是静默），量却被摁住。
+      // 去重本身失败（如首次部署建表未完成）时退化为每次都记，绝不因去重而丢日志。
+      const dedupeKey = `notify-decrypt-fail:${chan}.${field}:${new Date().toISOString().slice(0, 10)}`;
+      void (async () => {
+        try {
+          if (!(await recordActionEvent(env, dedupeKey, 0, 'notify', 'decrypt_failed', chan))) return;
+        } catch { /* 去重失败 → 继续写日志 */ }
+        await addLog(env, 'error',
+          `通知凭据解密失败，该通道将发送失败：${chan}.${field}（检查 CDT_MASTER_KEY 是否变更）`)
+          .catch(() => {});
+      })();
     }
   }
   return cfg;
