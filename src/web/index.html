@@ -823,7 +823,23 @@
     }
     .log-pager button:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
     .log-pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .log-pager button.active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
     .log-pager .pg-info { font-size: 12.5px; color: var(--muted); }
+    .log-pager .pg-gap { color: var(--muted); padding: 0 2px; user-select: none; }
+    .log-pager .pg-jump { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+    .log-pager .pg-input {
+      width: 58px; min-height: 32px; padding: 0 8px; text-align: center;
+      border: 1px solid var(--border); border-radius: var(--r-sm);
+      background: var(--surface-2); color: var(--text); font-size: 13px;
+      -moz-appearance: textfield;
+    }
+    .log-pager .pg-input::-webkit-outer-spin-button,
+    .log-pager .pg-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .log-pager .pg-jump button {
+      min-height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--r-sm);
+      background: var(--surface-2); color: var(--text-2); font-size: 13px; cursor: pointer;
+    }
+    .log-pager .pg-jump button:hover { background: var(--surface-3); color: var(--text); }
 
     .toast-host {
       position: fixed; z-index: 60; left: 50%; transform: translateX(-50%);
@@ -3880,14 +3896,67 @@
         ).join("");
       }
 
+      // 生成带省略号的页码窗口（始终含首页/尾页、当前页 ±2）
+      function pageWindow(cur, total) {
+        if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+        const set = new Set([1, total, cur, cur - 1, cur + 1, cur - 2, cur + 2]);
+        const sorted = [...set].filter((n) => n >= 1 && n <= total).sort((a, b) => a - b);
+        const out = [];
+        let prev = 0;
+        for (const n of sorted) {
+          if (prev && n - prev > 1) out.push("...");
+          out.push(n);
+          prev = n;
+        }
+        return out;
+      }
+
       function renderPager(total, page, totalPages) {
         const pager = $("log-pager");
         if (totalPages <= 1) { pager.innerHTML = ""; return; }
-        const prev = '<button type="button" data-pg="' + (page - 1) + '"' + (page <= 1 ? " disabled" : "") + ">上一页</button>";
-        const next = '<button type="button" data-pg="' + (page + 1) + '"' + (page >= totalPages ? " disabled" : "") + ">下一页</button>";
-        pager.innerHTML = prev + '<span class="pg-info">第 ' + page + ' / ' + totalPages + ' 页</span>' + next;
+        const go = (pg) => {
+          pg = Math.min(totalPages, Math.max(1, pg | 0));
+          if (pg === page) return;
+          logPage = pg;
+          loadLogs();
+        };
+        const mkBtn = (label, pg, opts) => {
+          opts = opts || {};
+          const dis = opts.disabled ? " disabled" : "";
+          const cls = opts.active ? ' class="active"' : "";
+          return '<button type="button" data-pg="' + pg + '"' + dis + cls + ">" + label + "</button>";
+        };
+
+        let html = "";
+        html += mkBtn("首页", 1, { disabled: page <= 1 });
+        html += mkBtn("上一页", page - 1, { disabled: page <= 1 });
+
+        pageWindow(page, totalPages).forEach((it) => {
+          if (it === "...") html += '<span class="pg-gap">…</span>';
+          else html += mkBtn(String(it), it, { active: it === page });
+        });
+
+        html += mkBtn("下一页", page + 1, { disabled: page >= totalPages });
+        html += mkBtn("尾页", totalPages, { disabled: page >= totalPages });
+        html += '<span class="pg-jump">跳至 <input type="number" min="1" max="' + totalPages +
+          '" class="pg-input" id="log-pg-input" value="' + page + '" /> 页' +
+          '<button type="button" id="log-pg-go">跳转</button></span>';
+
+        pager.innerHTML = html;
+
         pager.querySelectorAll("button[data-pg]").forEach((b) => {
-          b.addEventListener("click", () => { logPage = parseInt(b.dataset.pg, 10); loadLogs(); });
+          if (b.disabled) return;
+          b.addEventListener("click", () => go(parseInt(b.dataset.pg, 10)));
+        });
+        const input = $("log-pg-input");
+        const doJump = () => { const v = parseInt(input.value, 10); if (Number.isFinite(v)) go(v); };
+        $("log-pg-go").addEventListener("click", doJump);
+        input.addEventListener("keydown", (e) => { if (e.key === "Enter") doJump(); });
+        // 失焦时把输入值夹到合法范围（不触发跳转，仅防止越界）
+        input.addEventListener("change", () => {
+          let v = parseInt(input.value, 10);
+          if (!Number.isFinite(v)) v = 1;
+          input.value = String(Math.min(totalPages, Math.max(1, v)));
         });
       }
 
@@ -3945,7 +4014,7 @@
        * 每次改动前端后手动更新此值。作用：部署后强刷页面（Ctrl+F5）时看页脚即可
        * 确认浏览器加载的是哪个构建，用于区分「线上已更新但浏览器缓存了旧 JS」——
        * 这是「保存无效 / 新功能不见」类问题的第一排查步骤。 */
-      const APP_BUILD = "20260929-2330";
+      const APP_BUILD = "20261006-2017";
       try {
         const el = document.createElement("div");
         el.style.cssText = "text-align:center;color:var(--muted);font-size:11px;padding:12px 0;opacity:.7";
